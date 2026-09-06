@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:* ws:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; frame-src 'self' https: http: data:"
+  />
+  <title>AI Developer Agent</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <meta name="theme-color" content="#0b0f1a" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="8" width="16" height="11" rx="4" />
+            <path d="M12 8V5" />
+            <circle cx="12" cy="4" r="1" />
+            <circle cx="9" cy="13" r="1.1" fill="currentColor" stroke="none" />
+            <circle cx="15" cy="13" r="1.1" fill="currentColor" stroke="none" />
+            <path d="M9 16.5h6" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-name">AI Developer Agent</div>
+          <div class="brand-sub">Рабочее пространство</div>
+        </div>
+      </div>
+
+      <button id="btn-new-chat" class="btn btn-primary btn-block">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+        <span>Новый чат</span>
+      </button>
+
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
+        <input id="chat-search" placeholder="Поиск по чатам..." spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+      </div>
+
+      <div id="chat-list" class="chat-list"></div>
+
+      <button id="btn-settings" class="btn btn-ghost btn-block">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+        <span>Настройки</span>
+      </button>
+    </aside>
+
+    <main id="main">
+      <header id="chat-header">
+        <div id="chat-title">Новый чат</div>
+        <div class="header-btns">
+          <button id="btn-mobile-menu" class="btn btn-ghost icon-btn" title="Меню (чаты)">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
+          </button>
+          <button id="model-badge" class="badge" title="Провайдер и модель — нажми, чтобы изменить">—</button>
+          <button id="btn-toggle-console" class="btn btn-ghost icon-btn" title="Консоль — логи сервера и команды (как в Replit)">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6" /><path d="M12 19h8" /></svg>
+          </button>
+          <button id="btn-toggle-preview" class="btn btn-ghost icon-btn" title="Превью — открыть сайт проекта, мобильный вид, новая вкладка">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+          </button>
+          <button id="btn-copy-chat" class="btn btn-ghost icon-btn" title="Скопировать весь чат в буфер обмена (markdown)">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+          </button>
+          <button id="btn-toggle-panel" class="btn btn-ghost icon-btn" title="Панель проекта: файлы, коммиты, откат изменений">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+          </button>
+        </div>
+        <div id="model-popup" class="model-popup hidden">
+          <div class="mp-head"><span id="mp-title">Модель</span><button id="mp-close" class="btn btn-ghost btn-small">✕</button></div>
+          <div id="mp-list" class="mp-list"></div>
+          <div class="mp-foot">
+            <button id="mp-refresh" class="btn btn-ghost btn-small">↻ Обновить</button>
+            <button id="mp-settings" class="btn btn-ghost btn-small">⚙️ Настройки</button>
+          </div>
+        </div>
+      </header>
+
+      <div id="messages">
+        <button id="btn-scroll-bottom" class="scroll-bottom hidden" title="Вниз (новые сообщения)">↓</button>
+      </div>
+
+      <div id="welcome" class="welcome hidden">
+        <div class="welcome-logo">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="8" width="16" height="11" rx="4" />
+            <path d="M12 8V5" />
+            <circle cx="12" cy="4" r="1" />
+            <circle cx="9" cy="13" r="1.1" fill="currentColor" stroke="none" />
+            <circle cx="15" cy="13" r="1.1" fill="currentColor" stroke="none" />
+            <path d="M9 16.5h6" />
+          </svg>
+        </div>
+        <h1>Привет! Чем займёмся?</h1>
+        <p class="welcome-sub">Скажи агенту, что сделать — он создаст файлы, поработает с git и поможет с кодом.</p>
+        <div id="model-needed" class="model-needed hidden">
+          <span>⚠️ Быстрые команды работают после выбора модели.</span>
+          <button id="btn-model-needed" type="button" class="btn btn-primary btn-small">Выбрать модель</button>
+        </div>
+        <div class="welcome-chips">
+          <div class="launch-grid">
+            <button class="chip action launch" data-prompt="Создай современный сайт с нуля: придумай концепцию, спроектируй структуру и дизайн, реализуй страницы со стилями и интерактивом, проверь, что всё работает.">
+              <span class="launch-em">🌐</span>
+              <span class="launch-txt"><b>Создать сайт</b><small>Лендинг, визитка, презентация проекта</small></span>
+            </button>
+            <button class="chip action launch" data-prompt="Создай полноценное приложение: спроектируй архитектуру и стек, реализуй интерфейс и логику, продумай данные и состояния, добавь README и проверь запуск.">
+              <span class="launch-em">⚡</span>
+              <span class="launch-txt"><b>Создать приложение</b><small>Веб-продукт с интерфейсом и логикой</small></span>
+            </button>
+            <button class="chip action launch" data-prompt="Создай Telegram-бота: спроектируй структуру, реализуй команды и обработку сообщений, вынеси токен в переменную окружения, добавь README с инструкцией.">
+              <span class="launch-em">🤖</span>
+              <span class="launch-txt"><b>Создать бота</b><small>Telegram-бот с командами и логикой</small></span>
+            </button>
+            <button class="chip action launch" data-prompt="Создай интерактивный дашборд с графиками и метриками: придумай тему, спроектируй виджеты и данные, реализуй визуализацию, проверь, что всё работает.">
+              <span class="launch-em">📊</span>
+              <span class="launch-txt"><b>Создать дашборд</b><small>Графики, метрики, аналитика</small></span>
+            </button>
+          </div>
+          <div class="mini-row">
+            <button class="chip action" data-prompt="Покажи git status">🌿 git status</button>
+            <button class="chip action" data-prompt="Сделай коммит с сообщением «работа в процессе»">💾 Коммит</button>
+            <button class="chip action" data-prompt="Что ты умеешь?">✨ Возможности</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="typing" class="typing hidden">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span>Думаю...</span>
+      </div>
+
+      <footer id="input-bar">
+        <div class="composer">
+          <div id="attach-bar" class="attach-bar hidden">
+            <img id="attach-thumb" alt="" />
+            <span class="attach-name">Скриншот — отправится с сообщением</span>
+            <button id="btn-attach-remove" type="button" class="btn btn-ghost btn-small" title="Убрать изображение">✕</button>
+          </div>
+          <textarea id="input" rows="1" placeholder="Напиши, что сделать..."></textarea>
+          <div class="composer-row">
+            <span class="input-hint">Enter — отправить · Shift+Enter — новая строка</span>
+            <div class="composer-btns">
+              <button id="btn-plan" class="btn btn-ghost btn-small plan-toggle" title="Режим плана: сначала агент составит план и спросит разрешение, потом выполнит">📋 План</button>
+              <button id="btn-stop" class="btn btn-danger icon-btn hidden" title="Остановить">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5" /></svg>
+              </button>
+              <button id="btn-send" class="btn btn-primary icon-btn" title="Отправить">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13" /><path d="M22 2 15 22l-4-9-9-4z" /></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </footer>
+
+    </main>
+
+    <!-- Правая панель: превью + консоль (как в Replit) -->
+    <div id="side-panel" class="side-panel hidden">
+      <div class="sp-head">
+        <div class="sp-switch" role="tablist" aria-label="Панель инструментов">
+          <button class="sp-btn active" data-sp="preview" role="tab" title="Превью — сайт проекта, мобильный вид, новая вкладка">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
+            <span>Превью</span>
+          </button>
+          <button class="sp-btn" data-sp="console" role="tab" title="Консоль — логи сервера и команды в рабочей директории">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6" /><path d="M12 19h8" /></svg>
+            <span>Консоль</span>
+          </button>
+        </div>
+        <button id="btn-sp-close" class="btn btn-ghost icon-btn" title="Скрыть панель">✕</button>
+      </div>
+      <div id="sp-console" class="sp-body hidden">
+        <div id="term-out" class="term-out"><div class="term-welcome">Консоль рабочей директории. Логи сервера и вывод команд — здесь. Введи команду ниже (например: ls, npm run dev, bun test).</div></div>
+        <div class="term-input-row">
+          <span class="term-prompt">❯</span>
+          <input id="term-input" placeholder="команда..." spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+          <button id="btn-term-clear" class="btn btn-ghost btn-small" title="Очистить вывод">🧹</button>
+          <button id="btn-term-stop" class="btn btn-danger btn-small hidden" title="Остановить текущий процесс (Ctrl+C)">⏹</button>
+        </div>
+      </div>
+      <div id="sp-preview" class="sp-body">
+        <div class="preview-launch">
+          <span class="pl-ic">🚀</span>
+          <input id="preview-cmd" placeholder="bun run dev" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+          <button id="btn-preview-start" class="btn btn-primary btn-small">▶ Запустить</button>
+          <button id="btn-preview-stop" class="btn btn-danger btn-small hidden">⏹ Остановить</button>
+          <span id="preview-status" class="preview-status"><i class="ps-dot off"></i><span>Остановлено</span></span>
+        </div>
+        <div class="preview-log-wrap hidden" id="preview-log-wrap">
+          <pre id="preview-log" class="preview-log"></pre>
+        </div>
+        <div class="preview-toolbar">
+          <input id="preview-url" placeholder="http://localhost:3000" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+          <button id="btn-preview-open" class="btn btn-primary btn-small">Открыть</button>
+          <div class="dev-btns" title="Размер экрана">
+            <button class="btn btn-ghost btn-small dev active" data-w="100%" title="Десктоп">🖥</button>
+            <button class="btn btn-ghost btn-small dev" data-w="768" title="Планшет (768px)">💻</button>
+            <button class="btn btn-ghost btn-small dev" data-w="390" title="Телефон (390px)">📱</button>
+          </div>
+          <button id="btn-preview-tab" class="btn btn-ghost btn-small" title="Открыть в новой вкладке браузера">↗</button>
+          <button id="btn-preview-reload" class="btn btn-ghost btn-small" title="Перезагрузить">↻</button>
+        </div>
+        <div class="preview-stage">
+          <div id="preview-device" class="preview-device">
+            <iframe id="preview-frame" title="Предпросмотр сайта" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Панель проекта: файлы + коммиты -->
+    <aside id="project-panel" class="hidden">
+      <div class="panel-head">
+        <div class="panel-title">📁 Проект</div>
+        <div class="panel-head-btns">
+          <button id="btn-panel-refresh" class="btn btn-ghost btn-small" title="Обновить">↻</button>
+          <button id="btn-panel-close" class="btn btn-ghost btn-small" title="Закрыть">✕</button>
+        </div>
+      </div>
+      <div class="project-switch">
+        <select id="project-select" class="project-select" title="Переключить проект"></select>
+        <button id="btn-project-add" class="btn btn-small" title="Создать новый проект (максимум 10)">＋</button>
+        <button id="btn-project-remove" class="btn btn-small" title="Убрать проект из списка (папка на диске не удаляется)">🗑</button>
+      </div>
+      <div class="panel-dir">
+        <span id="panel-dir-path" title="Рабочая директория">—</span>
+        <button id="btn-panel-pick-dir" class="btn btn-ghost btn-small" title="Выбрать рабочую директорию">📁</button>
+      </div>
+      <div id="panel-repo" class="panel-repo hidden">
+        <span id="panel-branch" class="repo-branch"></span>
+        <span id="panel-remote" class="repo-remote"></span>
+      </div>
+      <div class="panel-tabs">
+        <button class="panel-tab active" data-tab="files">Файлы</button>
+        <button class="panel-tab" data-tab="changes">Изменения</button>
+        <button class="panel-tab" data-tab="commits">Коммиты</button>
+      </div>
+      <div id="panel-files" class="panel-body">
+        <div class="clone-row">
+          <input id="clone-url" placeholder="https://github.com/user/repo — клонировать" spellcheck="false" />
+          <button id="btn-clone" class="btn btn-primary btn-small" title="Клонировать репозиторий в рабочую папку">Клонировать</button>
+        </div>
+        <div class="fs-tools">
+          <button id="btn-new-file" class="btn btn-small" title="Создать новый файл в корне проекта">📄 Файл</button>
+          <button id="btn-new-folder" class="btn btn-small" title="Создать новую папку в корне проекта">📁 Папка</button>
+          <span class="fs-tools-hint">или перетащи сюда файлы / картинки</span>
+        </div>
+        <div class="fs-tools publish-tools">
+          <button id="btn-publish" class="btn btn-small" title="Создать НОВЫЙ репозиторий на GitHub и выгрузить туда текущую папку проекта (git init, если нужно, первый коммит и push)">⬆ Опубликовать на GitHub</button>
+          <span class="fs-tools-hint">создаст репозиторий и выгрузит туда папку проекта</span>
+        </div>
+        <div id="drop-hint" class="drop-hint hidden">📥 Отпустите — скопирую файлы в папку проекта</div>
+        <div id="tree" class="tree"></div>
+      </div>
+      <div id="panel-changes" class="panel-body hidden">
+        <div id="changes-summary" class="commit-summary"></div>
+        <div class="change-commit">
+          <input id="commit-msg" placeholder="Сообщение коммита..." spellcheck="false" />
+          <button id="btn-commit" class="btn btn-primary btn-small" title="git add -A + commit">Коммит</button>
+        </div>
+        <div class="change-actions">
+          <button id="btn-push" class="btn btn-small" title="Отправить коммиты на GitHub (git push)">📤 Push</button>
+          <button id="btn-pull" class="btn btn-small" title="Забрать изменения (git pull)">📥 Pull</button>
+        </div>
+        <div id="change-list" class="change-list"></div>
+      </div>
+      <div id="panel-commits" class="panel-body hidden">
+        <div id="commit-summary" class="commit-summary"></div>
+        <div id="commit-actions" class="commit-actions"></div>
+        <div id="commit-list" class="commit-list"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Просмотр файла -->
+  <div id="file-overlay" class="overlay hidden">
+    <div class="file-panel">
+      <div class="file-head">
+        <div id="file-path" title="Путь к файлу">—</div>
+        <div class="file-head-btns">
+          <button id="btn-file-edit" class="btn btn-ghost btn-small" title="Редактировать файл">✏️</button>
+          <button id="btn-file-save" class="btn btn-primary btn-small hidden" title="Сохранить изменения">Сохранить</button>
+          <button id="btn-file-delete" class="btn btn-ghost btn-small" title="Удалить файл">🗑</button>
+          <button id="btn-file-copy" class="btn btn-ghost btn-small" title="Скопировать путь">📋</button>
+          <button id="btn-file-open" class="btn btn-ghost btn-small" title="Показать в проводнике">📂</button>
+          <button id="btn-file-close" class="btn btn-ghost btn-small" title="Закрыть">✕</button>
+        </div>
+      </div>
+      <div id="file-content" class="file-content"></div>
+    </div>
+  </div>
+
+  <!-- Ввод имени (создание файла / папки) -->
+  <div id="input-overlay" class="overlay hidden">
+    <div class="confirm-panel">
+      <div id="input-title" class="confirm-title"></div>
+      <input id="input-value" class="input-name" placeholder="Имя…" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+      <div class="input-hint-line" id="input-hint"></div>
+      <div class="confirm-btns">
+        <button id="btn-input-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="btn-input-ok" class="btn btn-primary">Создать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Новый проект -->
+  <div id="project-overlay" class="overlay hidden">
+    <div class="confirm-panel">
+      <div class="confirm-title">Новый проект</div>
+      <input id="project-name" class="input-name" placeholder="Название проекта…" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+      <div class="project-dir-row">
+        <input id="project-dir" class="input-name" placeholder="Папка — по умолчанию ~/Название" spellcheck="false" readonly />
+        <button id="btn-project-pick-dir" class="btn btn-ghost" title="Выбрать папку">📁</button>
+      </div>
+      <div class="input-hint-line" id="project-hint"></div>
+      <div class="confirm-btns">
+        <button id="btn-project-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="btn-project-ok" class="btn btn-primary">Создать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Публикация проекта на GitHub (новый репозиторий) -->
+  <div id="publish-overlay" class="overlay hidden">
+    <div class="confirm-panel">
+      <div class="confirm-title">⬆ Опубликовать на GitHub</div>
+      <div class="input-hint-line" id="publish-dir" style="justify-content:flex-start"></div>
+      <input id="publish-name" class="input-name" placeholder="Имя репозитория…" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+      <input id="publish-desc" class="input-name" style="margin-top:6px" placeholder="Описание (необязательно)" spellcheck="false" autocomplete="off" />
+      <label class="check-row" title="Приватный репозиторий видят только вы; публичный — все." style="margin-top:8px">
+        <input id="publish-private" type="checkbox" checked />
+        <span class="check-row-text">
+          <b>Приватный репозиторий</b>
+          <small>Включено — только вы. Выключи, чтобы сделать репозиторий публичным.</small>
+        </span>
+      </label>
+      <div class="input-hint-line" id="publish-hint"></div>
+      <div class="confirm-btns">
+        <button id="btn-publish-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="btn-publish-ok" class="btn btn-primary">Создать и выгрузить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Подтверждение опасных действий -->
+  <div id="confirm-overlay" class="overlay hidden">
+    <div class="confirm-panel">
+      <div id="confirm-title" class="confirm-title"></div>
+      <div id="confirm-text" class="confirm-text"></div>
+      <div class="confirm-btns">
+        <button id="btn-confirm-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="btn-confirm-ok" class="btn btn-danger">Подтвердить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Вопрос агента пользователю (askUser / план) -->
+  <div id="ask-overlay" class="overlay hidden">
+    <div class="ask-panel">
+      <div class="ask-question" id="ask-question">?</div>
+      <textarea id="ask-input" rows="3" placeholder="Введи ответ..."></textarea>
+      <div class="ask-btns">
+        <button id="btn-ask-cancel" class="btn btn-ghost">Отмена</button>
+        <button id="btn-ask-send" class="btn btn-primary">Ответить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- GitHub device flow -->
+  <div id="device-overlay" class="overlay hidden">
+    <div class="device-panel">
+      <h2>🔐 Подключение GitHub</h2>
+      <p>Открой страницу авторизации на телефоне или в браузере и введи код:</p>
+      <div class="device-code" id="device-code">—</div>
+      <div class="device-btns">
+        <button id="btn-device-open" class="btn btn-primary">Открыть страницу</button>
+        <button id="btn-device-cancel" class="btn btn-ghost">Отмена</button>
+      </div>
+      <div id="device-status" class="device-status">Ожидаем авторизацию...</div>
+    </div>
+  </div>
+
+  <!-- Настройки -->
+  <div id="settings-overlay" class="overlay hidden">
+    <div class="settings-panel">
+      <div class="settings-head">
+        <h2>⚙️ Настройки</h2>
+        <button id="btn-close-settings" class="btn btn-ghost">✕</button>
+      </div>
+      <div class="settings-body">
+        <div class="settings-section">
+          <div class="settings-section-title">Модель</div>
+          <div class="field">
+            <label>Провайдер AI</label>
+            <div class="segmented">
+              <button data-provider="ollama" class="seg" id="seg-ollama">🖥️ Ollama</button>
+              <button data-provider="openai" class="seg" id="seg-openai">🌐 OpenAI-совместимые</button>
+              <button data-provider="anthropic" class="seg" id="seg-anthropic">🤖 Claude</button>
+            </div>
+          </div>
+
+          <div id="ollama-fields">
+            <div class="field">
+              <label>Ollama URL</label>
+              <input id="s-ollama-url" placeholder="http://localhost:11434" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label>Модель</label>
+              <div class="input-row">
+                <input id="s-ollama-model" placeholder="Например: qwen3:4b, llama3.1, deepseek-r1" spellcheck="false" />
+                <button id="btn-refresh-ollama-models" class="btn btn-ghost" title="Загрузить список моделей из Ollama">↻</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="openai-fields">
+            <div class="field">
+              <label>Провайдер</label>
+              <div class="chips">
+                <button data-preset="deepseek" class="chip">DeepSeek</button>
+                <button data-preset="openai" class="chip">OpenAI (GPT)</button>
+                <button data-preset="groq" class="chip">Groq</button>
+                <button data-preset="openrouter" class="chip">OpenRouter</button>
+                <button data-preset="custom" class="chip">Свой (OpenAI-совместимый)</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Базовый URL</label>
+              <input id="s-openai-url" placeholder="https://api.deepseek.com/v1" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label>API-ключ</label>
+              <div class="input-row">
+                <input id="s-openai-key" type="password" placeholder="sk-..." spellcheck="false" />
+                <button id="btn-toggle-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Модель</label>
+              <div class="input-row">
+                <input id="s-openai-model" placeholder="deepseek-chat · gpt-4o · llama-3.3-70b..." spellcheck="false" />
+                <button id="btn-refresh-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="anthropic-fields">
+            <div class="field">
+              <label>Базовый URL <span class="hint">(по умолчанию — официальный API Anthropic)</span></label>
+              <input id="s-anth-url" placeholder="https://api.anthropic.com" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label>API-ключ <span class="hint">(sk-ant-...)</span></label>
+              <div class="input-row">
+                <input id="s-anth-key" type="password" placeholder="sk-ant-api03-..." spellcheck="false" />
+                <button id="btn-toggle-anth-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Модель</label>
+              <div class="input-row">
+                <input id="s-anth-model" placeholder="claude-sonnet-4-5 · claude-opus-4-1 · claude-haiku-4-5..." spellcheck="false" />
+                <button id="btn-refresh-anth-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="model-hints" class="model-hints hidden"></div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Проект</div>
+          <div class="field">
+            <label>Рабочая директория</label>
+            <div class="input-row">
+              <input id="s-workdir" placeholder="Папка, с которой работает агент (файлы + git)" spellcheck="false" />
+              <button id="btn-pick-dir" class="btn btn-ghost" title="Выбрать папку">📁</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">📱 Мобильный доступ</div>
+          <div class="field">
+            <label class="check-row" title="Телефон в той же Wi-Fi сети — чат, консоль, превью, файлы и git работают с телефона (PWA).">
+              <input id="s-mobile-enabled" type="checkbox" />
+              <span class="check-row-text">
+                <b>Разрешить доступ с телефона</b>
+                <small>Приложение поднимет защищённый PIN-кодом мост по локальной сети: открой адрес ниже в браузере телефона, введи PIN — и управляй агентом с телефона. Установится как приложение («Добавить на главный экран»).</small>
+              </span>
+            </label>
+          </div>
+          <div class="field mobile-fields hidden" id="mobile-fields">
+            <label>Порт моста</label>
+            <input id="s-mobile-port" type="number" min="1024" max="65535" placeholder="9090" spellcheck="false" autocomplete="off" />
+            <label>PIN-код для подключения <span class="hint">(показывается при подключении с телефона)</span></label>
+            <div class="input-row">
+              <input id="s-mobile-pin" readonly class="mobile-pin-input" spellcheck="false" autocomplete="off" />
+              <button id="btn-mobile-pin-regen" class="btn btn-ghost btn-small" title="Сгенерировать новый PIN">↻ Новый PIN</button>
+            </div>
+            <label>Адреса для телефона <span class="hint">(телефон должен быть в той же Wi-Fi сети)</span></label>
+            <div id="mobile-urls" class="mobile-urls"></div>
+            <div class="hint-block">Открой адрес в браузере телефона → введи PIN → в меню браузера «Добавить на главный экран» — работает как приложение. Если адреса нет — проверь, что ПК и телефон в одной сети.</div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">Секреты · переменные окружения</div>
+          <div class="field">
+            <label>Задаются один раз — автоматически подставляются во все команды (агент, терминал, git, docker). В чат не выводятся.</label>
+            <div id="env-list" class="env-list"></div>
+            <div class="env-add">
+              <input id="s-env-key" placeholder="ИМЯ_ПЕРЕМЕННОЙ" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+              <input id="s-env-value" type="password" placeholder="значение" spellcheck="false" autocomplete="off" />
+              <button id="btn-env-add" class="btn btn-primary btn-small" title="Добавить переменную">Добавить</button>
+            </div>
+            <label>Импорт из файла .env <span class="hint">(строки KEY=VALUE, комментарии # игнорируются)</span></label>
+            <textarea id="s-env-import" rows="4" placeholder="DATABASE_URL=postgres://...&#10;API_KEY=sk-...&#10;NODE_ENV=production" spellcheck="false"></textarea>
+            <div class="env-import-btns">
+              <button id="btn-env-import" class="btn btn-ghost btn-small" title="Вставить список переменных из текста выше">Вставить список</button>
+              <button id="btn-env-file" class="btn btn-ghost btn-small" title="Выбрать файл .env и импортировать всё">📄 Выбрать файл .env</button>
+              <input id="env-file-input" type="file" accept=".env,.txt,text/plain" class="hidden" />
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">GitHub</div>
+          <div class="field">
+            <label>Авторизация <span class="hint">(приватные репозитории, клонирование, пуш)</span></label>
+            <div id="gh-connected" class="gh-connected hidden">
+              <img id="gh-avatar" class="gh-avatar hidden" alt="" />
+              <span id="gh-login">@github</span>
+              <button id="btn-gh-disconnect" class="btn btn-ghost btn-small">Выйти</button>
+            </div>
+            <div id="gh-disconnected">
+              <div class="input-row">
+                <input id="s-gh-client-id" placeholder="Client ID OAuth-приложения GitHub" spellcheck="false" />
+                <button id="btn-gh-connect" class="btn btn-primary">Войти через GitHub</button>
+              </div>
+              <div class="hint-block">
+                Нужен Client ID OAuth-приложения: GitHub → Settings → Developer settings → OAuth Apps → New OAuth app.
+                <button id="btn-gh-create-app" class="link-btn">Открыть страницу создания</button>.
+                Приложение пришлёт код — введёшь его на github.com/login/device, и GitHub сам выдаст доступ (без токена).
+              </div>
+              <div class="input-row gh-token-row">
+                <input id="s-gh-token" type="password" placeholder="или вставь токен вручную (ghp_...)" spellcheck="false" />
+              </div>
+            </div>
+          </div>
+          <div class="field">
+            <div class="gh-repos hidden" id="gh-repos">
+              <div class="gh-repos-head" id="gh-repos-head">
+                <span class="settings-section-title" style="text-transform:none;letter-spacing:0">Мой репозиторий на GitHub</span>
+                <span class="repo-chev" id="repo-chev">▸</span>
+                <button id="btn-gh-unselect-repo" class="btn btn-ghost btn-small" title="Не работать с выбранным репозиторием">Снять выбор</button>
+              </div>
+              <div class="gh-repos-body hidden" id="gh-repos-body">
+                <div class="gh-repo-search">
+                  <input id="gh-repo-search" placeholder="Поиск по имени репозитория — найдутся все, не только первые 100…" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+                  <button id="gh-repo-search-clear" class="btn btn-ghost btn-small hidden" title="Очистить поиск">✕</button>
+                </div>
+                <div class="gh-repos-status" id="gh-repos-status">Загрузка списка репозиториев...</div>
+                <div class="gh-repo-list" id="gh-repo-list"></div>
+                <button id="gh-repo-more" class="btn btn-ghost btn-small gh-more hidden" title="Загрузить следующие 100">Показать ещё 100</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">🖼 Зрение и генерация изображений</div>
+          <div class="field">
+            <label class="check-row" title="Вторая модель (например, второй ключ OpenRouter): читает скриншоты и генерирует картинки. Основная модель продолжает писать код.">
+              <input id="s-vision-enabled" type="checkbox" />
+              <span class="check-row-text">
+                <b>Использовать вспомогательную модель</b>
+                <small>Отдельный ключ/модель для чтения изображений (vision) и генерации картинок. Присланный скриншот сначала разбирает vision-модель, описание уходит кодеру; картинки для проекта агент создаёт инструментом generateImage.</small>
+              </span>
+            </label>
+          </div>
+          <div class="field vision-fields hidden" id="vision-fields">
+            <label>Базовый URL <span class="hint">(по умолчанию OpenRouter)</span></label>
+            <input id="s-vision-url" placeholder="https://openrouter.ai/api/v1" spellcheck="false" autocomplete="off" />
+            <label>API-ключ второго аккаунта <span class="hint">(если пусто — используется основной ключ)</span></label>
+            <div class="input-row">
+              <input id="s-vision-key" type="password" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
+              <button id="btn-toggle-vision-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+            </div>
+            <label>Модель-зрение <span class="hint">(читает скриншоты; напр. google/gemini-2.0-flash-001, openai/gpt-4o-mini)</span></label>
+            <div class="input-row">
+              <input id="s-vision-model" placeholder="google/gemini-2.0-flash-001" spellcheck="false" autocomplete="off" />
+              <button id="btn-refresh-vision-models" class="btn btn-ghost" title="Загрузить список моделей">↻</button>
+            </div>
+            <label>Модель-генерация <span class="hint">(создаёт картинки; напр. openai/dall-e-3, black-forest-labs/flux-1.1-pro)</span></label>
+            <div class="input-row">
+              <input id="s-image-model" placeholder="openai/dall-e-3" spellcheck="false" autocomplete="off" />
+              <button id="btn-refresh-image-models" class="btn btn-ghost" title="Загрузить список моделей">↻</button>
+            </div>
+            <label class="check-row" title="Присланный скриншот сначала разбирает модель-зрение, описание передаётся кодеру — даже если его модель не умеет видеть картинки.">
+              <input id="s-vision-auto" type="checkbox" />
+              <span class="check-row-text">
+                <b>Автоматически разбирать присланные картинки</b>
+                <small>Скриншот → описание вспомогательной моделью → кодер работает с текстом. Выключи, если хочешь слать картинки напрямую основной модели (умеющей видеть).</small>
+              </span>
+            </label>
+            <div id="vision-model-hints" class="model-hints hidden"></div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="check-row" title="Агент не сможет пушить, пока выключено. Кнопка Push в панели проекта работает всегда.">
+            <input id="s-allow-agent-push" type="checkbox" />
+            <span class="check-row-text">
+              <b>Разрешить агенту выполнять git push</b>
+              <small>Выключено по умолчанию: инструмент gitPush у агента будет заблокирован, пока ты явно не разрешишь. Кнопка «Push» в панели проекта работает всегда — это твоё ручное действие.</small>
+            </span>
+          </label>
+        </div>
+        <div class="field">
+          <label class="check-row" title="После каждого завершённого задания агента создаётся локальный коммит-чекпоинт (без пуша) — как в Replit: одна задача = один коммит.">
+            <input id="s-agent-auto-commit" type="checkbox" />
+            <span class="check-row-text">
+              <b>Авто-коммит после задания агента</b>
+              <small>Включено по умолчанию: когда агент закончил работу и менял файлы в git-репозитории — приложение само делает локальный коммит «Авто-коммит агента: …». На GitHub ничего не уходит: пушишь только ты кнопкой «Push».</small>
+            </span>
+          </label>
+        </div>
+        <div class="field row">
+          <button id="btn-test" class="btn btn-ghost">🔌 Проверить подключение</button>
+          <button id="btn-save-settings" class="btn btn-primary">💾 Сохранить настройки</button>
+        </div>
+        <div id="settings-msg" class="settings-msg"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="agent-core.js"></script>
+  <script src="markdown.js"></script>
+  <script src="bootstrap.js"></script>
+  <script src="mobile-api.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

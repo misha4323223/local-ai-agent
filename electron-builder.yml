@@ -1,0 +1,68 @@
+publish:
+  provider: github
+  owner: booom
+  repo: local-ai-agent
+  releaseType: release
+
+appId: com.local.aiagent
+productName: AI Developer Agent
+copyright: Copyright © 2024 AI Developer Agent
+directories:
+  output: dist
+  buildResources: build
+files:
+  - src/**/*
+  - assets/**/*
+  - package.json
+  - server.js
+extraResources:
+  - from: assets
+    to: assets
+    filter:
+      - "**/*"
+win:
+  executableName: ai_agent
+  artifactName: ai_agent-${version}-${arch}.${ext}
+  icon: assets/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: AI Developer Agent
+  installerIcon: assets/icon.ico
+  uninstallerIcon: assets/icon.ico
+  installerHeaderIcon: assets/icon.ico
+  language: 1049
+  unicode: true
+portable:
+  artifactName: ai_agent-${version}-portable.${ext}
+mac:
+  icon: assets/icon.png
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+linux:
+  icon: assets/icon.png
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  category: Development

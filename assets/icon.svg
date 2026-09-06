@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Фон -->
+  <rect rx="80" ry="80" x="0" y="0" width="512" height="512" fill="url(#bg)"/>
+  <!-- Шестерёнка (AI) -->
+  <g transform="translate(256,256)" fill="none" stroke="white" stroke-width="24">
+    <!-- Внешний круг -->
+    <circle cx="0" cy="0" r="140" stroke-dasharray="60 40" stroke-width="28"/>
+    <circle cx="0" cy="0" r="100" stroke-width="12"/>
+    <!-- Внутренняя молния/спираль -->
+  </g>
+  <!-- Буква A (AI) -->
+  <text x="256" y="200" font-family="monospace" font-size="180" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="central">A</text>
+  <!-- Уголок кода -->
+  <g stroke="rgba(255,255,255,0.6)" stroke-width="8" fill="none" stroke-linecap="round">
+    <polyline points="370,370 400,340 430,370"/>
+    <polyline points="140,370 110,340 80,370"/>
+  </g>
+  <!-- Нижняя точка -->
+  <circle cx="256" cy="380" r="12" fill="rgba(255,255,255,0.8)"/>
+</svg>
