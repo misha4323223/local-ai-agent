@@ -6,7 +6,11 @@ const path = require("path");
 const fs = require("fs");
 const { app } = require("electron");
 
-const ASAR_DIR = __dirname; // .../app.asar/src (в разработке — корень репозитория/src)
+// Папка, внутри которой лежит src/ с основным кодом:
+// в собранном приложении — .../app.asar (туда electron-builder кладёт src/** как есть),
+// в разработке — корень репозитория. __dirname сам по себе — это src/, поэтому поднимаемся на уровень выше,
+// иначе path.join(fromDir, "src", "main.js") даст задвоенное src\src\main.js.
+const ASAR_DIR = path.join(__dirname, "..");
 const OTA_ROOT = () => path.join(app.getPath("userData"), "ota");
 const OTA_CURRENT = () => path.join(OTA_ROOT(), "current");
 
