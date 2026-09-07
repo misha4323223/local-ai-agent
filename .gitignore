@@ -8,3 +8,6 @@ build/
 .flutter-plugins-dependencies
 .idea/
 *.iml
+
+# Локальный OTA-бандл (генерируется scripts/make-ota.js)
+ota/

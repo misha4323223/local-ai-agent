@@ -97,4 +97,10 @@ contextBridge.exposeInMainWorld("api", {
   // Мобильный доступ (LAN + PWA + PIN): статус моста и новый PIN
   mobileStatus: () => ipcRenderer.invoke("mobile:status"),
   mobilePinRegen: () => ipcRenderer.invoke("mobile:pinRegen"),
+
+  // Локальный self-update (OTA): статус, проверка, откат, открыть папку
+  otaStatus: () => ipcRenderer.invoke("ota:status"),
+  otaCheck: () => ipcRenderer.invoke("ota:check"),
+  otaRollback: () => ipcRenderer.invoke("ota:rollback"),
+  otaOpenDir: () => ipcRenderer.invoke("ota:openDir"),
 });

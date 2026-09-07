@@ -27,6 +27,10 @@ const {
   auxConfig,
   describeImageRemote,
   generateImageRemote,
+  selectTools,
+  modelWindow,
+  createContextManager,
+  estimateTokens,
 } = require("./renderer/agent-core.js");
 
 // ─────────────────────────── Мобильный мост (LAN + PWA + PIN) ───────────────────────────
@@ -41,6 +45,7 @@ ipcMain.handle = (channel, fn) => {
   return _ipcHandleOrig(channel, fn);
 };
 const mobileBridge = new MobileBridge({ handlerMap: ipcHandlerMap });
+const ota = require("./ota.js"); // локальный self-update (OTA)
 
 // ─────────────────────────── Настройки ───────────────────────────
 // Клонирование репозиториев: явная кнопка «⬇ Выгрузить» в списке GitHub-репозиториев
@@ -79,6 +84,9 @@ const DEFAULT_SETTINGS = {
   visionModel: "",
   imageModel: "",
   activeProjectId: "", // id активного проекта (его dir = workingDir)
+  // Локальный self-update (OTA): агент собирает бандл (scripts/make-ota.js), приложение применяет на ходу
+  otaEnabled: true,
+  otaDir: "", // необязательная папка-источник OTA (пусто — userData/ota + ota/ рядом с кодом)
 };
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -2522,9 +2530,20 @@ async function runAi(settings, messages, win, opts) {
     throw new Error("Не выбрана модель. Открой Настройки и обнови список моделей (кнопка ↻).");
   }
 
-  // Контекст-окно: если история длиннее бюджета токенов модели — обрезаем старые сообщения
+  // Контекст-окно: бюджет = реальное окно модели (если известно) минус резерв на вывод.
   let budget = contextBudget(provider, settings.model);
+  try {
+    const win = await modelWindow(settings, settings.model);
+    if (win > 0) budget = Math.min(budget, win - 4096);
+    if (budget < 3000) budget = 3000;
+  } catch {}
   let contextRetried = false; // при переполнении контекста пробуем ещё раз с меньшим бюджетом
+  let reportRetried = false; // пустой финальный текст — один раз просим итоговый отчёт
+  // Динамический список инструментов: при тесном контексте — только ядро файлов/терминала.
+  const activeTools = planMode ? [] : selectTools(budget);
+  const toolsWeight = activeTools.length ? estimateTokens(JSON.stringify(activeTools)) : 0;
+  let histBudget = Math.max(1500, budget - toolsWeight); // бюджет истории без учёта схемы инструментов
+  const ctxManager = createContextManager({ settings, emit, planMode });
 
   // Вопрос пользователю (askUser / подтверждение опасной команды).
   const askUserWait = (question) => {
@@ -2541,7 +2560,7 @@ async function runAi(settings, messages, win, opts) {
       }, 300000);
     });
   };
-  const trimmedHistory = trimConversation(messages, budget);
+  const trimmedHistory = await ctxManager.manage(messages, histBudget);
   // Авто-разбор присланных картинок вспомогательной vision-моделью (второй ключ):
   // скриншот → описание → кодер работает с текстом (его модель может не видеть картинки).
   let runHistory = trimmedHistory;
@@ -2604,7 +2623,7 @@ async function runAi(settings, messages, win, opts) {
     },
     ...runHistory.map((m) => ({ role: m.role, content: m.content })),
   ];
-  const maxRounds = planMode ? 3 : 10;
+  const maxRounds = planMode ? 3 : 25;
   let finalText = "";
 
   for (let round = 0; round < maxRounds; round++) {
@@ -2616,14 +2635,13 @@ async function runAi(settings, messages, win, opts) {
     // Хвост (текущий виток с tool-результатами) сохраняется целиком.
     if (canonical.length > 1) {
       const sys = canonical[0];
-      const rest = trimConversation(canonical.slice(1), budget);
-      canonical = [sys, ...rest];
+      canonical = [sys, ...(await ctxManager.manage(canonical.slice(1), histBudget))];
     }
 
     const req = buildChatRequest(settings, {
       model: settings.model,
       messages: canonical,
-      tools: planMode ? [] : TOOL_DEFINITIONS,
+      tools: planMode ? [] : activeTools,
     });
     let res;
     try {
@@ -2648,9 +2666,10 @@ async function runAi(settings, messages, win, opts) {
       ) {
         contextRetried = true;
         budget = Math.max(3000, Math.floor(budget * 0.4));
+        histBudget = Math.max(1500, budget - toolsWeight);
         if (canonical.length > 1) {
           const sys = canonical[0];
-          canonical = [sys, ...trimConversation(canonical.slice(1), budget)];
+          canonical = [sys, ...(await ctxManager.manage(canonical.slice(1), histBudget))];
         }
         round--;
         continue;
@@ -2704,7 +2723,23 @@ async function runAi(settings, messages, win, opts) {
       }
     }
 
+    // Пустой финальный ответ — не молчим. Один раз просим итоговый отчёт.
+    if (toolCalls.length === 0 && !planMode && !reportRetried && !String(finalText || "").trim() && !abort.signal.aborted) {
+      reportRetried = true;
+      canonical.push({
+        role: "user",
+        content:
+          "Ты завершил действия, но итоговый ответ получился пустым. Напиши структурированный итоговый отчёт: что сделано, какие файлы созданы/изменены, какие команды выполнялись, как проверить результат.",
+      });
+      continue;
+    }
+
     if (toolCalls.length === 0) {
+      if (!String(finalText || "").trim() && !abort.signal.aborted) {
+        finalText =
+          "⚠ Модель не прислала итоговый текст (вероятно, переполнен контекст). Изменения сохранены; нажми «↻ Перегенерировать» или напиши «продолжай».";
+        emit({ type: "chunk", text: finalText });
+      }
       lastUndoLog = activeRunUndo.slice();
       persistUndo();
       if (lastUndoLog.length) emit({ type: "undo_available", count: lastUndoLog.length });
@@ -3164,6 +3199,18 @@ ipcMain.handle("dev:start", (_e, dir, command) => devStart(dir, command));
 ipcMain.handle("dev:stop", () => devStop());
 ipcMain.handle("dev:status", (_e, dir) => devStatus(dir));
 
+// Локальный self-update (OTA): статус, проверка, откат, открыть папку
+ipcMain.handle("ota:status", () => ota.status(loadSettings()));
+ipcMain.handle("ota:check", async () => {
+  try {
+    return await ota.check(loadSettings());
+  } catch (e) {
+    return { status: "error", message: e.message || String(e) };
+  }
+});
+ipcMain.handle("ota:rollback", () => ota.rollback());
+ipcMain.handle("ota:openDir", () => ota.openDir());
+
 ipcMain.handle("chats:load", () => loadChats());
 ipcMain.handle("chats:save", (_e, d) => {
   saveChats(d);
@@ -3172,6 +3219,7 @@ ipcMain.handle("chats:save", (_e, d) => {
 
 ipcMain.handle("ai:send", async (_e, messages, opts) => {
   const settings = loadSettings();
+  global.__agentRunning = true;
   try {
     await runAi(settings, messages || [], mainWindow, opts || {});
     return { ok: true };
@@ -3189,6 +3237,8 @@ ipcMain.handle("ai:send", async (_e, messages, opts) => {
       mainWindow.webContents.send("ai:event", { type: "error", message: msg });
     }
     return { ok: false, error: msg };
+  } finally {
+    global.__agentRunning = false;
   }
 });
 
@@ -4317,6 +4367,12 @@ app.whenReady().then(() => {
   createWindow();
   mobileBridge.applySettings(loadSettings());
   initAutoUpdater();
+  // Локальный self-update (OTA): проверка при старте и каждые 60 секунд
+  const otaTick = () => {
+    ota.check(loadSettings()).catch(() => {});
+  };
+  setTimeout(otaTick, 5000);
+  setInterval(otaTick, 60000);
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

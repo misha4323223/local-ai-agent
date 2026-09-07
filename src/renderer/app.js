@@ -34,6 +34,7 @@
     openai: { url: "https://api.openai.com/v1" },
     groq: { url: "https://api.groq.com/openai/v1" },
     openrouter: { url: "https://openrouter.ai/api/v1" },
+    g4f: { url: "http://localhost:8080/v1" },
     custom: null,
   };
   const PRESET_LABEL = {
@@ -41,6 +42,7 @@
     openai: "OpenAI",
     groq: "Groq",
     openrouter: "OpenRouter",
+    g4f: "G4F",
     custom: "Свой",
   };
 
@@ -928,6 +930,17 @@
         break;
       }
       case "vision": {
+        if (ev.text) {
+          const note = document.createElement("div");
+          note.className = "vision-note";
+          note.textContent = ev.text;
+          $("messages").appendChild(note);
+          scrollBottom();
+        }
+        break;
+      }
+      case "compact": {
+        // Контекст сжат в памятку (экономия токенов) — показываем плашку
         if (ev.text) {
           const note = document.createElement("div");
           note.className = "vision-note";
@@ -2004,6 +2017,9 @@
     // приветственного экрана и переключил бы их «активный» вид.
     document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.toggle("active", c.dataset.preset === p));
     if (PRESETS[p] && PRESETS[p].url) $("s-openai-url").value = PRESETS[p].url;
+    // Подсказка G4F — только при выборе локального пресета
+    const g4fHint = $("g4f-hint");
+    if (g4fHint) g4fHint.classList.toggle("hidden", p !== "g4f");
   }
 
   // Заполняет все поля настроек значениями из памяти (чтобы переключение провайдеров ничего не теряло)
@@ -2032,6 +2048,9 @@
     $("s-image-model").value = settings.imageModel || "";
     $("vision-fields").classList.toggle("hidden", !$("s-vision-enabled").checked);
     $("vision-model-hints").classList.add("hidden");
+    $("s-ota-enabled").checked = settings.otaEnabled !== false;
+    $("s-ota-dir").value = settings.otaDir || "";
+    renderOtaStatus();
   }
 
   // Читает значения активного провайдера из полей в settings
@@ -2057,8 +2076,29 @@
     settings.visionKey = $("s-vision-key").value.trim();
     settings.visionModel = $("s-vision-model").value.trim();
     settings.imageModel = $("s-image-model").value.trim();
+    settings.otaEnabled = !!$("s-ota-enabled").checked;
+    settings.otaDir = $("s-ota-dir").value.trim();
     // Зеркало модели активного провайдера
     settings.model = settings[MODEL_KEY[settings.provider]] || "";
+  }
+
+  // Статус локального self-update (OTA): версия, папка, источники
+  async function renderOtaStatus() {
+    const el = $("ota-status");
+    if (!el) return;
+    if (!isElectron) {
+      el.textContent = "Доступно в приложении на ПК";
+      return;
+    }
+    try {
+      const st = await api.otaStatus();
+      const parts = ["Версия кода: " + ((st && st.installed) || "базовая")];
+      if (st && st.dir) parts.push("Папка: " + st.dir);
+      if (st && st.sources && st.sources.length) parts.push("Обновлений найдено: " + st.sources.length);
+      el.textContent = parts.join(" · ");
+    } catch {
+      el.textContent = "—";
+    }
   }
 
   function openSettings() {
@@ -4251,6 +4291,29 @@
   $("s-vision-enabled").addEventListener("change", () => {
     $("vision-fields").classList.toggle("hidden", !$("s-vision-enabled").checked);
   });
+  // ── Локальный self-update (OTA): проверка, откат, открыть папку ──
+  $("btn-ota-check").onclick = async () => {
+    if (!isElectron) {
+      toast("Self-update доступен в приложении на ПК");
+      return;
+    }
+    const r = await api.otaCheck();
+    if (r && r.status === "applied") toast("✅ Обновление применено: " + r.version + " — перезапуск…");
+    else if (r && r.status === "error") toast("⚠ " + ((r && r.message) || "Ошибка применения обновления"));
+    else if (r && r.status === "busy") toast("Агент сейчас работает — обновление применится после");
+    else if (r && r.status === "disabled") toast("Self-update выключен в настройках");
+    else toast("Обновлений нет — код актуален");
+    renderOtaStatus();
+  };
+  $("btn-ota-rollback").onclick = () => {
+    if (!isElectron) return;
+    confirmModal("Откатить на предыдущую версию кода?", "Приложение перезапустится с прошлой версией.", () => {
+      api.otaRollback();
+    });
+  };
+  $("btn-ota-open").onclick = () => {
+    if (isElectron) api.otaOpenDir();
+  };
   $("btn-toggle-vision-key").onclick = () => toggleKey("s-vision-key");
   $("btn-refresh-vision-models").onclick = () => loadAuxModels("vision");
   $("btn-refresh-image-models").onclick = () => loadAuxModels("image");

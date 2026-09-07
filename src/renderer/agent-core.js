@@ -35,6 +35,7 @@
 16. Анализ проекта и рефакторинг: чтобы понять файл без чтения целиком — readFileStructure (импорты/экспорты/объявления верхнего уровня) или fileOutline (функции/классы). Откат своей правки — undoEdit. Переименование идентификатора — refactorRename (сначала dryRun: true). Проверка API — apiRequest. Проверка зависимостей — getDependencies (audit: true для уязвимостей). Форматирование — formatCode. SQL-запросы — dbQuery (нужен psql/mysql в системе). Запуск скриптов из package.json — runScript. Команда с повторными попытками или ожиданием текста в выводе (например «listening») — runCommandOutput. Полная проверка проекта (tsc + eslint + тесты) — validateProject. Ветки git — gitBranch (текущая + список), сравнение веток — gitDiff, отмена последнего коммита без потери изменений — gitUndoLastCommit (soft reset).
 17. Запуск проекта: запускай проект ТОЛЬКО через встроенный терминал приложения (инструменты runCommand / startBackground / shellStart) — не проси пользователя запускать проект вручную и не открывай внешние терминалы. Dev-сервер по умолчанию запускай на порту 5000 (http://localhost:5000), если в конфиге проекта явно не задан другой порт (проверь package.json / .env / конфиги). После запуска проверь готовность через проверь через checkUrl/checkPort и сообщи пользователю адрес.
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
+19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
 checkUrl/checkPort и сообщи пользователю адрес.
 
 Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage.`;
@@ -2101,6 +2102,171 @@ checkUrl/checkPort и сообщи пользователю адрес.
     return { buf, mediaType, ext };
   }
 
+  // ── Динамические инструменты: при тесном контексте шлём только ядро ──
+  const CORE_TOOL_NAMES = new Set([
+    "createFolder", "readFile", "writeFile", "listDirectory", "readFileLines", "editFile",
+    "runCommand", "runCommandOutput", "retryCommand", "timeoutCommand",
+    "webSearch", "webFetch", "searchFile", "searchProject", "listFiles",
+    "fileOutline", "readFileStructure", "explainCode", "undoEdit",
+    "startBackground", "listBackground", "backgroundOutput", "sendInput", "stopBackground",
+    "shellStart", "shellSend", "checkUrl", "checkPort", "openUrl", "showImage",
+    "previewUI", "diffView", "askUser", "analyzeImage", "generateImage", "screenshotCapture",
+  ]);
+  const CORE_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter((t) => CORE_TOOL_NAMES.has(t.function && t.function.name));
+  // Если окно контекста >= 26k — шлём все инструменты; иначе только ядро (~36 вместо 74).
+  function selectTools(budget) {
+    const b = budget || contextBudget("openai");
+    return b >= 26000 ? TOOL_DEFINITIONS : CORE_TOOL_DEFINITIONS;
+  }
+
+  // ── Реальное окно модели (context_length / context_window из GET /models) ──
+  const _ctxModelsCache = new Map(); // base → { ts, byModel: Map<model, window> }
+  const _CTX_TTL = 10 * 60 * 1000;
+  async function modelWindow(s, model) {
+    const provider = s && s.provider ? s.provider : "openai";
+    if (provider !== "openai" || !model) return 0;
+    const base = baseFor(provider, s);
+    const now = Date.now();
+    let entry = _ctxModelsCache.get(base);
+    if (!entry || now - entry.ts > _CTX_TTL) {
+      let fetched = null;
+      try {
+        const timeout = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined;
+        const res = await fetch(base + "/models", {
+          headers: apiHeaders(provider, apiKeyFor(provider, s), false),
+          signal: timeout,
+        });
+        if (res.ok) {
+          const d = await res.json();
+          const byModel = new Map();
+          for (const m of d.data || []) {
+            const id = m && m.id ? String(m.id) : "";
+            const win = (m && (m.context_length || m.context_window)) || 0;
+            if (id && win > 0) byModel.set(id, win);
+          }
+          fetched = { ts: now, byModel };
+        }
+      } catch {}
+      entry = fetched || { ts: now, byModel: new Map() };
+      _ctxModelsCache.set(base, entry);
+    }
+    if (!entry) return 0;
+    if (entry.byModel.has(model)) return entry.byModel.get(model);
+    // Суффиксные варианты id: "vendor/model:free", "vendor/model@date", "vendor/model-vN"
+    for (const [id, win] of entry.byModel) {
+      if (id.startsWith(model + ":") || id.startsWith(model + "@") || id.startsWith(model + "-")) return win;
+    }
+    return 0;
+  }
+
+  // ── Компакция: старые витки диалога сжимаются в памятку дешёвым вызовом модели ──
+  async function compactRemote(s, messages) {
+    try {
+      const provider = s && s.provider ? s.provider : "openai";
+      const model = (s && s.model) || "";
+      if (!model) return null;
+      let lastUser = -1;
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i] && messages[i].role === "user") {
+          lastUser = i;
+          break;
+        }
+      }
+      if (lastUser <= 0) return null; // нечего сжимать — только текущий виток
+      const head = messages.slice(0, lastUser);
+      let headTokens = 0;
+      for (const m of head) headTokens += estimateMessageTokens(m);
+      if (headTokens < 4000) return null; // голова маленькая — обычная обрезка дешевле вызова
+      const parts = [];
+      for (const m of head) {
+        const role = m && m.role;
+        const label = role === "user" ? "Пользователь" : role === "assistant" ? "Агент" : role === "system" ? "Система" : "Инструмент";
+        const c = m && m.content;
+        let txt = "";
+        if (typeof c === "string") txt = c;
+        else if (Array.isArray(c)) txt = partsText(c) || "[изображение]";
+        if (String(txt || "").trim()) parts.push(label + ": " + truncateText(txt, 1200));
+      }
+      const body = parts.join("\n\n").slice(0, 30000);
+      if (!body.trim()) return null;
+      const sys =
+        "Ты — менеджер памяти ИИ-агента-разработчика. Сожми переписку в краткую памятку на русском (до 700 слов): что просил пользователь, что уже сделано (файлы, команды, git), текущее состояние проекта, что осталось сделать. Памятка должна позволить агенту продолжить работу без исходных сообщений. Пиши только саму памятку, без пояснений.";
+      const timeout = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined;
+      const headers = apiHeaders(provider, apiKeyFor(provider, s), false);
+      if (provider === "anthropic") {
+        const res = await fetch(baseFor(provider, s) + "/v1/messages", {
+          method: "POST",
+          headers,
+          signal: timeout,
+          body: JSON.stringify({ model, max_tokens: 900, system: sys, messages: [{ role: "user", content: body }], stream: false }),
+        });
+        if (!res.ok) return null;
+        const d = await res.json();
+        return (d.content || []).filter((b) => b && b.type === "text").map((b) => b.text || "").join("\n") || null;
+      }
+      if (provider === "ollama") {
+        const res = await fetch(baseFor(provider, s) + "/api/chat", {
+          method: "POST",
+          headers,
+          signal: timeout,
+          body: JSON.stringify({ model, messages: [{ role: "system", content: sys }, { role: "user", content: body }], stream: false }),
+        });
+        if (!res.ok) return null;
+        const d = await res.json();
+        return (d.message && d.message.content) || null;
+      }
+      const res = await fetch(baseFor(provider, s) + "/chat/completions", {
+        method: "POST",
+        headers,
+        signal: timeout,
+        body: JSON.stringify({ model, messages: [{ role: "system", content: sys }, { role: "user", content: body }], max_tokens: 900, stream: false }),
+      });
+      if (!res.ok) return null;
+      const d = await res.json();
+      return (d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Фабрика менеджера контекста: компакция (один раз за запуск) + обрезка хвоста.
+  function createContextManager(opts) {
+    const settings = (opts && opts.settings) || {};
+    const emit = (opts && opts.emit) || (() => {});
+    const planMode = !!(opts && opts.planMode);
+    let compacted = false;
+    let compactMemo = null;
+    return {
+      async manage(messages, budget) {
+        if (!Array.isArray(messages) || !messages.length) return messages || [];
+        const memoWeight = compactMemo ? estimateTokens(compactMemo.content) : 0;
+        let total = 0;
+        for (const m of messages) total += estimateMessageTokens(m);
+        if (total + memoWeight <= budget) return compactMemo ? [compactMemo, ...messages] : messages;
+        if (!compacted && !planMode) {
+          compacted = true;
+          try {
+            const memoText = await compactRemote(settings, messages);
+            if (memoText && String(memoText).trim()) {
+              compactMemo = {
+                role: "system",
+                content:
+                  "ПАМЯТКА ПРЕДЫДУЩЕГО КОНТЕКСТА (сжато, чтобы экономить токены; это резюме старых шагов):\n" +
+                  String(memoText).trim(),
+              };
+              if (emit) emit({ type: "compact", text: "🧠 Контекст сжат: старые шаги свернуты в памятку — токены экономятся." });
+            }
+          } catch {}
+        }
+        const rest = trimConversation(messages, Math.max(1500, budget - memoWeight - 400));
+        return compactMemo ? [compactMemo, ...rest] : rest;
+      },
+      memo() {
+        return compactMemo;
+      },
+    };
+  }
+
   return {
     SYSTEM_PROMPT,
     TOOL_DEFINITIONS,
@@ -2121,6 +2287,10 @@ checkUrl/checkPort и сообщи пользователю адрес.
     contextBudget,
     trimConversation,
     truncateText,
+    selectTools,
+    modelWindow,
+    compactRemote,
+    createContextManager,
     // веб (общий для Electron main и preview-сервера)
     downloadHtml,
     webSearchDDG,

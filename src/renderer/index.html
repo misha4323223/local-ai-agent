@@ -427,6 +427,7 @@
                 <button data-preset="openai" class="chip">OpenAI (GPT)</button>
                 <button data-preset="groq" class="chip">Groq</button>
                 <button data-preset="openrouter" class="chip">OpenRouter</button>
+                <button data-preset="g4f" class="chip">G4F (локально)</button>
                 <button data-preset="custom" class="chip">Свой (OpenAI-совместимый)</button>
               </div>
             </div>
@@ -447,6 +448,9 @@
                 <input id="s-openai-model" placeholder="deepseek-chat · gpt-4o · llama-3.3-70b..." spellcheck="false" />
                 <button id="btn-refresh-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
               </div>
+            </div>
+            <div id="g4f-hint" class="hint-block hidden">
+              G4F — бесплатные модели без ключа. Запусти на ПК: <code>pip install g4f</code>, затем <code>g4f api</code> (по умолчанию порт 8080 — поправь URL выше, если запустил с другим <code>--port</code>). Ключ не нужен. Модели загружай кнопкой ↻. Инструменты агента работают через текстовый фолбэк — не все бесплатные провайдеры G4F поддерживают нативные вызовы инструментов.
             </div>
           </div>
 
@@ -507,6 +511,32 @@
             <label>Адреса для телефона <span class="hint">(телефон должен быть в той же Wi-Fi сети)</span></label>
             <div id="mobile-urls" class="mobile-urls"></div>
             <div class="hint-block">Открой адрес в браузере телефона → введи PIN → в меню браузера «Добавить на главный экран» — работает как приложение. Если адреса нет — проверь, что ПК и телефон в одной сети.</div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-section-title">🔄 Самосовершенствование (OTA)</div>
+          <div class="field">
+            <label class="check-row" title="Агент может улучшать собственный код: правит src/, проверяет синтаксис, собирает бандл (scripts/make-ota.js) — приложение применяет обновление на ходу и перезапускается. Без пересборки EXE, всё локально.">
+              <input id="s-ota-enabled" type="checkbox" />
+              <span class="check-row-text">
+                <b>Разрешить локальные обновления на ходу</b>
+                <small>Напиши агенту «улучши себя» — он исправит свой код, соберёт бандл, и приложение применит его в течение минуты (проверка при старте и каждые 60 секунд).</small>
+              </span>
+            </label>
+          </div>
+          <div class="field" id="ota-fields">
+            <label>Папка обновлений (источник OTA) <span class="hint">(пусто — папка приложения и ota/ рядом с кодом)</span></label>
+            <div class="input-row">
+              <input id="s-ota-dir" placeholder="C:\...\local-ai-agent\ota" spellcheck="false" autocomplete="off" />
+              <button id="btn-ota-open" class="btn btn-ghost" title="Открыть папку обновлений">📁</button>
+            </div>
+            <div id="ota-status" class="ota-status">—</div>
+            <div class="input-row">
+              <button id="btn-ota-check" class="btn btn-ghost btn-small">Проверить сейчас</button>
+              <button id="btn-ota-rollback" class="btn btn-ghost btn-small" title="Вернуться на предыдущую версию кода">↩ Откатить</button>
+            </div>
+            <div class="hint-block">Как это работает: агент правит свой код в src/ → прогоняет node --check → собирает бандл командой <code>node scripts/make-ota.js</code> → приложение подхватывает обновление и перезапускается. GitHub и пересборка EXE не нужны.</div>
           </div>
         </div>
 

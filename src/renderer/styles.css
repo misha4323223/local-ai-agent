@@ -2665,3 +2665,21 @@ body::after {
   font-size: 12px;
   text-align: center;
 }
+
+/* ─── Локальный self-update (OTA): статус ─── */
+.ota-status {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(14, 165, 233, 0.08);
+  border: 1px solid rgba(14, 165, 233, 0.22);
+  color: #9ee8ff;
+  font-size: 12px;
+  word-break: break-all;
+}
+#ota-fields code {
+  background: rgba(0, 229, 255, 0.1);
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-size: 11px;
+}

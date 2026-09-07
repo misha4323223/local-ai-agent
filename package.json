@@ -4,7 +4,7 @@
   "private": true,
   "description": "AI Developer Agent — чат с AI-агентом (Ollama / Groq / внешние API), файловые операции и git",
   "author": "AI Developer Agent",
-  "main": "src/main.js",
+  "main": "src/bootstrap.js",
   "scripts": {
     "start": "electron .",
     "preview": "node server.js",
