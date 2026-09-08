@@ -506,6 +506,8 @@ body {
 .term-server { color: #f0c36d; }
 .term-server .ts-info { color: #7fd4a8; font-style: italic; }
 .term-server .ts-err { color: #ff9d94; }
+.term-server .ts-ok { color: #7fd4a8; }
+.term-server .ts-warn { color: #ffd166; }
 .term-input-row {
   display: flex;
   align-items: center;
@@ -985,6 +987,25 @@ body.resizing-x { cursor: col-resize; user-select: none; }
 .gh-repo-item .repo-meta .dot.private { background: var(--warn); }
 .gh-repo-item .repo-meta .dot.language { background: var(--border-soft); }
 .gh-repo-item .repo-check { color: var(--accent-2); flex-shrink: 0; font-weight: 700; }
+.gh-repo-item .repo-test-btn {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  margin-left: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.gh-repo-item .repo-test-btn:hover {
+  color: var(--accent-2);
+  border-color: var(--accent);
+  background: rgba(34, 211, 238, 0.12);
+}
 
 @media (max-width: 1100px) {
   #messages { padding: 20px 4%; }

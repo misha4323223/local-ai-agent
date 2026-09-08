@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("api", {
   stopMessage: () => ipcRenderer.invoke("ai:stop"),
   testConnection: (ui) => ipcRenderer.invoke("ai:test", ui),
   listModels: (ui) => ipcRenderer.invoke("ai:models", ui),
+  g4fTest: (opts) => ipcRenderer.invoke("g4f:test", opts),
   pickDirectory: () => ipcRenderer.invoke("dialog:pickDir"),
   onAiEvent: (cb) => {
     ipcRenderer.on("ai:event", (_e, ev) => cb(ev));

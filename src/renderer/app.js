@@ -135,7 +135,15 @@
         '<span class="repo-slug">' + escHtml(p.name) + "</span>" +
         '<span class="repo-meta">' + escHtml(p.desc || "") + "</span>" +
         "</span>" +
+        '<button type="button" class="repo-test-btn" title="Проверить провайдера: что отвечает g4f и какие модели отдаёт (логи — в консоль)">▶</button>' +
         (isSelected ? '<span class="repo-check">✓</span>' : "");
+      const testBtn = item.querySelector(".repo-test-btn");
+      if (testBtn) {
+        testBtn.onclick = (e) => {
+          e.stopPropagation();
+          testG4fProvider(p);
+        };
+      }
       item.onclick = () => {
         // «default» — авто-режим G4F: сам выберет провайдера и модель
         $("s-openai-model").value = p.name === "default" ? "default" : p.name + ":";
@@ -194,6 +202,46 @@
     } catch {
       // g4f не отвечает — оставляем офлайн-подсказки из реестра
     }
+  }
+
+  // Кнопка «▶» у провайдера: полный тест — что отвечает g4f и какие модели отдаёт.
+  // Логи идут в панель «Консоль» (правая панель, вкладка console).
+  async function testG4fProvider(p) {
+    if (!p) return;
+    const base = $(URL_INPUT.openai).value.trim();
+    const curVal = ($("s-openai-model").value || "").trim();
+    let model = "";
+    if (p.name !== "default" && curVal.toLowerCase().startsWith(p.name.toLowerCase() + ":")) {
+      model = curVal.slice(p.name.length + 1).trim();
+    } else if (p.name !== "default" && p.models && p.models.length) {
+      model = p.models[0];
+    }
+    // Открываем консоль, чтобы логи было видно сразу
+    switchSideTab("console");
+    termAppend('<div class="term-server"><span class="ts-err">▶ Тест провайдера «' + esc(p.name) + "»…</span></div>");
+    let result;
+    if (isElectron && api.g4fTest) {
+      result = await api.g4fTest({ url: base, provider: p.name, model });
+    } else {
+      termServerAppend('<span class="ts-err">Полный тест доступен в десктоп-приложении (в браузере локальный g4f недоступен).</span>');
+      setSettingsMsg("Тест G4F доступен в приложении на ПК.", true);
+      return;
+    }
+    const lines = (result && result.log) || [];
+    let okCount = 0;
+    let errCount = 0;
+    for (const l of lines) {
+      const cls = l.level === "err" ? "ts-err" : l.level === "ok" ? "ts-ok" : l.level === "warn" ? "ts-warn" : "ts-info";
+      if (l.level === "err") errCount++;
+      if (l.level === "ok") okCount++;
+      termServerAppend('<span class="' + cls + '">' + esc(l.text) + "</span>");
+    }
+    const verdict = errCount
+      ? "Провайдер «" + p.name + "»: есть проблемы — смотри логи в консоли (правая панель)."
+      : okCount
+        ? "Провайдер «" + p.name + "» отвечает — подробности в консоли."
+        : "Провайдер «" + p.name + "»: ответов нет — подробности в консоли.";
+    setSettingsMsg(verdict, !!errCount);
   }
 
   // Скрытие/показ блока выбора провайдера при смене пресета и открытии настроек.

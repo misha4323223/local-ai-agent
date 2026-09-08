@@ -3624,6 +3624,92 @@ ipcMain.handle("ai:test", async (_e, ui) => {
   }
 });
 
+// ── G4F: тест провайдера (кнопка ▶ в настройках) — логи в консоль приложения ──
+// Делается в главном процессе: здесь нет CORS и видно сырые статусы/тела ответов g4f.
+ipcMain.handle("g4f:test", async (_e, opts) => {
+  const log = [];
+  const push = (level, text) => log.push({ level, text });
+  const t0 = Date.now();
+  const base = String((opts && opts.url) || "").trim().replace(/\/+$/, "");
+  const provider = String((opts && opts.provider) || "").trim();
+  const model = String((opts && opts.model) || "").trim();
+  const fetchT = (url, init, timeoutMs) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs || 15000);
+    return fetch(url, Object.assign({ signal: ctrl.signal, redirect: "follow" }, init || {})).finally(() => clearTimeout(t));
+  };
+  const textT = (res) => res.text().catch(() => "");
+  push("info", "Проверка G4F: провайдер «" + (provider || "?") + "» → " + (base || "URL пуст"));
+  if (!/^https?:\/\//i.test(base)) {
+    push("err", "Базовый URL не заполнен или не похож на http://localhost:1337/v1 — поправь поле URL.");
+    return { ok: false, log };
+  }
+  // 1) Список моделей
+  const mUrl = base + "/models";
+  try {
+    const res = await fetchT(mUrl, {}, 15000);
+    const body = await textT(res);
+    push("info", "GET " + mUrl + " → HTTP " + res.status + " (" + (Date.now() - t0) + " мс)");
+    if (!res.ok) {
+      push("err", "Ответ не 2xx: " + body.slice(0, 300));
+    } else {
+      let arr = [];
+      try {
+        const j = JSON.parse(body);
+        const list = Array.isArray(j) ? j : (j.data || j.models || []);
+        arr = list.map((m) => (typeof m === "string" ? m : (m && (m.id || m.name)) || "")).filter(Boolean);
+      } catch {}
+      if (arr.length) push("ok", "Моделей отдаёт: " + arr.length + ". Первые: " + arr.slice(0, 8).join(", "));
+      else push("warn", "Список моделей пуст или в неожиданном формате: " + body.slice(0, 200));
+    }
+  } catch (e) {
+    push("err", "GET /models не прошёл: " + (e.message || String(e)) + ". Проверь, что g4f запущен («g4f api») и порт правильный (1337 / 8080).");
+  }
+  // 2) Минимальный чат-запрос: что РЕАЛЬНО отвечает провайдер
+  if (provider && provider !== "default" && model) {
+    const cUrl = base + "/chat/completions";
+    push("info", "POST " + cUrl + " — модель «" + model + "» через провайдера «" + provider + "» (max_tokens 8)");
+    const t1 = Date.now();
+    try {
+      const res = await fetchT(cUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          provider,
+          messages: [{ role: "user", content: "Ответь одним словом: пинг" }],
+          max_tokens: 8,
+          stream: false,
+        }),
+      }, 30000);
+      const body = await textT(res);
+      if (!res.ok) {
+        push("err", "HTTP " + res.status + " (" + (Date.now() - t1) + " мс): " + body.slice(0, 400));
+      } else {
+        let snippet = "";
+        try {
+          const j = JSON.parse(body);
+          const c0 = j.choices && j.choices[0];
+          snippet = c0 && c0.message && c0.message.content
+            ? String(c0.message.content).trim().slice(0, 140)
+            : (c0 && c0.text ? String(c0.text).trim().slice(0, 140) : "");
+        } catch {}
+        if (snippet) push("ok", "Ответ получен (" + (Date.now() - t1) + " мс): «" + snippet + "» — провайдер отвечает.");
+        else push("warn", "HTTP 200, но текста в ответе нет (" + (Date.now() - t1) + " мс). Сырой ответ: " + body.slice(0, 300));
+      }
+    } catch (e) {
+      push("err", "POST /chat/completions не прошёл: " + (e.message || String(e)));
+    }
+  } else if (provider === "default") {
+    push("warn", "Провайдер «default» — авто-режим: проверяется только список моделей, чат-тест пропущен.");
+  } else {
+    push("warn", "Модель не указана — чат-тест пропущен. Выбери модель провайдера (чипы ниже) и повтори.");
+  }
+  push("info", "— Проверка завершена за " + (Date.now() - t0) + " мс —");
+  return { ok: true, log };
+});
+
+
 ipcMain.handle("ai:models", async (_e, ui) => {
   const s = normalizeSettings({ ...loadSettings(), ...(ui || {}) });
   try {
