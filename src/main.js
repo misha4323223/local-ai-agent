@@ -1,6 +1,6 @@
 "use strict";
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Notification } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification, clipboard, desktopCapturer } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
@@ -29,6 +29,10 @@ const {
   generateImageRemote,
   selectTools,
   modelWindow,
+  // инструменты ОС (парсеры, whitelist)
+  parseProcessesCsv,
+  registryPathAllowed,
+  parseSysInfoJson,
   createContextManager,
   estimateTokens,
 } = require("./renderer/agent-core.js");
@@ -250,6 +254,18 @@ function sanitizePath(p) {
 // (удаление данных, принудительный push, очистка истории и т.п.).
 const DANGEROUS_CMD_RE =
   /(^|\s)(rm\s+-[a-z]*r|rmdir\s+\/s|rd\s+\/s|del\s+\/f|format\s+[a-z]:|mkfs\.|dd\s+if=|git\s+push([\s;&|()]|$)|git\s+reset\s+--hard|git\s+clean\s+-f|git\s+checkout\s+--|shutdown\s|taskkill\s+\/f|:?\(\)\s*\{|chmod\s+-R\s+777|sudo\s+rm|powershell\s+.*remove-item|Remove-Item\s+-Recurse|\bdel\b.*\/s)/i;
+
+// Инструменты, требующие явного подтверждения пользователя (как опасные команды).
+const DANGEROUS_TOOLS = new Set(["killProcess", "registryWrite", "installExe"]);
+
+// Короткое описание аргументов для подтверждения опасного действия.
+function describeToolArgs(name, a) {
+  const x = a || {};
+  if (name === "killProcess") return "завершить процесс «" + (x.name || x.pid || "?") + "»" + (x.force ? " (принудительно)" : "");
+  if (name === "registryWrite") return "записать значение реестра «" + (x.name || "") + "» в " + (x.path || "?");
+  if (name === "installExe") return "скачать и запустить установщик: " + String(x.url || "").slice(0, 120);
+  return name + " " + JSON.stringify(x).slice(0, 120);
+}
 
 // Чистит ANSI-escape-последовательности (цвета npm-сборок и т.п.) из вывода терминала.
 function stripAnsi(s) {
@@ -1156,6 +1172,50 @@ const WINGET_IDS = {
   "7zip": "7zip.7zip",
   "7z": "7zip.7zip",
   powershell: "Microsoft.PowerShell",
+  yarn: "Yarn.Yarn",
+  pnpm: "pnpm.pnpm",
+  bun: "Oven-sh.Bun",
+  docker: "Docker.DockerDesktop",
+  dotnet: "Microsoft.DotNet.SDK.8",
+  java: "EclipseAdoptium.Temurin.21.JDK",
+  jdk: "EclipseAdoptium.Temurin.21.JDK",
+  curl: "curl.curl",
+  wget: "GNU.Wget2",
+  make: "GnuWin32.Make",
+  cmake: "Kitware.CMake",
+  sqlite: "SQLite.SQLite",
+  redis: "Redis.Redis",
+  nginx: "Nginx.Nginx",
+  postgresql: "PostgreSQL.PostgreSQL.16",
+  postgres: "PostgreSQL.PostgreSQL.16",
+  mysql: "Oracle.MySQL",
+  mongodb: "MongoDB.Server",
+  ollama: "Ollama.Ollama",
+  chrome: "Google.Chrome",
+  chromium: "Chromium.Chromium",
+  firefox: "Mozilla.Firefox",
+  vscode: "Microsoft.VisualStudioCode",
+  notepadpp: "Notepad++.Notepad++",
+  vlc: "VideoLAN.VLC",
+  winrar: "RARLab.WinRAR",
+  powertoys: "Microsoft.PowerToys",
+  terminal: "Microsoft.WindowsTerminal",
+  imagemagick: "ImageMagick.ImageMagick",
+  telegram: "Telegram.TelegramDesktop",
+  discord: "Discord.Discord",
+  slack: "SlackTechnologies.Slack",
+  obs: "OBSProject.OBSStudio",
+  blender: "BlenderFoundation.Blender",
+  gimp: "GIMP.GIMP",
+  inkscape: "Inkscape.Inkscape",
+  figma: "Figma.Figma",
+  drawio: "JGraph.Draw",
+  obsidian: "Obsidian.Obsidian",
+  everything: "voidtools.Everything",
+  spotify: "Spotify.Spotify",
+  zoom: "Zoom.Zoom",
+  putty: "PuTTY.PuTTY",
+  wireshark: "WiresharkFoundation.Wireshark",
 };
 
 const EXIT_HINTS = {
@@ -1205,7 +1265,25 @@ async function installSystemPkg(pkg) {
   }
   if (plat === "win32") {
     const id = name.includes(".") ? name : WINGET_IDS[name.toLowerCase()];
-    if (!id) return "Не знаю winget-ID для «" + name + "». Известные: git (Git.Git), node, python, ffmpeg, gh, 7zip. Укажи полный ID вида Vendor.Name — например installSystemPackage(\"Git.Git\").";
+    if (!id) {
+      return "Не знаю winget-ID для «" + name + "». Найди точный ID: wingetSearch(\"" + name + "\"), затем installSystemPackage('Vendor.Name'). Известные ID: " + Object.keys(WINGET_IDS).join(", ") + ". Либо укажи прямую ссылку на установщик: installExe(url, name).";
+    }
+    const wg = findProgram("winget");
+    if (!wg.found) {
+      const choco = findProgram("choco");
+      if (choco.found) {
+        const cmd = "choco install -y " + name.split(".").pop();
+        const out = await runTerminalCommand(cmd, os.homedir(), 300000);
+        return "$ " + cmd + "\n\n" + out + "\n\nДальше: 1) refreshEnv() — обновить PATH; 2) checkInstalledProgram(\"" + name + "\"). Если нужен администратор — повтори через runCommandAsAdmin(\"" + cmd + "\").";
+      }
+      const scoop = findProgram("scoop");
+      if (scoop.found) {
+        const cmd = "scoop install " + name.split(".").pop();
+        const out = await runTerminalCommand(cmd, os.homedir(), 300000);
+        return "$ " + cmd + "\n\n" + out + "\n\nДальше: 1) refreshEnv() — обновить PATH; 2) checkInstalledProgram(\"" + name + "\").";
+      }
+      return "winget не установлен (choco и scoop тоже не найдены). Установи winget из Microsoft Store («App Installer»), либо укажи прямую ссылку на установщик: installExe(url, name).";
+    }
     const cmd = "winget install --id " + id + " --exact --accept-package-agreements --accept-source-agreements --disable-interactivity";
     const out = await runTerminalCommand(cmd, os.homedir(), 300000);
     return (
@@ -2171,6 +2249,42 @@ async function executeTool(name, args, settings) {
         rows.push("Рабочая директория агента: " + agentWorkDir(settings));
         rows.push("Записей в PATH: " + (envPathInfo().value || "").split(path.delimiter).filter(Boolean).length);
         rows.push("");
+        // Расширенная информация: Windows — PowerShell/CIM, остальные — os.*
+        if (process.platform === "win32") {
+          const ps =
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" +
+            "$os=Get-CimInstance Win32_OperatingSystem; " +
+            "$cpu=Get-CimInstance Win32_Processor; " +
+            "$gpu=Get-CimInstance Win32_VideoController | Select-Object -First 1; " +
+            "$ips=@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254*' } | ForEach-Object { $_.IPAddress }); " +
+            "$disks=@(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Root=$_.Root; UsedGB=[math]::Round($_.Used/1GB,1); FreeGB=[math]::Round($_.Free/1GB,1) } }); " +
+            "[pscustomobject]@{ os=$os.Caption; build=$os.Version; cpu=$cpu.Name; gpu=$gpu.Name; ramGB=[math]::Round($os.TotalVisibleMemorySize/1MB,1); ips=$ips; disks=$disks } | ConvertTo-Json -Compress -Depth 3";
+          const r = await spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], { cwd: os.homedir(), timeoutMs: 30000 });
+          const si = parseSysInfoJson(r.ok ? r.out : "");
+          if (si.os) rows.push("Windows: " + si.os + (si.build ? " (build " + si.build + ")" : ""));
+          if (si.cpu) rows.push("CPU: " + truncateText(si.cpu, 100));
+          if (si.gpu) rows.push("GPU: " + truncateText(si.gpu, 100));
+          if (si.ramGB) rows.push("RAM: " + si.ramGB + " ГБ");
+          if (Array.isArray(si.ips) && si.ips.length) rows.push("IP-адреса (LAN): " + si.ips.join(", "));
+          if (Array.isArray(si.disks) && si.disks.length) {
+            rows.push("Диски:");
+            for (const d of si.disks) {
+              rows.push("• " + (d.Root || "?") + " — свободно " + (d.FreeGB != null ? d.FreeGB : "?") + " ГБ, занято " + (d.UsedGB != null ? d.UsedGB : "?") + " ГБ");
+            }
+          }
+        } else {
+          const cpus = os.cpus();
+          if (cpus && cpus.length) rows.push("CPU: " + truncateText(cpus[0].model, 100) + " (" + cpus.length + " ядер)");
+          rows.push("RAM: " + Math.round(os.totalmem() / 1024 / 1024 / 1024) + " ГБ всего, свободно " + Math.round(os.freemem() / 1024 / 1024 / 1024) + " ГБ");
+          const ips = [];
+          for (const k of Object.keys(os.networkInterfaces())) {
+            for (const a of os.networkInterfaces()[k] || []) {
+              if (a && a.family === "IPv4" && !a.internal && a.address && a.address.indexOf("127.") !== 0) ips.push(a.address);
+            }
+          }
+          if (ips.length) rows.push("IP-адреса (LAN): " + ips.join(", "));
+        }
+        rows.push("");
         rows.push("Ключевые программы:");
         for (const n of ["git", "node", "npm", "python", "docker"]) {
           const f = findProgram(n);
@@ -2180,8 +2294,18 @@ async function executeTool(name, args, settings) {
             rows.push("• " + n + ": " + (v || "установлен — " + f.path));
           }
         }
+        // Установленные программы через winget (кратко: количество + первые 10)
+        if (process.platform === "win32") {
+          const w = await spawnRaw(["winget", "list", "--accept-source-agreements", "--disable-interactivity"], { cwd: os.homedir(), timeoutMs: 25000 });
+          const wl = (w.out || "").split("\n").map((l) => l.trim()).filter((l) => l && !/^Name[ ]+Id[ ]+Version/i.test(l) && l.indexOf("---") !== 0 && !/^[0-9]+ package/i.test(l));
+          if (wl.length) {
+            rows.push("");
+            rows.push("Установленные программы (winget, всего ~" + wl.length + "):");
+            for (const l of wl.slice(0, 10)) rows.push("• " + l);
+          }
+        }
         rows.push("");
-        rows.push("Советы: не установлено → installSystemPackage(имя); не видно после установки → refreshEnv(); нужны права администратора → runCommandAsAdmin(команда); непонятная ошибка → explainError(код).");
+        rows.push("Советы: не установлено → installSystemPackage(имя) или wingetSearch(имя); не видно после установки → refreshEnv(); нужны права администратора → runCommandAsAdmin(команда); зависший процесс → listProcesses + killProcess; непонятная ошибка → explainError(код).");
         return rows.join("\n");
       }
       case "installSystemPackage": {
@@ -2454,6 +2578,191 @@ async function executeTool(name, args, settings) {
             });
           }
         });
+      }
+      case "listProcesses": {
+        const filter = String(args.filter || "").trim().toLowerCase();
+        let out = "";
+        if (process.platform === "win32") {
+          const r = await spawnRaw(["tasklist", "/FO", "CSV", "/NH"], { cwd: os.homedir(), timeoutMs: 20000 });
+          out = r.ok ? r.out : "";
+        } else {
+          const r = await spawnRaw(["ps", "-eo", "pid=,comm=,%cpu=,rss=,args="], { cwd: os.homedir(), timeoutMs: 20000 });
+          out = r.ok ? r.out : "";
+        }
+        let procs = parseProcessesCsv(out);
+        if (filter) {
+          procs = procs.filter((p) => (p.name || "").toLowerCase().indexOf(filter) !== -1 || (p.args || "").toLowerCase().indexOf(filter) !== -1);
+        }
+        procs = procs.slice(0, 60);
+        if (!procs.length) return "Процессы не найдены" + (filter ? " по фильтру «" + filter + "»" : "") + ".";
+        const head = "Процессы" + (filter ? " (фильтр «" + filter + "»)" : "") + " (" + procs.length + " из списка):\n";
+        return head + procs.map((p) => {
+          const mem = p.mem ? " " + p.mem : p.rss ? " " + Math.round(Number(p.rss) / 1024) + " КБ" : "";
+          const argsPart = p.args ? "  «" + truncateText(p.args, 110) + "»" : "";
+          return "• PID " + p.pid + " — " + (p.name || "") + mem + argsPart;
+        }).join("\n") + "\n\nЗависший процесс завершай через killProcess(pid или name).";
+      }
+      case "killProcess": {
+        const pid = parseInt(args.pid, 10);
+        const name = String(args.name || "").trim();
+        const force = args.force === true || args.force === "true" || args.force === 1;
+        if (!pid && !name) return "Ошибка: укажи pid (число из listProcesses) или name (например node).";
+        let cmd, label;
+        if (process.platform === "win32") {
+          cmd = "taskkill " + (pid ? "/PID " + pid : "/IM " + name) + " /T" + (force ? " /F" : "");
+          label = pid ? "PID " + pid : name;
+        } else if (pid) {
+          cmd = "kill " + (force ? "-9 " : "") + pid;
+          label = "PID " + pid;
+        } else {
+          cmd = "pkill " + (force ? "-9 " : "-TERM ") + JSON.stringify(name);
+          label = name;
+        }
+        const out = await runTerminalCommand(cmd, os.homedir(), 20000);
+        const failed = /не найден|ERROR|not found|No matching|No processes|кодом (1|128)/i.test(out);
+        return (failed ? "Возможно, процесс уже завершён или не найден:\n" : "OK — процесс " + label + " завершён.\n") + "$ " + cmd + "\n\n" + out;
+      }
+      case "clipboardWrite": {
+        const text = String(args.text == null ? "" : args.text);
+        try {
+          clipboard.writeText(text);
+        } catch (e) {
+          return "Ошибка: не удалось записать в буфер обмена: " + (e.message || String(e));
+        }
+        return "OK — текст скопирован в буфер обмена (" + text.length + " симв.).";
+      }
+      case "clipboardRead": {
+        let text = "";
+        try {
+          text = clipboard.readText() || "";
+        } catch (e) {
+          return "Ошибка: не удалось прочитать буфер обмена: " + (e.message || String(e));
+        }
+        if (!text.trim()) return "Буфер обмена пуст (текста нет).";
+        return "Содержимое буфера обмена:\n\n" + truncateText(text, 4000);
+      }
+      case "screenshotDesktop": {
+        const winFilter = String(args.window || "").trim().toLowerCase();
+        let sources = [];
+        try {
+          sources = await desktopCapturer.getSources({
+            types: winFilter ? ["window"] : ["screen"],
+            thumbnailSize: { width: 1920, height: 1080 },
+            fetchWindowIcons: false,
+          });
+        } catch (e) {
+          return "Ошибка захвата экрана: " + (e.message || String(e)) + " (работает только в десктоп-приложении).";
+        }
+        let src = sources[0];
+        if (winFilter) src = sources.find((s) => s.name.toLowerCase().indexOf(winFilter) !== -1) || sources[0];
+        if (!src) return "Не удалось получить источники экрана/окон.";
+        const png = src.thumbnail.toPNG();
+        if (!png || !png.length) return "Пустой скриншот «" + src.name + "» — не удалось захватить.";
+        const sz = src.thumbnail.getSize();
+        const dataUrl = "data:image/png;base64," + png.toString("base64");
+        if (activeEmit) activeEmit({ type: "image", path: "desktop:" + src.name, dataUrl });
+        return "OK — скриншот «" + src.name + "» (" + sz.width + "×" + sz.height + ") снят и показан пользователю во встроенном просмотрщике. При необходимости проанализируй детали через analyzeImage.";
+      }
+      case "registryRead": {
+        if (process.platform !== "win32") return "Ошибка: реестр Windows доступен только на Windows.";
+        const regPath = String(args.path || "").trim();
+        const name = String(args.name || "").trim();
+        const chk = registryPathAllowed(regPath, false);
+        if (!chk.ok) return "Ошибка: " + chk.error;
+        const esc = regPath.replace(/'/g, "''");
+        let ps;
+        if (name) {
+          const escName = name.replace(/'/g, "''");
+          ps =
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" +
+            "try { $v = Get-ItemPropertyValue -Path '" + esc + "' -Name '" + escName + "' -ErrorAction Stop; Write-Output (($v | Out-String).Trim()) } catch { Write-Output '__ERR__' }";
+        } else {
+          ps =
+            "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" +
+            "$i = Get-Item -Path '" + esc + "' -ErrorAction SilentlyContinue; " +
+            "if ($null -eq $i) { Write-Output '__ERR__' } else { $d = $i.GetValue(''); if ($null -eq $d) { Write-Output '(раздел без значения по умолчанию)' } else { Write-Output ('Значение по умолчанию: ' + $d) } }";
+        }
+        const r = await spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], { cwd: os.homedir(), timeoutMs: 20000 });
+        const out = (r.out || "").trim();
+        if (out.indexOf("__ERR__") !== -1 || /Cannot find|не найден|отказано/i.test(out + r.err)) {
+          return "Раздел или значение не найдено: " + regPath + (name ? " → " + name : "") + ". Проверь путь — чтение разрешено только из SOFTWARE/ENVIRONMENT/SYSTEM/SECURITY.";
+        }
+        return "Реестр " + regPath + (name ? " → " + name : "") + ":\n" + out;
+      }
+      case "registryWrite": {
+        if (process.platform !== "win32") return "Ошибка: реестр Windows доступен только на Windows.";
+        const regPath = String(args.path || "").trim();
+        const name = String(args.name || "").trim();
+        if (!name) return "Ошибка: укажи name (имя значения).";
+        const value = String(args.value == null ? "" : args.value);
+        const type = String(args.type || "REG_SZ").toUpperCase();
+        if (["REG_SZ", "REG_DWORD", "REG_EXPAND_SZ"].indexOf(type) === -1) {
+          return "Ошибка: type должен быть REG_SZ, REG_DWORD или REG_EXPAND_SZ.";
+        }
+        const chk = registryPathAllowed(regPath, true);
+        if (!chk.ok) return "Ошибка: " + chk.error;
+        const esc = regPath.replace(/'/g, "''");
+        const escName = name.replace(/'/g, "''");
+        const valPs = type === "REG_DWORD" ? String(Number(value) || 0) : value.replace(/'/g, "''");
+        const ps =
+          "[Console]::OutputEncoding=[Text.Encoding]::UTF8;" +
+          "$p = '" + esc + "';" +
+          "New-Item -Path $p -Force | Out-Null;" +
+          "New-ItemProperty -Path $p -Name '" + escName + "' -Value '" + valPs + "' -PropertyType " + type + " -Force | Out-Null;" +
+          "Write-Output 'OK'";
+        const r = await spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], { cwd: os.homedir(), timeoutMs: 20000 });
+        if (!r.ok || (r.out || "").indexOf("OK") === -1) {
+          return "Ошибка записи: " + (((r.err || "") + " " + (r.out || "")).trim() || "неизвестная причина") + " — проверь права (HKCU не требует админа) или путь.";
+        }
+        return "OK — значение «" + name + "» = «" + value + "» (" + type + ") записано в " + regPath;
+      }
+      case "openPath": {
+        const p = resolvePath(args.path, settings);
+        if (!fs.existsSync(p)) return "Ошибка: путь не найден: " + p;
+        const err = await shell.openPath(p);
+        return err ? "Не удалось открыть: " + err : "OK — открыто системным приложением: " + p;
+      }
+      case "wingetSearch": {
+        if (process.platform !== "win32") return "Ошибка: winget доступен только на Windows.";
+        const q = String(args.query || "").trim();
+        if (!q) return "Ошибка: укажи query (например python, ffmpeg, ollama).";
+        const r = await spawnRaw(["winget", "search", q, "--accept-source-agreements", "--disable-interactivity"], { cwd: os.homedir(), timeoutMs: 60000 });
+        const out = (r.out || "").trim();
+        if (!r.ok && !out) {
+          return "winget недоступен: " + ((r.err || "").trim() || "код " + r.code) + ". Установи winget (Microsoft Store: «App Installer») или используй installSystemPackage — при отсутствии winget попробует choco/scoop.";
+        }
+        const lines = out.split("\n").filter((l) => l.trim() && !/^Name\s+Id\s+Version\s+Source/i.test(l));
+        return "Результаты winget search «" + q + "»:\n\n" + (lines.slice(0, 25).join("\n") || out || "ничего не найдено") + "\n\nУстановка: installSystemPackage(\"" + q + "\") — если ID уникален, или укажи полный ID вида Vendor.Name из списка.";
+      }
+      case "installExe": {
+        const url = String(args.url || "").trim();
+        const name = String(args.name || "").trim();
+        if (!/^https?:\/\//i.test(url)) return "Ошибка: укажи прямой URL установщика .exe (https://...).";
+        const silent = String(args.silentArgs || "").trim() || "/S";
+        const tmpDir = path.join(os.tmpdir(), "ai-agent-install");
+        try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) { return "Ошибка: не удалось создать временную папку: " + (e.message || String(e)); }
+        const base = (name || "installer").replace(/[^A-Za-z0-9._-]/g, "_") + ".exe";
+        const dest = path.join(tmpDir, base);
+        let res;
+        try {
+          res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "AI-Developer-Agent" } });
+        } catch (e) {
+          return "Ошибка загрузки " + url + ": " + (e.message || String(e));
+        }
+        if (!res.ok) return "Ошибка HTTP " + res.status + " при загрузке " + url;
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 500 * 1024 * 1024) return "Установщик слишком большой (>500 МБ).";
+        fs.writeFileSync(dest, buf);
+        const cmd = '"' + dest + '" ' + silent;
+        const out = await runTerminalCommand(cmd, os.homedir(), 300000);
+        const looksFailed = /кодом [0-9]+|Access is denied|отказано в доступе|требуется повышение|administrator/i.test(out);
+        return (
+          "Установщик скачан: " + dest + " (" + Math.round(buf.length / 1024 / 1024) + " МБ)\n" +
+          "$ " + cmd + "\n\n" + out +
+          (looksFailed
+            ? "\n\nЕсли установка требует прав администратора — повтори через runCommandAsAdmin(\"" + cmd.replace(/"/g, "") + "\")."
+            : "\n\nПроверь: checkInstalledProgram(\"" + (name || "программа") + "\").")
+        );
       }
       default:
         return "Ошибка: неизвестный инструмент " + name;
@@ -2809,6 +3118,15 @@ async function runAi(settings, messages, win, opts) {
           } else {
             result = await executeTool(c.name, c.args, settings);
           }
+        } else {
+          result = await executeTool(c.name, c.args, settings);
+        }
+      } else if (DANGEROUS_TOOLS.has(c.name)) {
+        const desc = describeToolArgs(c.name, c.args);
+        const answer = await askUserWait("⚠️ Действие потенциально опасно: " + desc + "\nВыполнить? (да / нет)");
+        const ok = /^(да|yes|y|ok|го|ага|точно|конечно|давай|выполн)/i.test(String(answer || "").trim());
+        if (!ok) {
+          result = "Действие НЕ выполнено: пользователь не подтвердил. Сообщи, что действие пропущено, и предложи безопасную альтернативу.";
         } else {
           result = await executeTool(c.name, c.args, settings);
         }

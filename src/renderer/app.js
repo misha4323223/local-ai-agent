@@ -46,6 +46,10 @@
     custom: "Свой",
   };
 
+  // Провайдеры G4F — единый реестр живёт в agent-core.js (его же использует транспорт
+  // buildChatRequest для маршрута «Провайдер:модель»).
+  const G4F_PROVIDERS = (AgentCore && AgentCore.G4F_PROVIDERS) || [];
+
   // Ключи настроек по провайдеру (поле URL / API-ключ / модель)
   const MODEL_KEY = { ollama: "ollamaModel", openai: "openaiModel", anthropic: "anthropicModel" };
   const URL_KEY = { ollama: "ollamaUrl", openai: "openaiUrl", anthropic: "anthropicUrl" };
@@ -93,7 +97,119 @@
     $("attach-thumb").removeAttribute("src");
   }
   let currentPreset = "deepseek";
+  let g4fProviderQuery = ""; // поиск по провайдерам G4F в настройках
   const msgEls = new Map();
+
+  // ── Выбор провайдера G4F (аккордеон в настройках): поиск по буквам + список ──
+  // Клик по провайдеру подставляет маршрут «Провайдер:модель» в поле модели.
+  function renderG4fProviderList() {
+    const list = $("g4f-provider-list");
+    const status = $("g4f-provider-status");
+    if (!list) return;
+    const q = g4fProviderQuery.trim().toLowerCase();
+    const provs = G4F_PROVIDERS.filter(
+      (p) => !q || p.name.toLowerCase().includes(q) || (p.desc || "").toLowerCase().includes(q)
+    );
+    list.innerHTML = "";
+    if (!provs.length) {
+      if (status) {
+        status.textContent = "Поиск «" + g4fProviderQuery + "»: ничего не найдено. Попробуй другие буквы (например: deep, chat, open, qwen).";
+        status.className = "gh-repos-status err";
+      }
+      return;
+    }
+    if (status) {
+      status.textContent = g4fProviderQuery.trim()
+        ? "Поиск «" + g4fProviderQuery + "»: найдено " + provs.length + " — нажми на провайдера, он вставит маршрут в поле модели."
+        : "Провайдеров G4F: " + provs.length + " (★ — стабильные, без ключа). Нажми — вставится маршрут «Провайдер:модель» в поле модели.";
+      status.className = "gh-repos-status";
+    }
+    const curModel = ($("s-openai-model").value || "").trim();
+    for (const p of provs) {
+      const isSelected = curModel.toLowerCase().startsWith(p.name.toLowerCase() + ":");
+      const item = document.createElement("div");
+      item.className = "gh-repo-item" + (isSelected ? " selected" : "");
+      item.innerHTML =
+        '<span class="repo-icon">' + (p.rec ? "★" : "◆") + "</span>" +
+        '<span class="repo-info">' +
+        '<span class="repo-slug">' + escHtml(p.name) + "</span>" +
+        '<span class="repo-meta">' + escHtml(p.desc || "") + "</span>" +
+        "</span>" +
+        (isSelected ? '<span class="repo-check">✓</span>' : "");
+      item.onclick = () => {
+        // «default» — авто-режим G4F: сам выберет провайдера и модель
+        $("s-openai-model").value = p.name === "default" ? "default" : p.name + ":";
+        $("s-openai-model").focus();
+        renderG4fProviderList();
+        setSettingsMsg(
+          p.name === "default"
+            ? "Авто-режим G4F: модель «default» — G4F сам подберёт провайдера. Сохрани настройки и общайся."
+            : "Маршрут через «" + p.name + "» вставлен в поле модели. Допиши имя модели (или нажми ↻, чтобы увидеть список моделей) и сохрани настройки.",
+          false
+        );
+      };
+      list.appendChild(item);
+    }
+  }
+
+  // Скрытие/показ блока выбора провайдера при смене пресета и открытии настроек.
+  // preset передаётся от кликнутого чипа, потому что наш слушатель срабатывает
+  // раньше setPreset() и currentPreset ещё не обновился.
+  function syncG4fProviderBox(preset) {
+    const box = $("g4f-provider-box");
+    if (!box) return;
+    const active = preset || currentPreset;
+    box.classList.toggle("hidden", active !== "g4f");
+    if (active === "g4f") renderG4fProviderList();
+  }
+  function wireG4fProviderPicker() {
+    const head = $("g4f-provider-head");
+    const search = $("g4f-provider-search");
+    const clear = $("g4f-provider-clear");
+    if (head) {
+      head.onclick = () => {
+        const body = $("g4f-provider-body");
+        const chev = $("g4f-prov-chev");
+        const opening = body.classList.contains("hidden");
+        body.classList.toggle("hidden", !opening);
+        if (chev) chev.textContent = opening ? "▾" : "▸";
+        if (opening) renderG4fProviderList();
+      };
+    }
+    if (search && clear) {
+      search.addEventListener("input", () => {
+        g4fProviderQuery = search.value;
+        clear.classList.toggle("hidden", !search.value.trim());
+        renderG4fProviderList();
+      });
+      search.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          search.value = "";
+          g4fProviderQuery = "";
+          clear.classList.add("hidden");
+          renderG4fProviderList();
+        }
+      });
+      clear.onclick = () => {
+        search.value = "";
+        g4fProviderQuery = "";
+        clear.classList.add("hidden");
+        renderG4fProviderList();
+      };
+    }
+    // Переключение пресетов (чипы в настройках) и открытие окна настроек
+    document.querySelectorAll(".chip[data-preset]").forEach((c) => {
+      c.addEventListener("click", () => syncG4fProviderBox(c.dataset.preset));
+    });
+    const overlay = $("settings-overlay");
+    if (overlay && window.MutationObserver) {
+      new MutationObserver(() => {
+        if (!overlay.classList.contains("hidden")) syncG4fProviderBox();
+      }).observe(overlay, { attributes: true, attributeFilter: ["class"] });
+    }
+  }
+  // Элементы настроек уже в DOM (скрипты в конце body) — вешаем события сразу
+  wireG4fProviderPicker();
 
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
@@ -451,6 +567,16 @@
     getDependencies: "📦",
     formatCode: "✨",
     dbQuery: "🗄️",
+    listProcesses: "📊",
+    killProcess: "💥",
+    clipboardRead: "📋",
+    clipboardWrite: "📝",
+    screenshotDesktop: "🪟",
+    registryRead: "🗃️",
+    registryWrite: "🗃️",
+    openPath: "📂",
+    wingetSearch: "🧲",
+    installExe: "⚙️",
   };
 
   const TOOL_LABEL = {
@@ -517,6 +643,16 @@
     getDependencies: "Зависимости проекта",
     formatCode: "Форматирование кода",
     dbQuery: "SQL-запрос к БД",
+    listProcesses: "Список процессов",
+    killProcess: "Завершение процесса",
+    clipboardRead: "Чтение буфера обмена",
+    clipboardWrite: "Копирование в буфер",
+    screenshotDesktop: "Скриншот экрана",
+    registryRead: "Чтение реестра",
+    registryWrite: "Запись в реестр",
+    openPath: "Открытие файла",
+    wingetSearch: "Поиск в winget",
+    installExe: "Установка .exe",
   };
 
   function toolTargetOf(t) {
@@ -2144,13 +2280,20 @@
       b.textContent = name;
       b.title = "Вставить модель " + name;
       b.onclick = () => {
-        $(MODEL_INPUT[provider]).value = name;
-        settings[MODEL_KEY[provider]] = name;
-        settings.model = name;
+        // На пресете G4F в поле модели может стоять маршрут «Провайдер:» — не затираем его:
+        // модель дописывается после двоеточия, иначе теряется выбранный провайдер.
+        const input = $(MODEL_INPUT[provider]);
+        const curVal = (input.value || "").trim();
+        const g4fPrefix = /^[A-Za-z0-9_]+:\s*$/.test(curVal) ? curVal.replace(/:+$/, "") + ":" : "";
+        const finalName = g4fPrefix + name;
+        input.value = finalName;
+        settings[MODEL_KEY[provider]] = finalName;
+        settings.model = finalName;
         persistSettings();
         updateBadge();
-        setSettingsMsg("Модель выбрана: " + name + ". Нажми «Сохранить настройки» и общайся.", false);
+        setSettingsMsg("Модель выбрана: " + finalName + ". Нажми «Сохранить настройки» и общайся.", false);
         renderModelHints(provider, models);
+        if (currentPreset === "g4f") renderG4fProviderList();
       };
       box.appendChild(b);
     }

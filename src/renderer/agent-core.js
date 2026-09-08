@@ -1,4 +1,5 @@
 "use strict";
+
 /* Общее ядро агента: системный промпт, определения инструментов, стриппер думающих блоков,
    а также унифицированный транспорт к трём семействам провайдеров:
      - "ollama"    — локальная Ollama (нативный /api/chat, NDJSON-стрим)
@@ -36,9 +37,9 @@
 17. Запуск проекта: запускай проект ТОЛЬКО через встроенный терминал приложения (инструменты runCommand / startBackground / shellStart) — не проси пользователя запускать проект вручную и не открывай внешние терминалы. Dev-сервер по умолчанию запускай на порту 5000 (http://localhost:5000), если в конфиге проекта явно не задан другой порт (проверь package.json / .env / конфиги). После запуска проверь готовность через проверь через checkUrl/checkPort и сообщи пользователю адрес.
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
-checkUrl/checkPort и сообщи пользователю адрес.
+20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), тихая установка скачанного установщика .exe — installExe (спросит подтверждение). ВАЖНО: команды по умолчанию выполняются в cmd.exe на Windows — если нужны командлеты PowerShell (Get-Process, Get-Service, Get-NetIPAddress и т.п.), напиши внутри runCommand: powershell -NoProfile -Command "...".
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -1021,6 +1022,126 @@ checkUrl/checkPort и сообщи пользователю адрес.
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "listProcesses",
+        description: "Список запущенных процессов ОС (Windows: tasklist; macOS/Linux: ps). filter — необязательная подстрока имени или пути для фильтрации (например node, expo, chrome). Нужен, чтобы найти PID зависшего процесса перед killProcess.",
+        parameters: {
+          type: "object",
+          properties: { filter: { type: "string", description: "Необязательно: подстрока имени/пути процесса" } },
+          required: [],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "killProcess",
+        description: "Завершить процесс по PID или имени (например зависший node.exe, expo, браузер). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ пользователя. pid — числовой ID из listProcesses; name — имя процесса (на Windows без расширения, например node); force — принудительное завершение (Windows: /F). На Windows завершается всё дерево процесса.",
+        parameters: {
+          type: "object",
+          properties: { pid: { type: "integer", description: "PID процесса (из listProcesses)" }, name: { type: "string", description: "Имя процесса вместо PID, например node" }, force: { type: "boolean", description: "Принудительно (по умолчанию false)" } },
+          required: [],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "clipboardWrite",
+        description: "Скопировать текст в системный буфер обмена (пользователь сможет вставить его куда угодно). text — что копировать.",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string", description: "Текст для копирования" } },
+          required: ["text"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "clipboardRead",
+        description: "Прочитать текущий текст из системного буфера обмена (то, что скопировал пользователь). Полезно, когда пользователь просит «прочитай, что я скопировал» или даёт команду из буфера.",
+        parameters: {
+          type: "object",
+          properties: {},
+          required: [],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "screenshotDesktop",
+        description: "Скриншот ЭКРАНА или окна Windows (не страницы — для страниц есть screenshotCapture). window — необязательная подстрока заголовка окна (например «Блокнот», «chrome»); без неё снимается весь экран. Скриншот показывается пользователю во встроенном просмотрщике.",
+        parameters: {
+          type: "object",
+          properties: { window: { type: "string", description: "Необязательно: подстрока заголовка окна" } },
+          required: [],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "registryRead",
+        description: "Прочитать значение из реестра Windows (только на Windows). path — раздел вида HKCU\Software\MyApp или HKLM\Software\...; name — имя значения (без name — значение по умолчанию). Чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY.",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string", description: "Путь в реестре, например HKCU\Software\MyApp" }, name: { type: "string", description: "Имя значения (необязательно)" } },
+          required: ["path"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "registryWrite",
+        description: "Записать значение в реестр Windows (только на Windows, ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ). path — раздел ТОЛЬКО под HKCU\Software или HKCU\Environment; name — имя значения; value — значение; type — REG_SZ (строка), REG_DWORD (число) или REG_EXPAND_SZ. Для HKLM нужен администратор (runCommandAsAdmin).",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string", description: "Путь под HKCU\Software или HKCU\Environment" }, name: { type: "string", description: "Имя значения" }, value: { type: "string", description: "Значение" }, type: { type: "string", description: "REG_SZ | REG_DWORD | REG_EXPAND_SZ (по умолчанию REG_SZ)" } },
+          required: ["path","name","value"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "openPath",
+        description: "Открыть файл или папку системным приложением (PDF в просмотрщике, картинку, документ, папку в проводнике/файловом менеджере). path — путь к файлу/папке (относительный — от рабочей директории).",
+        parameters: {
+          type: "object",
+          properties: { path: { type: "string", description: "Путь к файлу или папке" } },
+          required: ["path"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "wingetSearch",
+        description: "Поиск программы в каталоге winget (только на Windows) по имени — вернёт список с точными ID вида Vendor.Name. Затем установка: installSystemPackage('Vendor.Name').",
+        parameters: {
+          type: "object",
+          properties: { query: { type: "string", description: "Поисковый запрос, например python, ffmpeg, ollama" } },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "installExe",
+        description: "Скачать установщик .exe по прямой ссылке и запустить его ТИХО (ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ). url — прямая ссылка на .exe; name — имя программы (для проверки после установки); silentArgs — аргументы тихой установки (по умолчанию /S). Если установка требует прав администратора — приложение подскажет runCommandAsAdmin.",
+        parameters: {
+          type: "object",
+          properties: { url: { type: "string", description: "Прямая ссылка на установщик .exe (https://...)" }, name: { type: "string", description: "Имя программы (необязательно)" }, silentArgs: { type: "string", description: "Аргументы тихой установки (по умолчанию /S)" } },
+          required: ["url"],
+        },
+      },
+    },
   ];
 
   // ── Контекст-окно: грубая оценка токенов и обрезка истории ──
@@ -1674,6 +1795,67 @@ checkUrl/checkPort и сообщи пользователю адрес.
     anthropic: "https://api.anthropic.com",
   };
 
+  // ── Реестр провайдеров G4F (маршрут «Провайдер:модель» в поле модели) ──
+  // rec: ★ рекомендованные — стабильные и работающие без ключа/логина.
+  // Список один на всех: его же использует транспорт buildChatRequest, чтобы
+  // передать провайдера современному g4f отдельным полем provider.
+  const G4F_PROVIDERS = [
+    { name: "default", desc: "Авто: G4F сам выберет модель и провайдера", rec: true },
+    { name: "DeepInfra", desc: "DeepSeek, Qwen, Kimi, GLM — стабильный OpenAI-совместимый API", rec: true },
+    { name: "HuggingChat", desc: "DeepSeek, Qwen, GLM — бесплатный чат Hugging Face", rec: true },
+    { name: "Together", desc: "DeepSeek, Qwen, Llama — быстрый API", rec: true },
+    { name: "Pollinations", desc: "GPT-OSS, DeepSeek, Qwen — бесплатно", rec: true },
+    { name: "OpenRouterFree", desc: "Бесплатные :free-модели OpenRouter", rec: true },
+    { name: "Groq", desc: "Очень быстрые Llama / DeepSeek", rec: true },
+    { name: "Airforce", desc: "gpt-oss, kimi-k3, glm-5.3 — огромный каталог", rec: true },
+    { name: "HuggingFace", desc: "Inference API Hugging Face" },
+    { name: "HuggingSpace", desc: "Модели с HF Spaces: Command R, Qwen" },
+    { name: "OpenRouter", desc: "1000+ моделей (многие с суффиксом :free)" },
+    { name: "Yqcloud", desc: "gpt-4 — работает без всего" },
+    { name: "KiloCode", desc: "Nemotron, MiniMax — для кода" },
+    { name: "ThebApi", desc: "Агрегатор TheB.AI" },
+    { name: "Perplexity", desc: "Claude Opus / Sonnet через поиск (может просить вход)" },
+    { name: "Copilot", desc: "Microsoft Copilot — GPT-4o, o1" },
+    { name: "OpenaiChat", desc: "ChatGPT бесплатно — gpt-4.1, o3" },
+    { name: "Gemini", desc: "Google Gemini 2.5/3 (иногда нужны куки)" },
+    { name: "Antigravity", desc: "Google Antigravity — Gemini + Claude" },
+    { name: "Qwen", desc: "Модели Qwen напрямую" },
+    { name: "DeepSeek", desc: "chat.deepseek.com — нужен HAR-логин" },
+    { name: "Claude", desc: "Anthropic Claude (обычно нужен ключ или аккаунт)" },
+    { name: "Anthropic", desc: "Официальный API Anthropic" },
+    { name: "Grok", desc: "xAI Grok — рассуждения и код" },
+    { name: "xAI", desc: "API xAI" },
+    { name: "Nvidia", desc: "NVIDIA NIM — opensource-модели" },
+    { name: "Cerebras", desc: "Очень быстрые Llama / Qwen" },
+    { name: "MiniMax", desc: "MiniMax M — сильный кодер" },
+    { name: "GlhfChat", desc: "Модели Hugging Face через glhf.chat" },
+    { name: "LMArena", desc: "Публичные модели LMArena" },
+    { name: "MetaAI", desc: "Llama через Meta AI" },
+    { name: "Puter", desc: "Llama бесплатно" },
+    { name: "GigaChat", desc: "Сбер GigaChat" },
+    { name: "Replicate", desc: "Open-source модели через Replicate" },
+    { name: "PhindAi", desc: "Phind — специалист по коду" },
+    { name: "Cloudflare", desc: "Workers AI Cloudflare" },
+    { name: "OperaAria", desc: "Opera Aria — GPT-4o" },
+    { name: "WhiteRabbitNeo", desc: "WhiteRabbit Neo — безопасный кодер" },
+    { name: "BlackboxPro", desc: "Blackbox AI — GPT, Claude" },
+    { name: "OrcaRouter", desc: "Роутер моделей (как OpenRouter)" },
+    { name: "HailuoAI", desc: "MiniMax Hailuo" },
+  ];
+  const G4F_PROVIDER_NAMES = new Set(G4F_PROVIDERS.map((p) => p.name));
+
+  // G4F-маршрут «Провайдер:модель» (например HuggingChat:gpt-4o-mini).
+  // Возвращает { provider, model } только если префикс — известный провайдер G4F
+  // (иначе не трогаем имя: у OpenRouter и других бывают свои двоеточия, например :free).
+  function splitG4fRoute(model) {
+    const m = String(model || "");
+    const i = m.indexOf(":");
+    if (i <= 0 || i === m.length - 1) return null;
+    const prefix = m.slice(0, i);
+    if (!G4F_PROVIDER_NAMES.has(prefix)) return null;
+    return { provider: prefix, model: m.slice(i + 1) };
+  }
+
   function trimBase(url) {
     return String(url || "").trim().replace(/\/+$/, "");
   }
@@ -1884,10 +2066,18 @@ checkUrl/checkPort и сообщи пользователю адрес.
         }),
       };
     }
+    // G4F-маршрут «Провайдер:модель» (например HuggingChat:gpt-4o-mini):
+    // современный g4f принимает провайдера отдельным полем provider, а имя модели — без префикса.
+    const body = { model, messages: messagesForProvider("openai", messages), tools, stream: true };
+    const g4f = splitG4fRoute(model);
+    if (g4f) {
+      body.model = g4f.model;
+      body.provider = g4f.provider;
+    }
     return {
       url: baseFor(provider, s) + "/chat/completions",
       headers,
-      body: JSON.stringify({ model, messages: messagesForProvider("openai", messages), tools, stream: true }),
+      body: JSON.stringify(body),
     };
   }
 
@@ -1899,7 +2089,15 @@ checkUrl/checkPort и сообщи пользователю адрес.
    *                      Anthropic thinking_delta (мысли приходят отдельным потоком)
    * Поддерживает NDJSON (Ollama), OpenAI-SSE и Anthropic-SSE.
    */
-  async function consumeProviderStream({ response, provider, onText, onToolCall, onThinking }) {
+  // ── Чтение стрима ответа провайдера с защитой от «вечного ожидания» ──
+  // 1) Ошибки, которые провайдеры шлют прямо в стриме (data: {"error": ...} —
+  //    OpenAI-совместимые, {"type":"error"} — Anthropic, NDJSON-ошибки Ollama),
+  //    превращаются в исключение с понятным текстом, а не молча пропускаются
+  //    (раньше это выглядело как «бесконечное думание»).
+  // 2) Таймауты: первый байт (firstByteTimeoutMs, по умолчанию 90 с) и пауза
+  //    между чанками (idleTimeoutMs, по умолчанию 60 с) — зависший/молчащий
+  //    провайдер завершается ошибкой вместо бесконечного ожидания.
+  async function consumeProviderStream({ response, provider, onText, onToolCall, onThinking, firstByteTimeoutMs, idleTimeoutMs }) {
     if (!response || !response.body) throw new Error("Пустой ответ от сервера (нет тела).");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -1914,10 +2112,46 @@ checkUrl/checkPort и сообщи пользователю адрес.
       }
       accum.clear();
     };
+    const firstMs = firstByteTimeoutMs || 90000;
+    const idleMs = idleTimeoutMs || 60000;
+    let gotFirst = false;
+    // reader.read() с таймером: зависший стрим не держит чат в «думании» вечно.
+    const readChunk = () =>
+      new Promise((resolve, reject) => {
+        const ms = gotFirst ? idleMs : firstMs;
+        const timer = setTimeout(() => {
+          reader.cancel().catch(() => {});
+          reject(
+            new Error(
+              gotFirst
+                ? "Провайдер замолчал — данные не приходили более " + Math.round(ms / 1000) + " с. Проверь сеть или выбери другого провайдера."
+                : "Провайдер не отвечает — первый байт не пришёл за " + Math.round(ms / 1000) + " с. Проверь, что сервер запущен и URL в настройках верный."
+            )
+          );
+        }, ms);
+        reader.read().then(
+          (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          (e) => {
+            clearTimeout(timer);
+            reject(e);
+          }
+        );
+      });
+    const errText = (e) => {
+      if (!e) return "";
+      if (typeof e === "string") return e;
+      return e.message || e.detail || e.code || JSON.stringify(e).slice(0, 300);
+    };
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readChunk();
         if (done) break;
+        // «Первый байт» засчитываем только при реальных данных: провайдер, который шлёт
+        // пустые keep-alive чанки, но так и не отвечает, тоже завершится по таймауту.
+        if (value && value.length) gotFirst = true;
         buf += decoder.decode(value, { stream: true });
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) {
@@ -1929,6 +2163,7 @@ checkUrl/checkPort и сообщи пользователю адрес.
             // NDJSON: каждая строка — полный JSON-объект
             let obj;
             try { obj = JSON.parse(line); } catch { continue; }
+            if (obj && obj.error) throw new Error("Ошибка Ollama: " + errText(obj.error));
             const msg = (obj && obj.message) || {};
             if (msg.content && onText) onText(msg.content);
             if (Array.isArray(msg.tool_calls)) {
@@ -1955,6 +2190,12 @@ checkUrl/checkPort и сообщи пользователю адрес.
           try { obj = JSON.parse(data); } catch { continue; }
 
           if (provider === "openai") {
+            // Ошибка внутри стрима (частая беда бесплатных провайдеров G4F:
+            // «Зарегистрируйтесь и повторите свой запрос» и т.п.) — показываем её,
+            // а не ждём вечно молчания.
+            if (obj.error || (obj.type === "error" && obj.error)) {
+              throw new Error("Провайдер ответил ошибкой: " + (errText(obj.error) || errText(obj)));
+            }
             const choice = obj.choices && obj.choices[0];
             if (!choice) continue;
             const delta = choice.delta || {};
@@ -1974,6 +2215,9 @@ checkUrl/checkPort и сообщи пользователю адрес.
             }
           } else if (provider === "anthropic") {
             const type = obj.type;
+            if (type === "error" && obj.error) {
+              throw new Error("Claude ответил ошибкой: " + errText(obj.error));
+            }
             if (type === "content_block_start") {
               const block = obj.content_block || {};
               const cur = accum.get(obj.index) || { id: "", name: "", args: "" };
@@ -2111,6 +2355,8 @@ checkUrl/checkPort и сообщи пользователю адрес.
     "startBackground", "listBackground", "backgroundOutput", "sendInput", "stopBackground",
     "shellStart", "shellSend", "checkUrl", "checkPort", "openUrl", "showImage",
     "previewUI", "diffView", "askUser", "analyzeImage", "generateImage", "screenshotCapture",
+    "listProcesses", "killProcess", "clipboardRead", "clipboardWrite", "screenshotDesktop",
+    "registryRead", "registryWrite", "openPath", "wingetSearch", "installExe",
   ]);
   const CORE_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter((t) => CORE_TOOL_NAMES.has(t.function && t.function.name));
   // Если окно контекста >= 26k — шлём все инструменты; иначе только ядро (~36 вместо 74).
@@ -2267,9 +2513,66 @@ checkUrl/checkPort и сообщи пользователю адрес.
     };
   }
 
+  // ── Парсеры для инструментов ОС (процессы, реестр, системная информация) ──
+  // tasklist /FO CSV /NH (Windows) или ps -eo (macOS/Linux) → [{pid, name, mem, ...}]
+  function parseProcessesCsv(csv) {
+    const procs = [];
+    const lines = String(csv || "").split("\n");
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      const m = line.match(/"([^"]*)","(\d+)","([^"]*)","([^"]*)","([^"]*)"/);
+      if (m) {
+        procs.push({ name: m[1], pid: parseInt(m[2], 10), session: m[3], sessionNum: m[4], mem: m[5] });
+        continue;
+      }
+      const p = line.match(/^\s*(\d+)\s+(\S+)\s+([\d.]+)\s+(\d+)\s+(.*)$/);
+      if (p) procs.push({ pid: parseInt(p[1], 10), name: p[2], cpu: p[3], rss: p[4], args: p[5] });
+    }
+    return procs;
+  }
+
+  // Whitelist реестра: чтение — только SOFTWARE/ENVIRONMENT/SYSTEM/SECURITY; запись — только HKCU.
+  function registryPathAllowed(regPath, write) {
+    const p = String(regPath || "").trim();
+    if (!p) return { ok: false, error: "Укажи путь в реестре (например HKCU\\Software\\MyApp)" };
+    if (!/^HK[A-Z0-9]+\\/i.test(p)) {
+      return { ok: false, error: "Путь должен начинаться с корня (HKLM\\, HKCU\\, HKCR\\, HKU\\ или HKCC\\)" };
+    }
+    const up = p.toUpperCase();
+    if (write) {
+      const ok = up.startsWith("HKCU\\SOFTWARE") || up.startsWith("HKCU\\ENVIRONMENT");
+      return ok
+        ? { ok: true }
+        : { ok: false, error: "Запись разрешена только в HKCU\\Software и HKCU\\Environment. Для HKLM нужны права администратора — используй runCommandAsAdmin с reg add." };
+    }
+    const first = (up.split("\\")[1] || "").toUpperCase();
+    if (["SOFTWARE", "ENVIRONMENT", "SYSTEM", "SECURITY"].includes(first)) return { ok: true };
+    return { ok: false, error: "Чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY (например HKLM\\Software, HKCU\\Environment)." };
+  }
+
+  // Разбор JSON системной информации от PowerShell → плоский объект.
+  function parseSysInfoJson(json) {
+    const d = {};
+    try {
+      const o = JSON.parse(String(json || "{}"));
+      if (o && typeof o === "object") {
+        if (o.os) d.os = String(o.os);
+        if (o.build) d.build = String(o.build);
+        if (o.cpu) d.cpu = String(o.cpu);
+        if (o.gpu) d.gpu = String(o.gpu);
+        if (o.ramGB != null) d.ramGB = Number(o.ramGB);
+        if (Array.isArray(o.ips)) d.ips = o.ips.map(String);
+        if (Array.isArray(o.disks)) d.disks = o.disks;
+      }
+    } catch {}
+    return d;
+  }
+
   return {
     SYSTEM_PROMPT,
     TOOL_DEFINITIONS,
+    G4F_PROVIDERS,
     createThinkingStripper,
     stripThinking,
     normalizeToolName,
@@ -2300,5 +2603,9 @@ checkUrl/checkPort и сообщи пользователю адрес.
     auxConfig,
     describeImageRemote,
     generateImageRemote,
+    // инструменты ОС
+    parseProcessesCsv,
+    registryPathAllowed,
+    parseSysInfoJson,
   };
 });

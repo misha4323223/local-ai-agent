@@ -450,7 +450,21 @@
               </div>
             </div>
             <div id="g4f-hint" class="hint-block hidden">
-              G4F — бесплатные модели без ключа. Запусти на ПК: <code>pip install g4f</code>, затем <code>g4f api</code> (по умолчанию порт 8080 — поправь URL выше, если запустил с другим <code>--port</code>). Ключ не нужен. Модели загружай кнопкой ↻. Инструменты агента работают через текстовый фолбэк — не все бесплатные провайдеры G4F поддерживают нативные вызовы инструментов.
+              G4F — бесплатные модели без ключа. Запусти на ПК: <code>pip install -U g4f</code>, затем <code>g4f api</code> — современный interference-API живёт на <b>порту 1337</b> (<code>http://localhost:1337/v1</code>), в старых сборках это порт 8080 (<code>http://localhost:8080/v1</code>) — если один не отвечает, поправь URL выше. Ключ НЕ нужен: поле можно оставить пустым (некоторые сборки принимают любую заглушку). Модели загружай кнопкой ↻. Выбери провайдера в списке ниже (★ — стабильные, без входа): приложение само передаст его g4f отдельным полем <code>provider</code>. Если провайдер отвечает «зарегистрируйтесь…» или молчит — просто выбери другого из списка. Инструменты агента работают через текстовый фолбэк — не все бесплатные провайдеры G4F поддерживают нативные вызовы инструментов.
+            </div>
+            <div id="g4f-provider-box" class="gh-repos hidden">
+              <div class="gh-repos-head" id="g4f-provider-head">
+                <span class="settings-section-title" style="text-transform:none;letter-spacing:0">Провайдер G4F <span style="font-weight:500;opacity:.75">— маршрут <code>Провайдер:модель</code></span></span>
+                <span class="repo-chev" id="g4f-prov-chev">▸</span>
+              </div>
+              <div class="gh-repos-body hidden" id="g4f-provider-body">
+                <div class="gh-repo-search">
+                  <input id="g4f-provider-search" placeholder="Поиск провайдера по буквам… (deepinfra, hugging, together, pollinations)" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+                  <button id="g4f-provider-clear" class="btn btn-ghost btn-small hidden" title="Очистить поиск">✕</button>
+                </div>
+                <div class="gh-repos-status" id="g4f-provider-status"></div>
+                <div class="gh-repo-list" id="g4f-provider-list"></div>
+              </div>
             </div>
           </div>
 
