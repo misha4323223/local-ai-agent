@@ -120,8 +120,8 @@
     }
     if (status) {
       status.textContent = g4fProviderQuery.trim()
-        ? "Поиск «" + g4fProviderQuery + "»: найдено " + provs.length + " — нажми на провайдера, он вставит маршрут в поле модели."
-        : "Провайдеров G4F: " + provs.length + " (★ — стабильные, без ключа). Нажми — вставится маршрут «Провайдер:модель» в поле модели.";
+        ? "Поиск «" + g4fProviderQuery + "»: найдено " + provs.length + " — нажми на провайдера, его модели появятся ниже."
+        : "Провайдеров G4F: " + provs.length + " (★ — стабильные, без ключа). Нажми — подставится «Провайдер:модель», модели покажутся ниже.";
       status.className = "gh-repos-status";
     }
     const curModel = ($("s-openai-model").value || "").trim();
@@ -140,15 +140,59 @@
         // «default» — авто-режим G4F: сам выберет провайдера и модель
         $("s-openai-model").value = p.name === "default" ? "default" : p.name + ":";
         $("s-openai-model").focus();
+        // Сразу показываем модели провайдера (офлайн-подсказки из реестра),
+        // затем тихо пробуем подгрузить точный список из запущенного g4f.
+        renderModelHints("openai", p.name === "default" ? null : (p.models && p.models.length ? p.models : null));
         renderG4fProviderList();
+        refreshG4fModels(p.name);
         setSettingsMsg(
           p.name === "default"
             ? "Авто-режим G4F: модель «default» — G4F сам подберёт провайдера. Сохрани настройки и общайся."
-            : "Маршрут через «" + p.name + "» вставлен в поле модели. Допиши имя модели (или нажми ↻, чтобы увидеть список моделей) и сохрани настройки.",
+            : (p.models && p.models.length
+                ? "Провайдер «" + p.name + "» выбран — его модели показаны ниже, нажми нужную. Точный список от g4f подтягивается автоматически."
+                : "Маршрут через «" + p.name + "» вставлен в поле модели. Допиши имя модели (или нажми ↻, чтобы увидеть список моделей) и сохрани настройки."),
           false
         );
       };
       list.appendChild(item);
+    }
+  }
+
+  // Счётчик запросов: ответ живого списка применяем, только если провайдер не сменился
+  let g4fModelReqSeq = 0;
+  // Живой список моделей G4F (после выбора провайдера). Тихий: если g4f не запущен —
+  // ничего не делаем, остаются офлайн-подсказки из реестра (никаких ошибок в UI).
+  async function refreshG4fModels(providerName) {
+    if (!providerName || providerName === "default") return;
+    const seq = ++g4fModelReqSeq;
+    try {
+      const res = await requestModelsList();
+      if (seq !== g4fModelReqSeq) return; // пользователь успел выбрать другого провайдера
+      if (!Array.isArray(res) || !res.length) return;
+      // Из живого списка берём только модели: без чужого префикса «Провайдер:»
+      // — к ним добавляем выбранного провайдера (так их примет buildChatRequest).
+      const prefix = providerName + ":";
+      const known = G4F_PROVIDERS;
+      const seen = new Set();
+      const mapped = [];
+      for (const m of res) {
+        if (typeof m !== "string" || !m.trim()) continue;
+        const i = m.indexOf(":");
+        const hasPrefix = i > 0 && known.some((p) => p.name === m.slice(0, i));
+        const full = hasPrefix ? m.trim() : prefix + m.trim();
+        if (!seen.has(full)) {
+          seen.add(full);
+          mapped.push(full);
+        }
+      }
+      if (!mapped.length) return;
+      renderModelHints("openai", mapped);
+      setSettingsMsg(
+        "Провайдер «" + providerName + "»: " + mapped.length + " моделей от g4f — нажми нужную ниже.",
+        false
+      );
+    } catch {
+      // g4f не отвечает — оставляем офлайн-подсказки из реестра
     }
   }
 
