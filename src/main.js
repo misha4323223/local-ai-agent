@@ -3624,6 +3624,45 @@ ipcMain.handle("ai:test", async (_e, ui) => {
   }
 });
 
+// ── G4F: поиск живого инстанса — указанный URL, затем типовые порты 1337 / 8080 ──
+// Современный interference-API g4f живёт на 1337, старые сборки — на 8080.
+// Используется кнопкой ▶ (подсказка при ошибке) и авто-подбором порта в настройках.
+async function probeG4fBase(configuredBase, timeoutMs) {
+  const t = timeoutMs || 2500;
+  const candidates = [];
+  const base = String(configuredBase || "").trim().replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(base)) candidates.push(base);
+  for (const port of [1337, 8080]) {
+    const u = "http://localhost:" + port + "/v1";
+    if (!candidates.includes(u)) candidates.push(u);
+  }
+  for (const u of candidates) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), t);
+    try {
+      const res = await fetch(u + "/models", { signal: ctrl.signal });
+      if (res.ok) {
+        const body = await res.text().catch(() => "");
+        let count = 0;
+        try {
+          const j = JSON.parse(body);
+          const list = Array.isArray(j) ? j : (j.data || j.models || []);
+          count = Array.isArray(list) ? list.length : 0;
+        } catch {}
+        return { base: u, count };
+      }
+    } catch {} finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+ipcMain.handle("g4f:probe", async (_e, opts) => {
+  const found = await probeG4fBase(opts && opts.url);
+  return found ? { ok: true, ...found } : { ok: false };
+});
+
 // ── G4F: тест провайдера (кнопка ▶ в настройках) — логи в консоль приложения ──
 // Делается в главном процессе: здесь нет CORS и видно сырые статусы/тела ответов g4f.
 ipcMain.handle("g4f:test", async (_e, opts) => {
@@ -3663,7 +3702,14 @@ ipcMain.handle("g4f:test", async (_e, opts) => {
       else push("warn", "Список моделей пуст или в неожиданном формате: " + body.slice(0, 200));
     }
   } catch (e) {
-    push("err", "GET /models не прошёл: " + (e.message || String(e)) + ". Проверь, что g4f запущен («g4f api») и порт правильный (1337 / 8080).");
+    push("err", "GET /models не прошёл: " + (e.message || String(e)) + ". Проверь, что g4f запущен («g4f api»).");
+    // Подсказка: а не отвечает ли живой g4f на другом порту (1337 вместо 8080 и наоборот)?
+    const alt = await probeG4fBase(base, 2500);
+    if (alt && alt.base !== base) {
+      push("ok", "Живой g4f найден на «" + alt.base + "» (моделей: " + alt.count + ") — а в поле URL указан «" + (base || "пусто") + "». Поправь URL, сохрани настройки и повтори тест.");
+    } else if (!alt) {
+      push("warn", "Живой g4f не найден ни на одном порту (1337 / 8080). Проверь, что запущен: `g4f api` (или `python -m g4f api`).");
+    }
   }
   // 2) Минимальный чат-запрос: что РЕАЛЬНО отвечает провайдер
   if (provider && provider !== "default" && model) {

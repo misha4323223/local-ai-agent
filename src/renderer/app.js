@@ -34,7 +34,7 @@
     openai: { url: "https://api.openai.com/v1" },
     groq: { url: "https://api.groq.com/openai/v1" },
     openrouter: { url: "https://openrouter.ai/api/v1" },
-    g4f: { url: "http://localhost:8080/v1" },
+    g4f: { url: "http://localhost:1337/v1" },
     custom: null,
   };
   const PRESET_LABEL = {
@@ -98,6 +98,7 @@
   }
   let currentPreset = "deepseek";
   let g4fProviderQuery = ""; // поиск по провайдерам G4F в настройках
+  let g4fProbeLastTs = 0; // авто-подбор порта G4F: не чаще раза в 30 секунд
   const msgEls = new Map();
 
   // ── Выбор провайдера G4F (аккордеон в настройках): поиск по буквам + список ──
@@ -173,16 +174,30 @@
   async function refreshG4fModels(providerName) {
     if (!providerName || providerName === "default") return;
     const seq = ++g4fModelReqSeq;
+    const prov = G4F_PROVIDERS.find((p) => p.name === providerName);
+    const registryModels = (prov && prov.models) || [];
     try {
       const res = await requestModelsList();
       if (seq !== g4fModelReqSeq) return; // пользователь успел выбрать другого провайдера
-      if (!Array.isArray(res) || !res.length) return;
-      // Из живого списка берём только модели: без чужого префикса «Провайдер:»
-      // — к ним добавляем выбранного провайдера (так их примет buildChatRequest).
+      if (!Array.isArray(res) || !res.length) {
+        // g4f молчит — оставляем реестровые подсказки провайдера как есть
+        if (registryModels.length) renderModelHints("openai", registryModels);
+        return;
+      }
+      // Реестровые модели провайдера — ПЕРВЫЕ (реальные имена: DeepSeek-V3, Qwen…),
+      // живые алиасы от g4f дописываются следом; дубликаты убираются.
+      // Так живой список НЕ подменяет настоящие модели провайдера.
       const prefix = providerName + ":";
       const known = G4F_PROVIDERS;
       const seen = new Set();
-      const mapped = [];
+      const merged = [];
+      for (const rm of registryModels) {
+        const full = String(rm || "").trim();
+        if (full && !seen.has(full)) {
+          seen.add(full);
+          merged.push(full);
+        }
+      }
       for (const m of res) {
         if (typeof m !== "string" || !m.trim()) continue;
         const i = m.indexOf(":");
@@ -190,13 +205,13 @@
         const full = hasPrefix ? m.trim() : prefix + m.trim();
         if (!seen.has(full)) {
           seen.add(full);
-          mapped.push(full);
+          merged.push(full);
         }
       }
-      if (!mapped.length) return;
-      renderModelHints("openai", mapped);
+      if (!merged.length) return;
+      renderModelHints("openai", merged);
       setSettingsMsg(
-        "Провайдер «" + providerName + "»: " + mapped.length + " моделей от g4f — нажми нужную ниже.",
+        "Провайдер «" + providerName + "»: " + merged.length + " моделей (настоящие из реестра + алиасы от g4f) — нажми нужную ниже.",
         false
       );
     } catch {
@@ -244,6 +259,27 @@
     setSettingsMsg(verdict, !!errCount);
   }
 
+  // Авто-подбор порта G4F: если в поле URL ничего не отвечает, а живой g4f есть
+  // на 1337 / 8080 — подставляем рабочий адрес (только для localhost, чтобы не
+  // затирать вручную вписанный туннель/сетевой адрес).
+  async function probeG4fPort() {
+    if (!isElectron || !api.g4fProbe) return;
+    const input = $("s-openai-url");
+    const current = (input.value || "").trim();
+    try {
+      const r = await api.g4fProbe({ url: current });
+      if (!r || r.ok === false || !r.base) return;
+      const norm = current.replace(/\/+$/, "");
+      if (r.base === norm) return;
+      if (/localhost|127\.0\.0\.1/i.test(current)) {
+        input.value = r.base;
+        setSettingsMsg("Найден живой G4F на «" + r.base + "» — URL обновлён автоматически. Сохрани настройки.", false);
+      } else {
+        setSettingsMsg("G4F отвечает на «" + r.base + "», а в поле указан «" + norm + "» — если это не тот адрес, поправь URL.", false);
+      }
+    } catch {}
+  }
+
   // Скрытие/показ блока выбора провайдера при смене пресета и открытии настроек.
   // preset передаётся от кликнутого чипа, потому что наш слушатель срабатывает
   // раньше setPreset() и currentPreset ещё не обновился.
@@ -252,7 +288,15 @@
     if (!box) return;
     const active = preset || currentPreset;
     box.classList.toggle("hidden", active !== "g4f");
-    if (active === "g4f") renderG4fProviderList();
+    if (active === "g4f") {
+      renderG4fProviderList();
+      // Авто-подбор порта при открытии настроек (не чаще раза в 30 секунд)
+      const now = Date.now();
+      if (now - g4fProbeLastTs > 30000) {
+        g4fProbeLastTs = now;
+        probeG4fPort();
+      }
+    }
   }
   function wireG4fProviderPicker() {
     const head = $("g4f-provider-head");
@@ -2248,6 +2292,8 @@
     // Подсказка G4F — только при выборе локального пресета
     const g4fHint = $("g4f-hint");
     if (g4fHint) g4fHint.classList.toggle("hidden", p !== "g4f");
+    // Авто-подбор порта: если указанный URL не отвечает, а живой g4f есть на 1337/8080
+    if (p === "g4f") probeG4fPort();
   }
 
   // Заполняет все поля настроек значениями из памяти (чтобы переключение провайдеров ничего не теряло)
@@ -2364,7 +2410,7 @@
     label.className = "hint-label";
     label.textContent = "Модели (клик — вставить):";
     box.appendChild(label);
-    const shown = models.slice(0, 8);
+    const shown = models.slice(0, 12);
     for (const name of shown) {
       const b = document.createElement("button");
       b.type = "button";
