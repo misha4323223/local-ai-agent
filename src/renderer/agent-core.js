@@ -39,8 +39,10 @@
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
 20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), тихая установка скачанного установщика .exe — installExe (спросит подтверждение). ВАЖНО: команды по умолчанию выполняются в cmd.exe на Windows — если нужны командлеты PowerShell (Get-Process, Get-Service, Get-NetIPAddress и т.п.), напиши внутри runCommand: powershell -NoProfile -Command "...".
 21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url), управляй страницей через browserClick / browserFill / browserSelect / browserPress, читай содержимое через browserText, список вкладок — browserStatus, скриншот — browserScreenshot. Селекторы: CSS (#id, .class, input[name="..."]) или text=Текст кнопки, xpath=//button. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли бери ТОЛЬКО у пользователя через askUser (или из agentEnv, если он сам их туда положил) — не выдумывай и не записывай их в код. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
+22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — прочитать, что сейчас видно в окне (вкладка, кнопки, поля, номера [N]), appClick — кликнуть по тексту/селектору/номеру, appFill — ввести текст в поле, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
+23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -397,6 +399,95 @@
           type: "object",
           properties: {},
         },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "appRead",
+        description: "Прочитать состояние собственного окна приложения, в котором ты работаешь: заголовок, открытые панели/оверлеи, список видимых кнопок/полей/вкладок (с текстом, id, селектором и номером [N]), фрагмент видимого текста. Без аргументов. Используй перед каждым действием в UI и после него — так ты знаешь, что реально видно, а не по памяти.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "appClick",
+        description: "Кликнуть по элементу в собственном окне приложения. text — видимый текст кнопки/вкладки («Настройки», «Сохранить»); selector — CSS-селектор (#id, .class); index — номер [N] из appRead. Клики по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») заблокированы — для них спроси пользователя через askUser. После клика проверяй результат через appRead.",
+        parameters: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "Видимый текст элемента (кнопка, вкладка, пункт меню)" },
+            selector: { type: "string", description: "CSS-селектор: #id или .class" },
+            index: { type: "integer", description: "Номер [N] элемента из appRead" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "appFill",
+        description: "Ввести текст в поле ввода в собственном окне приложения (URL провайдера, API-ключ, модель, путь и т.п.). selector — CSS-селектор поля (#id, .class, input[name=...]); text — вводимое значение. Работает с обычными и React-управляемыми полями. Значения бери ТОЛЬКО из настроек или от пользователя, не выдумывай.",
+        parameters: {
+          type: "object",
+          properties: {
+            selector: { type: "string", description: "Селектор поля: #id, .class, input[name=...]" },
+            text: { type: "string", description: "Значение для ввода" },
+          },
+          required: ["selector", "text"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "appSelect",
+        description: "Выбрать вариант в выпадающем списке (<select>) в собственном окне приложения. selector — селектор списка; value — атрибут value варианта или text — видимый текст варианта.",
+        parameters: {
+          type: "object",
+          properties: {
+            selector: { type: "string", description: "Селектор списка" },
+            value: { type: "string", description: "Значение варианта (атрибут value)" },
+            text: { type: "string", description: "Или видимый текст варианта" },
+          },
+          required: ["selector"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "appPress",
+        description: "Нажать клавишу в собственном окне приложения: Enter (отправка/подтверждение), Escape (закрыть оверлей/окно настроек), Tab, ArrowDown и т.п. key — имя клавиши.",
+        parameters: {
+          type: "object",
+          properties: { key: { type: "string", description: "Клавиша: Enter, Escape, Tab, ArrowDown..." } },
+          required: ["key"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "appWait",
+        description: "Ждать появления элемента в собственном окне приложения (после открытия панели, загрузки списка, действий пользователя). text — видимый текст или selector — CSS-селектор; timeout — миллисекунды ожидания (по умолчанию 20000).",
+        parameters: {
+          type: "object",
+          properties: {
+            text: { type: "string", description: "Видимый текст ожидаемого элемента" },
+            selector: { type: "string", description: "CSS-селектор ожидаемого элемента" },
+            timeout: { type: "integer", description: "Таймаут в миллисекундах (по умолчанию 20000)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "appScreenshot",
+        description: "Сделать скриншот собственного окна приложения и показать его пользователю. Нужен, когда надо реально «посмотреть» на UI (подходит vision-модель через analyzeImage); для обычного чтения состояния используй appRead — он точнее и без картинок.",
+        parameters: { type: "object", properties: {} },
       },
     },
     {
@@ -1631,6 +1722,13 @@
     browser_wait: "browserWait",
     browser_close: "browserClose",
     browser_status: "browserStatus",
+    app_read: "appRead",
+    app_click: "appClick",
+    app_fill: "appFill",
+    app_select: "appSelect",
+    app_press: "appPress",
+    app_wait: "appWait",
+    app_screenshot: "appScreenshot",
     terminal: "runCommand",
     shell: "runCommand",
     execute: "runCommand",

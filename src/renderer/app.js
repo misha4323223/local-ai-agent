@@ -675,6 +675,13 @@
     browserWait: "⏳",
     browserClose: "🚪",
     browserStatus: "🗔",
+    appRead: "👁️",
+    appClick: "🖱️",
+    appFill: "⌨️",
+    appSelect: "🔽",
+    appPress: "🔑",
+    appWait: "⏳",
+    appScreenshot: "📷",
     askUser: "❓",
     startBackground: "🔄",
     listBackground: "📋",
@@ -761,6 +768,13 @@
     browserWait: "Ожидание элемента",
     browserClose: "Закрыть вкладку",
     browserStatus: "Вкладки браузера",
+    appRead: "Чтение окна приложения",
+    appClick: "Клик в окне приложения",
+    appFill: "Ввод в поле приложения",
+    appSelect: "Выбор из списка",
+    appPress: "Нажатие клавиши",
+    appWait: "Ожидание элемента",
+    appScreenshot: "Скриншот окна",
     askUser: "Вопрос пользователю",
     startBackground: "Запуск фонового процесса",
     listBackground: "Список фоновых процессов",
@@ -2262,11 +2276,11 @@
           } catch (e) {
             result = "Ошибка " + c.name + ": " + (e && e.message ? e.message : "сеть недоступна");
           }
-        } else if (c.name && c.name.startsWith("browser")) {
-          // Браузерные инструменты (browserOpen и др.) работают через Playwright
-          // только в desktop-приложении (main-процесс Electron).
+        } else if (c.name && (c.name.startsWith("browser") || c.name.startsWith("app"))) {
+          // Браузерные (Playwright) и app-инструменты (управление собственным окном)
+          // работают только в desktop-приложении (main-процесс Electron).
           result =
-            "⚠️ Браузерные инструменты (browserOpen/browserClick и др.) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
+            "⚠️ Инструменты браузера (browserOpen и др.) и управления окном приложения (appRead/appClick и др.) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
         } else {
           result =
             "⚠️ Файловые операции и git недоступны в веб-версии. Запустите приложение на Windows (bun run dist:win).";
@@ -4356,6 +4370,9 @@
       }
       // затем — правую панель
       if (sidePanelVisible()) closeSidePanel();
+      // Esc во время генерации = явная остановка агента. Только реальные нажатия
+      // пользователя (e.isTrusted) — синтетические клики агента (appPress Escape) не сработают.
+      if (streaming && e.isTrusted) stop();
     }
   });
 

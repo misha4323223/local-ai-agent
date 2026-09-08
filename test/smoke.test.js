@@ -57,15 +57,27 @@ async function testAgentCore() {
     }
   });
 
-  await test("SYSTEM_PROMPT: правило 21 (браузер) и имена в списке", () => {
+  await test("TOOL_DEFINITIONS: app-* инструменты управления окном", () => {
+    const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name).filter(Boolean);
+    for (const n of ["appRead", "appClick", "appFill", "appSelect", "appPress", "appWait", "appScreenshot"]) {
+      assert.ok(names.includes(n), "нет инструмента " + n);
+    }
+  });
+
+  await test("SYSTEM_PROMPT: правила 21-23 (браузер, своё окно, остановка)", () => {
     assert.ok(core.SYSTEM_PROMPT.includes("21. Браузер (видимое окно Chromium)"), "нет правила 21");
-    assert.ok(core.SYSTEM_PROMPT.includes("browserOpen, browserFill"), "нет имён browser-* в списке");
+    assert.ok(core.SYSTEM_PROMPT.includes("22. СВОЁ окно приложения (app-инструменты)"), "нет правила 22");
+    assert.ok(core.SYSTEM_PROMPT.includes("23. Остановка"), "нет правила 23");
+    assert.ok(core.SYSTEM_PROMPT.includes("Остановлено пользователем"), "нет текста остановки");
+    assert.ok(core.SYSTEM_PROMPT.includes("appRead, appClick"), "нет имён app-* в списке");
   });
 
   await test("normalizeToolName: snake_case алиасы (в т.ч. browser-*)", () => {
     assert.strictEqual(core.normalizeToolName("browserOpen"), "browserOpen");
     assert.strictEqual(core.normalizeToolName("browser_open"), "browserOpen");
     assert.strictEqual(core.normalizeToolName("browser_click"), "browserClick");
+    assert.strictEqual(core.normalizeToolName("app_read"), "appRead");
+    assert.strictEqual(core.normalizeToolName("app_click"), "appClick");
     assert.strictEqual(core.normalizeToolName("write_file"), "writeFile");
   });
 
@@ -83,6 +95,34 @@ async function testAgentCore() {
     const msgs = Array.from({ length: 5 }, (_, i) => ({ role: "user", content: "m" + i }));
     const trimmed = core.trimConversation(msgs, 1000);
     assert.ok(Array.isArray(trimmed), "trimConversation вернул не массив");
+  });
+}
+
+// ── 1b. app-ui-tools ─────────────────────────────────────────────────────────
+async function testAppUiTools() {
+  const appUi = require(path.join(ROOT, "src", "app-ui-tools.js"));
+
+  await test("app-ui-tools: экспорты и looksDangerous", () => {
+    for (const f of ["read", "click", "fill", "select", "press", "wait", "screenshot"]) {
+      assert.strictEqual(typeof appUi[f], "function", "нет экспорта " + f);
+    }
+    assert.ok(appUi.looksDangerous("Удалить файл"), "не поймал «Удалить»");
+    assert.ok(appUi.looksDangerous("Очистить чат"), "не поймал «Очистить чат»");
+    assert.ok(appUi.looksDangerous("Сбросить настройки"), "не поймал «Сбросить»");
+    assert.ok(appUi.looksDangerous("Отменить изменения"), "не поймал «Отменить»");
+    assert.ok(!appUi.looksDangerous("Настройки"), "ложный сработал на «Настройки»");
+    assert.ok(!appUi.looksDangerous("Сохранить"), "ложный сработал на «Сохранить»");
+    assert.ok(!appUi.looksDangerous(""), "пустая строка опасна");
+  });
+
+  await test("app-ui-tools: без окна → понятная ошибка", async () => {
+    let msg = "";
+    try {
+      await appUi.read({}, null);
+    } catch (e) {
+      msg = e && e.message ? e.message : String(e);
+    }
+    assert.ok(/десктоп|недоступно/i.test(msg), "read(null) вернул: " + msg.slice(0, 80));
   });
 }
 
@@ -321,6 +361,7 @@ async function testServer() {
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
   await testAgentCore();
+  await testAppUiTools();
   await testSecrets();
   await testOta();
   await testBrowserTools();

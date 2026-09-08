@@ -43,6 +43,7 @@ const {
 // мобильный мост вызывает те же функции, что и окно приложения (никакого дублирования логики).
 const MobileBridge = require("./mobile-bridge.js");
 const browserTools = require("./browser-tools.js"); // браузерные инструменты агента (Playwright)
+const appUi = require("./app-ui-tools.js"); // инструменты управления собственным окном приложения (app-*)
 const secrets = require("./secrets.js"); // секреты: ключи, токены, PIN, agentEnv (safeStorage)
 secrets.init(path.join(app.getPath("userData"), "secrets.json"));
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
@@ -1436,6 +1437,10 @@ async function stageAllSafe(dir, settings) {
 async function executeTool(name, args, settings) {
   args = args || {};
   try {
+    // Пользователь нажал Esc/«Стоп» — агент должен немедленно остановиться.
+    if (global.__agentStopRequested) {
+      return "⏹ Остановлено пользователем (Esc / Стоп). Немедленно прекрати вызовы инструментов и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось.";
+    }
     switch (name) {
       case "createFolder": {
         const p = resolvePath(args.path, settings);
@@ -1884,6 +1889,30 @@ async function executeTool(name, args, settings) {
       }
       case "browserStatus": {
         return await browserTools.status();
+      }
+      // Инструменты управления собственным окном приложения (app-*): DOM внутри Electron-окна.
+      case "appRead": {
+        return await appUi.read(args, mainWindow);
+      }
+      case "appClick": {
+        return await appUi.click(args, mainWindow);
+      }
+      case "appFill": {
+        return await appUi.fill(args, mainWindow);
+      }
+      case "appSelect": {
+        return await appUi.select(args, mainWindow);
+      }
+      case "appPress": {
+        return await appUi.press(args, mainWindow);
+      }
+      case "appWait": {
+        return await appUi.wait(args, mainWindow);
+      }
+      case "appScreenshot": {
+        const dataUrl = await appUi.screenshot(args, mainWindow);
+        if (activeEmit) activeEmit({ type: "image", path: "app:window", dataUrl });
+        return "OK — скриншот окна приложения снят и показан во встроенном просмотрщике. Детали разбирай через analyzeImage.";
       }
       case "searchFile": {
         const p = resolvePath(args.path, settings);
@@ -2996,7 +3025,21 @@ async function runAi(settings, messages, win, opts) {
   const maxRounds = planMode ? 3 : 25;
   let finalText = "";
 
+  const stopGraceful = () => {
+    if (!String(finalText || "").trim()) {
+      finalText = "⏹ Остановлено пользователем. Изменения сохранены; напиши «продолжай», чтобы доработать.";
+      emit({ type: "chunk", text: finalText });
+    }
+    lastUndoLog = activeRunUndo.slice();
+    persistUndo();
+    if (lastUndoLog.length) emit({ type: "undo_available", count: lastUndoLog.length });
+    emit({ type: "done" });
+    return { ok: true, text: finalText };
+  };
+
   for (let round = 0; round < maxRounds; round++) {
+    // Пользователь остановил агента (Esc/Стоп) — не начинаем новый раунд.
+    if (global.__agentStopRequested) return stopGraceful();
     let collected = "";
     const toolCalls = [];
     const stripper = createThinkingStripper({ onHidden: emitThink });
@@ -3203,6 +3246,8 @@ async function runAi(settings, messages, win, opts) {
       emit({ type: "tool_result", name: c.name, result: capped });
       canonical.push({ role: "tool", tool_call_id: c.id, content: capped });
     }
+    // Остановка во время выполнения инструментов — завершаем без нового раунда.
+    if (global.__agentStopRequested) return stopGraceful();
   }
 
   throw new Error("Превышено максимальное число раундов вызова инструментов (" + maxRounds + ").");
@@ -3598,6 +3643,7 @@ ipcMain.handle("chats:save", (_e, d) => {
 
 ipcMain.handle("ai:send", async (_e, messages, opts) => {
   const settings = loadSettings();
+  global.__agentStopRequested = false;
   global.__agentRunning = true;
   try {
     await runAi(settings, messages || [], mainWindow, opts || {});
@@ -3617,6 +3663,7 @@ ipcMain.handle("ai:send", async (_e, messages, opts) => {
     }
     return { ok: false, error: msg };
   } finally {
+    global.__agentStopRequested = false;
     global.__agentRunning = false;
   }
 });
@@ -3666,6 +3713,7 @@ ipcMain.handle("undo:rollback", () => {
 });
 
 ipcMain.handle("ai:stop", () => {
+  global.__agentStopRequested = true;
   if (activeAbort) activeAbort.abort();
   if (pendingAsk) {
     const r = pendingAsk;
