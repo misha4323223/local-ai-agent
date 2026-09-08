@@ -12,6 +12,12 @@ const os = require("os");
 const crypto = require("crypto");
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+// Защита PIN от перебора: максимум неудачных попыток за окно времени,
+// после чего вход блокируется на AUTH_LOCK_MS (глобально, а не на соединение).
+const AUTH_MAX_FAILS = 10;
+const AUTH_FAIL_WINDOW_MS = 60000;
+const AUTH_LOCK_MS = 5 * 60 * 1000;
 const RENDERER_DIR = path.join(__dirname, "renderer");
 
 const MIME = {
@@ -228,6 +234,10 @@ class MobileBridge {
     this.clients = new Set();
     this.pingTimer = null;
     this.deny = new Set(["dialog:pickDir"]); // нативные диалоги недоступны с телефона
+    // Глобальный rate-limit аутентификации (перебор PIN):
+    this.authFailCount = 0;
+    this.authFailWindowStart = 0;
+    this.authLockedUntil = 0;
   }
 
   // ─── Жизненный цикл ───
@@ -387,13 +397,33 @@ class MobileBridge {
     }
     if (!conn.authed) {
       if (msg && msg.t === "auth") {
+        const now = Date.now();
+        // Глобальная блокировка после серии неудач: не считаем попытки, просто отказываем.
+        if (now < this.authLockedUntil) {
+          conn.sendText(JSON.stringify({ t: "auth_err", lock: true }));
+          return;
+        }
         if (this.pin && String(msg.pin) === String(this.pin)) {
           conn.authed = true;
+          this.authFailCount = 0; // успешный вход — сбрасываем счётчик перебора
+          this.authFailWindowStart = 0;
           this.clients.add(conn);
           conn.sendText(JSON.stringify({ t: "auth_ok", v: this.status() }));
         } else {
           conn.authTries++;
-          conn.sendText(JSON.stringify({ t: "auth_err" }));
+          // Неудача считается в глобальном окне (переподключение не обнуляет счётчик).
+          if (now - this.authFailWindowStart > AUTH_FAIL_WINDOW_MS) {
+            this.authFailWindowStart = now;
+            this.authFailCount = 0;
+          }
+          this.authFailCount++;
+          let locked = false;
+          if (this.authFailCount >= AUTH_MAX_FAILS) {
+            this.authLockedUntil = now + AUTH_LOCK_MS;
+            this.authFailCount = 0;
+            locked = true;
+          }
+          conn.sendText(JSON.stringify({ t: "auth_err", lock: locked }));
           if (conn.authTries >= 5) {
             conn.sendText(JSON.stringify({ t: "auth_lock" }));
             conn.destroy();

@@ -43,6 +43,8 @@ const {
 // мобильный мост вызывает те же функции, что и окно приложения (никакого дублирования логики).
 const MobileBridge = require("./mobile-bridge.js");
 const browserTools = require("./browser-tools.js"); // браузерные инструменты агента (Playwright)
+const secrets = require("./secrets.js"); // секреты: ключи, токены, PIN, agentEnv (safeStorage)
+secrets.init(path.join(app.getPath("userData"), "secrets.json"));
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
 const ipcHandlerMap = new Map();
 ipcMain.handle = (channel, fn) => {
@@ -131,6 +133,11 @@ function loadSettings() {
   try {
     const raw = JSON.parse(fs.readFileSync(settingsFile(), "utf8"));
     const s = normalizeSettings(raw);
+    // Секреты (ключи, токены, PIN, agentEnv) живут в зашифрованном secrets.json.
+    const sec = secrets.loadSecrets();
+    for (const k of secrets.SECRET_KEYS) {
+      if (sec[k] !== undefined) s[k] = sec[k];
+    }
     agentEnv = (s && typeof s.agentEnv === "object" && s.agentEnv) || {};
     return s;
   } catch {
@@ -140,7 +147,10 @@ function loadSettings() {
 
 function saveSettings(s) {
   fs.mkdirSync(path.dirname(settingsFile()), { recursive: true });
-  fs.writeFileSync(settingsFile(), JSON.stringify(s, null, 2), "utf8");
+  // Секреты — в отдельный зашифрованный файл, в settings.json их не остаётся.
+  const { rest, sec } = secrets.splitSecrets(s);
+  secrets.saveSecrets(sec);
+  fs.writeFileSync(settingsFile(), JSON.stringify(rest, null, 2), "utf8");
 }
 
 function loadChats() {

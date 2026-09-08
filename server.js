@@ -23,14 +23,14 @@ function handleApi(url, res, req) {
   // напрямую (CORS) — запрос идёт через preview-сервер.
   if (url.pathname === "/api/search") {
     const q = (url.searchParams.get("q") || "").trim();
-    if (!q) return jsonOk(res, "Ошибка: пустой поисковый запрос");
+    if (!q) { jsonOk(res, "Ошибка: пустой поисковый запрос"); return true; }
     AgentCore.webSearchDDG(q).then((t) => jsonOk(res, t)).catch((e) => jsonOk(res, "Ошибка веб-поиска: " + e.message));
     return true;
   }
   // Чтение веб-страницы по URL (тоже из-за CORS идёт через сервер).
   if (url.pathname === "/api/fetch") {
     const u = (url.searchParams.get("url") || "").trim();
-    if (!/^https?:\/\//i.test(u)) return jsonOk(res, "Ошибка: укажи URL вида https://...");
+    if (!/^https?:\/\//i.test(u)) { jsonOk(res, "Ошибка: укажи URL вида https://..."); return true; }
     AgentCore.webFetchPage(u).then((t) => jsonOk(res, t)).catch((e) => jsonOk(res, "Ошибка загрузки: " + e.message));
     return true;
   }
@@ -88,6 +88,14 @@ function handleApi(url, res, req) {
       res.end("Proxy error: " + e.message);
     });
     req.pipe(preq);
+    return true;
+  }
+  // Любой неизвестный /api/* обрабатываем здесь и НЕ пускаем в статик-ветку:
+  // иначе после уже отправленного ответа writeHead(404) уронит сервер
+  // (ERR_HTTP_HEADERS_SENT).
+  if (url.pathname.startsWith("/api/")) {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Unknown API: " + url.pathname);
     return true;
   }
   return false;

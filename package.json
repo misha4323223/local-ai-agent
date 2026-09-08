@@ -9,7 +9,8 @@
     "start": "electron .",
     "preview": "node server.js",
     "dist:win": "electron-builder --win --publish never",
-    "dist:win:installer": "electron-builder --win nsis --publish never"
+    "dist:win:installer": "electron-builder --win nsis --publish never",
+    "test": "node test/smoke.test.js"
   },
   "devDependencies": {
     "electron": "^33.2.0",
