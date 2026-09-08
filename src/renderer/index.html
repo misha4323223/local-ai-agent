@@ -427,6 +427,8 @@
                 <button data-preset="openai" class="chip">OpenAI (GPT)</button>
                 <button data-preset="groq" class="chip">Groq</button>
                 <button data-preset="openrouter" class="chip">OpenRouter</button>
+                <button data-preset="nvidia" class="chip">NVIDIA NIM</button>
+                <button data-preset="yandex" class="chip">Yandex AI Studio</button>
                 <button data-preset="g4f" class="chip">G4F (локально)</button>
                 <button data-preset="custom" class="chip">Свой (OpenAI-совместимый)</button>
               </div>
@@ -448,6 +450,11 @@
                 <input id="s-openai-model" placeholder="deepseek-chat · gpt-4o · llama-3.3-70b..." spellcheck="false" />
                 <button id="btn-refresh-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
               </div>
+            </div>
+            <div class="field hidden" id="yandex-project-field">
+              <label>Yandex folder ID (OpenAI-Project)</label>
+              <input id="s-openai-project" placeholder="b1g74qv3u70jmct1ekvf — ID каталога из Yandex Cloud / AI Studio" spellcheck="false" />
+              <div class="hint-block">Только для Yandex AI Studio: ID каталога (папки), в котором создан API-ключ. Отправляется заголовком <code>OpenAI-Project</code>. Модель — <code>gpt://&lt;folder&gt;/deepseek-v4-flash/latest</code> (подтяни кнопкой ↻ или вставь свою).</div>
             </div>
             <div id="g4f-hint" class="hint-block hidden">
               G4F — бесплатные модели без ключа. Запусти на ПК: <code>pip install -U g4f</code>, затем <code>g4f api</code> — современный interference-API живёт на <b>порту 1337</b> (<code>http://localhost:1337/v1</code>), в старых сборках это порт 8080 (<code>http://localhost:8080/v1</code>) — если один не отвечает, поправь URL выше (при выборе пресета G4F приложение само проверит оба порта и подставит рабочий URL). Ключ НЕ нужен: поле можно оставить пустым (некоторые сборки принимают любую заглушку). Выбери провайдера в списке ниже (★ — стабильные, без входа): его типовые модели появятся сразу — нажми нужную, и «Провайдер:модель» подставится сам. Кнопка <b>▶</b> у провайдера — тест: что отвечает g4f и какие модели отдаёт, подробный лог уйдёт в правую панель «Консоль». Если g4f запущен, приложение само подтянет точный список моделей; кнопка ↻ у поля модели — на всякий случай. Провайдер передаётся g4f отдельным полем <code>provider</code>. Если провайдер отвечает «зарегистрируйтесь…» или молчит — просто выбери другого из списка. Инструменты агента работают через текстовый фолбэк — не все бесплатные провайдеры G4F поддерживают нативные вызовы инструментов.

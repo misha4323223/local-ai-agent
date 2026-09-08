@@ -3,7 +3,7 @@
 /* Общее ядро агента: системный промпт, определения инструментов, стриппер думающих блоков,
    а также унифицированный транспорт к трём семействам провайдеров:
      - "ollama"    — локальная Ollama (нативный /api/chat, NDJSON-стрим)
-     - "openai"    — OpenAI-совместимые API (OpenAI, Groq, OpenRouter, DeepSeek, свой) — /chat/completions
+     - "openai"    — OpenAI-совместимые API (OpenAI, Groq, OpenRouter, DeepSeek, Yandex AI Studio, свой) — /chat/completions
      - "anthropic" — Claude (Anthropic Messages API /v1/messages, SSE-стрим)
    Работает и в Electron main (CommonJS), и в браузере (window.AgentCore). */
 (function (root, factory) {
@@ -38,8 +38,9 @@
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
 20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), тихая установка скачанного установщика .exe — installExe (спросит подтверждение). ВАЖНО: команды по умолчанию выполняются в cmd.exe на Windows — если нужны командлеты PowerShell (Get-Process, Get-Service, Get-NetIPAddress и т.п.), напиши внутри runCommand: powershell -NoProfile -Command "...".
+21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url), управляй страницей через browserClick / browserFill / browserSelect / browserPress, читай содержимое через browserText, список вкладок — browserStatus, скриншот — browserScreenshot. Селекторы: CSS (#id, .class, input[name="..."]) или text=Текст кнопки, xpath=//button. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли бери ТОЛЬКО у пользователя через askUser (или из agentEnv, если он сам их туда положил) — не выдумывай и не записывай их в код. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -249,6 +250,152 @@
           type: "object",
           properties: { url: { type: "string", description: "URL страницы для чтения" } },
           required: ["url"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserOpen",
+        description: "Открыть сайт в видимом окне Chromium (агент управляет браузером, пользователь видит всё). url — полный адрес страницы; newTab — true, чтобы открыть новую вкладку вместо активной. Возвращает id вкладки (tabId). Браузер запускается при первом вызове.",
+        parameters: {
+          type: "object",
+          properties: {
+            url: { type: "string", description: "URL страницы, например https://..." },
+            newTab: { type: "boolean", description: "Открыть в новой вкладке (по умолчанию переиспользуется активная)" },
+          },
+          required: ["url"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserFill",
+        description: "Заполнить текстовое поле на открытой странице. tabId — id вкладки из browserOpen (по умолчанию активная); selector — CSS-селектор (#id, .class, input[name=...]) или text=/xpath=; text — вводимое значение.",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            selector: { type: "string", description: "Селектор поля: #id, .class, input[name=...], text=..., xpath=..." },
+            text: { type: "string", description: "Значение для ввода" },
+          },
+          required: ["selector", "text"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserClick",
+        description: "Кликнуть по элементу (кнопка, ссылка, чекбокс) на открытой странице. tabId — id вкладки; selector — CSS или text=Текст кнопки / xpath=...; waitLoad — false, если после клика не нужно ждать загрузки страницы (по умолчанию true).",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            selector: { type: "string", description: "Селектор элемента: #id, .class, text=Кнопка, xpath=..." },
+            waitLoad: { type: "boolean", description: "Ждать загрузку страницы после клика (по умолчанию true)" },
+          },
+          required: ["selector"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserSelect",
+        description: "Выбрать вариант в выпадающем списке (<select>) на открытой странице. tabId — id вкладки; selector — селектор списка; value — значение варианта (атрибут value).",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            selector: { type: "string", description: "Селектор списка" },
+            value: { type: "string", description: "Значение варианта (value атрибут)" },
+          },
+          required: ["selector", "value"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserPress",
+        description: "Нажать клавишу на открытой странице (Enter — отправка формы, Escape, Tab, стрелки). tabId — id вкладки; key — имя клавиши (Enter, Escape, Tab, ArrowDown...).",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            key: { type: "string", description: "Клавиша: Enter, Escape, Tab, ArrowDown и т.п." },
+          },
+          required: ["key"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserText",
+        description: "Прочитать видимый текст открытой страницы (до max символов, по умолчанию 12000). Возвращает URL, заголовок и текст. Используй, чтобы понять, что на странице, после кликов/заполнения. tabId — id вкладки.",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            max: { type: "integer", description: "Максимум символов (1000–30000, по умолчанию 12000)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserScreenshot",
+        description: "Сделать скриншот открытой страницы (PNG data URL). fullPage — true, чтобы захватить всю длину страницы. Результат можно передать в analyzeImage (разбор глазами vision-модели) или показать пользователю через showImage. tabId — id вкладки.",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            fullPage: { type: "boolean", description: "Скриншот всей страницы (по умолчанию только видимая часть)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserWait",
+        description: "Ждать появления элемента на странице (загрузка после логина, капча, кнопка). tabId — id вкладки; selector — селектор; timeout — мс ожидания (по умолчанию 10000, максимум 60000).",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            selector: { type: "string", description: "Селектор ожидаемого элемента" },
+            timeout: { type: "integer", description: "Таймаут в мс (по умолчанию 10000)" },
+          },
+          required: ["selector"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserClose",
+        description: "Закрыть вкладку (tabId, по умолчанию активную) или все вкладки и браузер (tabId: \"all\").",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки или \"all\" для закрытия всего браузера" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserStatus",
+        description: "Показать состояние браузера: список открытых вкладок (id, заголовок, URL) и какая из них активная. Без аргументов.",
+        parameters: {
+          type: "object",
+          properties: {},
         },
       },
     },
@@ -1871,13 +2018,27 @@
     return trimBase(s.openaiUrl || s.externalUrl || DEFAULT_BASES.openai); // legacy externalUrl — миграция
   }
 
+  // Веб-предпросмотр: Yandex AI Studio не отдаёт CORS-заголовки — браузер блокирует
+  // прямые запросы («Failed to fetch»). В браузерном режиме база переписывается на
+  // локальный прокси preview-сервера (/api/llm/...), который ходит в Яндекс сам.
+  function proxiedBase(base) {
+    const b = String(base || "");
+    if (
+      typeof location !== "undefined" && location && location.origin &&
+      /ai\.api\.cloud\.yandex\.net/i.test(b)
+    ) {
+      return location.origin + "/api/llm/" + encodeURIComponent(b);
+    }
+    return b;
+  }
+
   function apiKeyFor(provider, s) {
     if (provider === "anthropic") return s.anthropicApiKey || s.apiKey || "";
     if (provider === "openai") return s.openaiApiKey || s.apiKey || "";
     return "";
   }
 
-  function apiHeaders(provider, apiKey, fromBrowser) {
+  function apiHeaders(provider, apiKey, fromBrowser, extra) {
     const h = { "Content-Type": "application/json" };
     if (provider === "ollama") return h;
     if (provider === "anthropic") {
@@ -1888,7 +2049,14 @@
       return h;
     }
     if (apiKey) h.Authorization = "Bearer " + apiKey;
+    if (extra && typeof extra === "object") Object.assign(h, extra);
     return h;
+  }
+
+  // Yandex AI Studio (OpenAI-совместимый эндпоинт): каталог (папка) передаётся заголовком OpenAI-Project.
+  function projectHeader(s) {
+    const f = s && s.openaiProject ? String(s.openaiProject).trim() : "";
+    return f ? { "OpenAI-Project": f } : null;
   }
 
   function jsonArgs(args) {
@@ -2043,7 +2211,7 @@
     const tools = (opts && opts.tools) || TOOL_DEFINITIONS;
     const fromBrowser = !!(opts && opts.fromBrowser);
     const apiKey = apiKeyFor(provider, s);
-    const headers = apiHeaders(provider, apiKey, fromBrowser);
+    const headers = apiHeaders(provider, apiKey, fromBrowser, projectHeader(s));
 
     if (provider === "ollama") {
       return {
@@ -2075,7 +2243,7 @@
       body.provider = g4f.provider;
     }
     return {
-      url: baseFor(provider, s) + "/chat/completions",
+      url: proxiedBase(baseFor(provider, s)) + "/chat/completions",
       headers,
       body: JSON.stringify(body),
     };
@@ -2250,7 +2418,7 @@
     const fromBrowser = !!(opts && opts.fromBrowser);
     const apiKey = apiKeyFor(provider, s);
     const timeout = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(10000) : undefined;
-    const headers = apiHeaders(provider, apiKey, fromBrowser);
+    const headers = apiHeaders(provider, apiKey, fromBrowser, projectHeader(s));
 
     if (provider === "ollama") {
       const res = await fetch(baseFor(provider, s) + "/api/tags", { headers, signal: timeout });
@@ -2264,7 +2432,7 @@
       const data = await res.json();
       return (data.data || []).map((m) => m.id);
     }
-    const res = await fetch(baseFor(provider, s) + "/models", { headers, signal: timeout });
+    const res = await fetch(proxiedBase(baseFor(provider, s)) + "/models", { headers, signal: timeout });
     if (!res.ok) throw new Error("API error " + res.status + ": " + (await res.text()).slice(0, 300));
     const data = await res.json();
     return (data.data || []).map((m) => m.id);
@@ -2292,14 +2460,15 @@
       key: (s.visionKey || "").trim() || (s.openaiApiKey || "").trim() || "",
       visionModel: (s.visionModel || "").trim(),
       imageModel: (s.imageModel || "").trim(),
+      project: (s.openaiProject || "").trim(),
     };
   }
 
   // Чтение изображения vision-моделью: dataUrl → текстовое описание.
   async function describeImageRemote(cfg, imageDataUrl, prompt, model) {
-    const res = await fetch(cfg.url + "/chat/completions", {
+    const res = await fetch(proxiedBase(cfg.url) + "/chat/completions", {
       method: "POST",
-      headers: apiHeaders("openai", cfg.key),
+      headers: apiHeaders("openai", cfg.key, false, cfg.project ? { "OpenAI-Project": cfg.project } : null),
       body: JSON.stringify({
         model,
         max_tokens: 2048,
@@ -2328,9 +2497,9 @@
     const body = { model, prompt };
     if (opts.aspectRatio) body.aspect_ratio = opts.aspectRatio;
     if (opts.size) body.size = opts.size;
-    const res = await fetch(cfg.url + "/images", {
+    const res = await fetch(proxiedBase(cfg.url) + "/images", {
       method: "POST",
-      headers: apiHeaders("openai", cfg.key),
+      headers: apiHeaders("openai", cfg.key, false, cfg.project ? { "OpenAI-Project": cfg.project } : null),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(300000),
     });
@@ -2378,8 +2547,8 @@
       let fetched = null;
       try {
         const timeout = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined;
-        const res = await fetch(base + "/models", {
-          headers: apiHeaders(provider, apiKeyFor(provider, s), false),
+        const res = await fetch(proxiedBase(base) + "/models", {
+          headers: apiHeaders(provider, apiKeyFor(provider, s), false, projectHeader(s)),
           signal: timeout,
         });
         if (res.ok) {
@@ -2438,7 +2607,7 @@
       const sys =
         "Ты — менеджер памяти ИИ-агента-разработчика. Сожми переписку в краткую памятку на русском (до 700 слов): что просил пользователь, что уже сделано (файлы, команды, git), текущее состояние проекта, что осталось сделать. Памятка должна позволить агенту продолжить работу без исходных сообщений. Пиши только саму памятку, без пояснений.";
       const timeout = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined;
-      const headers = apiHeaders(provider, apiKeyFor(provider, s), false);
+      const headers = apiHeaders(provider, apiKeyFor(provider, s), false, projectHeader(s));
       if (provider === "anthropic") {
         const res = await fetch(baseFor(provider, s) + "/v1/messages", {
           method: "POST",
@@ -2461,7 +2630,7 @@
         const d = await res.json();
         return (d.message && d.message.content) || null;
       }
-      const res = await fetch(baseFor(provider, s) + "/chat/completions", {
+      const res = await fetch(proxiedBase(baseFor(provider, s)) + "/chat/completions", {
         method: "POST",
         headers,
         signal: timeout,

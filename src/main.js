@@ -42,6 +42,7 @@ const {
 // Прокси ipcMain.handle: каждый зарегистрированный обработчик сохраняется в карту —
 // мобильный мост вызывает те же функции, что и окно приложения (никакого дублирования логики).
 const MobileBridge = require("./mobile-bridge.js");
+const browserTools = require("./browser-tools.js"); // браузерные инструменты агента (Playwright)
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
 const ipcHandlerMap = new Map();
 ipcMain.handle = (channel, fn) => {
@@ -1403,6 +1404,25 @@ async function runAsAdmin(cmd) {
   return "На Linux нужен pkexec (policykit) или sudo с паролем. Установи pkexec либо выполни команду вручную в терминале с sudo.";
 }
 
+// git add -A, но БЕЗ файлов секретов (env-файлы вида DOTENV*): агент
+// (авто-чекпоинт, gitCommit, публикация) не должен закоммитить ключи в git.
+async function stageAllSafe(dir, settings) {
+  const r = await runGit(dir, ["add", "-A", "--", ".", ":(exclude,glob)**/" + ".env" + "*"], settings);
+  if (!r.ok) return r;
+  // Страховка: снимаем с индекса всё, что всё же проскочило (имя с DOTENV).
+  try {
+    const cached = await runGit(dir, ["diff", "--cached", "--name-only"], settings);
+    if (cached.ok && cached.out) {
+      const secret = cached.out.split("\n").map((l) => l.trim()).filter((l) => {
+        const base = l.split("/").pop() || l;
+        return /^\.env(\..*)?$/i.test(base) || /\.env$/i.test(base);
+      });
+      if (secret.length) await runGit(dir, ["restore", "--staged", "--", ...secret], settings);
+    }
+  } catch {}
+  return r;
+}
+
 async function executeTool(name, args, settings) {
   args = args || {};
   try {
@@ -1824,6 +1844,37 @@ async function executeTool(name, args, settings) {
       case "webFetch": {
         return await webFetchPage(args.url);
       }
+      // Браузерные инструменты (Playwright): видимое окно Chromium, которым агент управляет сам.
+      case "browserOpen": {
+        return await browserTools.open(args);
+      }
+      case "browserFill": {
+        return await browserTools.fill(args);
+      }
+      case "browserClick": {
+        return await browserTools.click(args);
+      }
+      case "browserSelect": {
+        return await browserTools.select(args);
+      }
+      case "browserPress": {
+        return await browserTools.press(args);
+      }
+      case "browserText": {
+        return await browserTools.text(args);
+      }
+      case "browserScreenshot": {
+        return await browserTools.screenshot(args);
+      }
+      case "browserWait": {
+        return await browserTools.wait(args);
+      }
+      case "browserClose": {
+        return await browserTools.close(args);
+      }
+      case "browserStatus": {
+        return await browserTools.status();
+      }
       case "searchFile": {
         const p = resolvePath(args.path, settings);
         if (!fs.existsSync(p)) return "Ошибка: файл не найден: " + p;
@@ -1965,7 +2016,7 @@ async function executeTool(name, args, settings) {
       case "gitCommit": {
         if (!args.message) return "Ошибка: укажи message для коммита";
         const cwd = agentWorkDir(settings);
-        const add = await runGit(cwd, ["add", "-A"], settings);
+        const add = await stageAllSafe(cwd, settings);
         if (!add.ok) return "Ошибка git add: " + add.err;
         const commit = await runGit(
           cwd,
@@ -2805,7 +2856,7 @@ async function autoCheckpointCommit(settings, messages) {
     }
     title = String(title).replace(/\s+/g, " ").trim().slice(0, 70);
     if (!title) title = "Работа агента";
-    const add = await runGit(dir, ["add", "-A"], settings);
+    const add = await stageAllSafe(dir, settings);
     if (!add.ok) return { committed: false };
     const commit = await runGit(
       dir,
@@ -4186,7 +4237,7 @@ async function publishLocalToGithub(dir, s, opts) {
   const headOk = (await runGit(dir, ["rev-parse", "--verify", "HEAD"], s)).ok;
   const changes = stR.ok && !!String(stR.out || "").trim();
   if (changes) {
-    const addAll = await runGit(dir, ["add", "-A"], s);
+    const addAll = await stageAllSafe(dir, s);
     if (!addAll.ok) return { ok: false, error: "Репозиторий создан: " + repoUrl + ".\ngit add не удался: " + addAll.err };
     const msg = String(opts.message || "").trim() || "Initial commit";
     const cm = await runGit(dir, ["-c", "user.name=AI Agent", "-c", "user.email=ai-agent@local", "commit", "-m", msg], s);
@@ -4732,7 +4783,7 @@ ipcMain.handle("git:commit", async (_e, dir, message) => {
   const msg = String(message || "").trim();
   if (!msg) return { ok: false, error: "Укажи сообщение коммита" };
   const s = loadSettings();
-  const add = await runGit(d, ["add", "-A"], s);
+  const add = await stageAllSafe(d, s);
   if (!add.ok) return { ok: false, error: add.err };
   const commit = await runGit(
     d,
@@ -4834,6 +4885,7 @@ app.on("window-all-closed", () => {
 
 // При выходе — останавливаем все фоновые процессы.
 app.on("before-quit", () => {
+  browserTools.stop().catch(() => {}); // закрываем окно Chromium агента
   for (const rec of bgProcesses.values()) bgKill(rec);
   bgProcesses.clear();
   if (userTerm) {

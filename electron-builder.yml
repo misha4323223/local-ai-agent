@@ -15,6 +15,12 @@ files:
   - assets/**/*
   - package.json
   - server.js
+# Playwright запускает свой драйвер и Chromium как дочерние процессы — из app.asar
+# это невозможно (spawn не умеет виртуальную ФС asar). Распаковываем пакеты целиком
+# в app.asar.unpacked; require автоматически подхватывает распакованные пути.
+asarUnpack:
+  - "node_modules/playwright/**"
+  - "node_modules/playwright-core/**"
 extraResources:
   - from: assets
     to: assets
