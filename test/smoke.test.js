@@ -153,6 +153,50 @@ async function testAgentCore() {
     }
   });
 
+  await test("sanitizeToolPairs: экспорт и удаление сирот без обрезки", () => {
+    // Прямой доступ к санитайзеру — защита срабатывает и когда обрезка контекста
+    // не нужна (под-бюджетный путь manage() / финальный предохранитель перед запросом).
+    assert.strictEqual(typeof core.sanitizeToolPairs, "function", "sanitizeToolPairs не экспортирован");
+    const msgs = [
+      { role: "tool", tool_call_id: "x1", content: "сирота без assistant" },
+      { role: "user", content: "привет" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "runCommand", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+      { role: "tool", tool_call_id: "c2", content: "сирота после валидной пары" },
+      { role: "assistant", content: "готово" },
+    ];
+    const out = core.sanitizeToolPairs(msgs);
+    const roles = out.map((m) => m.role);
+    // Первый tool — сирота (удалён), второй tool (c2) идёт сразу после валидной пары
+    // и допустим: несколько tool-ответов подряд после одного assistant(tool_calls) — валидно.
+    assert.deepStrictEqual(roles, ["user", "assistant", "tool", "tool", "assistant"], "роли после санитизации: " + JSON.stringify(roles));
+    // Инвариант: у каждого tool последнее НЕ-tool сообщение перед ним — assistant с tool_calls
+    // (несколько tool-ответов подряд после одного assistant — допустимо: N вызовов → N результатов).
+    let lastNonTool = null;
+    for (let i = 0; i < out.length; i++) {
+      if (out[i].role !== "tool") lastNonTool = out[i];
+      else {
+        assert.ok(
+          lastNonTool && lastNonTool.role === "assistant" && Array.isArray(lastNonTool.tool_calls) && lastNonTool.tool_calls.length > 0,
+          "tool без предшествующего assistant(tool_calls) на позиции " + i
+        );
+      }
+    }
+  });
+
+  await test("createContextManager: под-бюджетный путь тоже убирает сирот", async () => {
+    const mgr = core.createContextManager({ settings: {}, planMode: true });
+    const msgs = [
+      { role: "tool", tool_call_id: "x", content: "сирота" },
+      { role: "user", content: "сделай" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "runCommand", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+    ];
+    const out = await mgr.manage(msgs, 1e9); // бюджет огромный — обрезка не нужна
+    const roles = out.map((m) => m.role);
+    assert.deepStrictEqual(roles, ["user", "assistant", "tool"], "роли под-бюджетного пути: " + JSON.stringify(roles));
+  });
+
   await test("Gemini: thought signature захватывается из стрима (extra_content)", async () => {
     // SSE-чанк как его шлёт OpenAI-совместимый эндпоинт Gemini 3.x:
     // tool-call несёт extra_content.google.thought_signature.

@@ -2818,7 +2818,11 @@
         const memoWeight = compactMemo ? estimateTokens(compactMemo.content) : 0;
         let total = 0;
         for (const m of messages) total += estimateMessageTokens(m);
-        if (total + memoWeight <= budget) return compactMemo ? [compactMemo, ...messages] : messages;
+        // Страховка: даже если обрезка не нужна, убираем осиротевшие tool-сообщения
+        // (role:"tool" без предшествующего assistant с tool_calls ломает API — 400 wrong_api_format).
+        if (total + memoWeight <= budget) {
+          return compactMemo ? [compactMemo, ...sanitizeToolPairs(messages)] : sanitizeToolPairs(messages);
+        }
         if (!compacted && !planMode) {
           compacted = true;
           try {
@@ -2919,6 +2923,7 @@
     estimateMessageTokens,
     contextBudget,
     trimConversation,
+    sanitizeToolPairs,
     truncateText,
     selectTools,
     modelWindow,

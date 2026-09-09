@@ -20,6 +20,7 @@ const {
   genCallId,
   contextBudget,
   trimConversation,
+  sanitizeToolPairs,
   truncateText,
   webSearchDDG,
   webFetchPage,
@@ -3020,7 +3021,7 @@ async function runAi(settings, messages, win, opts) {
       role: "system",
       content: SYSTEM_PROMPT + wdNote + briefNote + cloneNote + (planMode ? "\n\nРЕЖИМ ПЛАНА: сейчас НЕ выполняй инструменты и НЕ изменяй файлы. Составь пошаговый план работ и перечисли файлы, которые затронешь. Жди команды пользователя." : ""),
     },
-    ...runHistory.map((m) => ({ role: m.role, content: m.content })),
+    ...sanitizeToolPairs(runHistory.map((m) => ({ role: m.role, content: m.content }))),
   ];
   const maxRounds = planMode ? 3 : 25;
   let finalText = "";
@@ -3049,6 +3050,12 @@ async function runAi(settings, messages, win, opts) {
     if (canonical.length > 1) {
       const sys = canonical[0];
       canonical = [sys, ...(await ctxManager.manage(canonical.slice(1), histBudget))];
+    }
+    // Финальный предохранитель перед отправкой: осиротевшие tool-сообщения
+    // (role:"tool" без предшествующего assistant с tool_calls) — 400 wrong_api_format.
+    if (canonical.length > 1) {
+      const sys = canonical[0];
+      canonical = [sys, ...sanitizeToolPairs(canonical.slice(1))];
     }
 
     const req = buildChatRequest(settings, {
@@ -3083,6 +3090,10 @@ async function runAi(settings, messages, win, opts) {
         if (canonical.length > 1) {
           const sys = canonical[0];
           canonical = [sys, ...(await ctxManager.manage(canonical.slice(1), histBudget))];
+        }
+        if (canonical.length > 1) {
+          const sys = canonical[0];
+          canonical = [sys, ...sanitizeToolPairs(canonical.slice(1))];
         }
         round--;
         continue;
@@ -3192,6 +3203,13 @@ async function runAi(settings, messages, win, opts) {
       if (seenCalls.has(sig)) continue;
       seenCalls.add(sig);
       calls.push(norm);
+    }
+    // Все вызовы раунда оказались дублями — завершаем без «пустых» tool_calls.
+    if (!calls.length) {
+      if (!String(finalText || "").trim()) finalText = "Готово.";
+      emit({ type: "chunk", text: finalText });
+      emit({ type: "done" });
+      return { ok: true, text: finalText };
     }
 
     canonical.push({

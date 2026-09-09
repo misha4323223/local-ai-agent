@@ -2158,6 +2158,11 @@
       if (apiMessages.length > 1) {
         apiMessages = [apiMessages[0], ...AgentCore.trimConversation(apiMessages.slice(1), budget)];
       }
+      // Финальный предохранитель перед отправкой: осиротевшие tool-сообщения
+      // (role:"tool" без предшествующего assistant с tool_calls) — 400 wrong_api_format.
+      if (apiMessages.length > 1) {
+        apiMessages = [apiMessages[0], ...AgentCore.sanitizeToolPairs(apiMessages.slice(1))];
+      }
 
       const req = AgentCore.buildChatRequest(settings, {
         model: settings.model,
@@ -2254,6 +2259,13 @@
         if (seenCalls.has(sig)) continue;
         seenCalls.add(sig);
         calls.push(norm);
+      }
+      // Все вызовы раунда оказались дублями — завершаем без «пустых» tool_calls.
+      if (!calls.length) {
+        if (!String(finalText || "").trim()) finalText = "Готово.";
+        onEvent({ type: "chunk", text: finalText });
+        onEvent({ type: "done" });
+        return;
       }
       apiMessages.push({
         role: "assistant",
