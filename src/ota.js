@@ -56,6 +56,16 @@ function installedInfo() {
   return v && v.version ? { version: v.version, source: "ota" } : null;
 }
 
+// Версия установленного приложения (package.json рядом с кодом).
+// Используется, чтобы не накатывать бандл, который не новее уже установленного кода.
+function appVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).version || null;
+  } catch {
+    return null;
+  }
+}
+
 // Кандидаты-источники OTA: папка в userData, настроенная папка, ota/ рядом с кодом (разработка)
 function sources(settings) {
   const list = [];
@@ -71,12 +81,16 @@ function sources(settings) {
 // Найти самый свежий не применённый бандл в локальных папках
 function findCandidate(settings) {
   const installed = installedInfo();
+  const appV = appVersion();
   let best = null;
   for (const dir of sources(settings)) {
     const m = readJson(path.join(dir, "manifest.json"));
     if (!m || !m.version) continue;
     if (m.app && m.app !== "ai-agent") continue;
     if (installed && !versionGt(m.version, installed.version)) continue;
+    // Не накатываем бандл, который не новее установленного приложения
+    // (например, свежескачанный код уже содержит эти правки).
+    if (appV && !versionGt(m.version, appV)) continue;
     if (best && !versionGt(m.version, best.version)) continue;
     best = { dir, manifest: m };
   }

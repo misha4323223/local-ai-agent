@@ -25,6 +25,47 @@ function otaValid() {
   }
 }
 
+// Версия установленного приложения (package.json рядом с кодом — в app.asar его кладёт
+// electron-builder). Если прочитать не удалось — null, и тогда ведём себя как раньше.
+function installedVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ASAR_DIR, "package.json"), "utf8")).version || null;
+  } catch {
+    return null;
+  }
+}
+
+// Версия применённого OTA-бандла (userData/ota/current/version.json)
+function otaVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(OTA_CURRENT(), "version.json"), "utf8")).version || null;
+  } catch {
+    return null;
+  }
+}
+
+function versionGt(a, b) {
+  const A = String(a || "0.0.0").match(/^(\d+)\.(\d+)\.(\d+)/);
+  const B = String(b || "0.0.0").match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!A || !B) return false;
+  for (let i = 1; i <= 3; i++) {
+    const x = parseInt(A[i], 10);
+    const y = parseInt(B[i], 10);
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+// ГЛАВНОЕ ПРАВИЛО: применённый бандл загружается только если он СТРОГО НОВЕЕ
+// установленной версии приложения. Если пользователь скачал/собрал свежий код
+// (1.5.7 и выше), а в userData/ota/current остался старый бандл (1.3.x / 1.5.x) —
+// старый бандл больше никогда не «перекрывает» установленный код.
+function otaNewerThanInstalled() {
+  const inst = installedVersion();
+  if (!inst) return true; // версию установленного не прочитать — legacy-поведение
+  return !!otaVersion() && versionGt(otaVersion(), inst);
+}
+
 // Если OTA-код требует модуль, которого нет в его дереве (например electron-updater) —
 // до-разрешаем из node_modules установленного приложения (app.asar / репозиторий).
 const Module = require("module");
@@ -49,8 +90,20 @@ function loadMain(fromDir) {
   require(path.join(fromDir, "src", "main.js"));
 }
 
+// Если пользователь выключил OTA в настройках (Настройки → Self-update →
+// «Разрешить локальные обновления на ходу») — грузим код ТОЛЬКО из установки,
+// даже если в userData/ota/current остался применённый бандл.
+function otaDisabled() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "settings.json"), "utf8"));
+    return !!(raw && raw.otaEnabled === false);
+  } catch {
+    return false;
+  }
+}
+
 (function boot() {
-  if (otaValid()) {
+  if (!otaDisabled() && otaValid() && otaNewerThanInstalled()) {
     try {
       loadMain(OTA_CURRENT());
       return;
@@ -62,6 +115,13 @@ function loadMain(fromDir) {
         fs.renameSync(OTA_CURRENT(), path.join(OTA_ROOT(), "current.broken"));
       } catch {}
     }
+  } else if (otaValid() && !otaDisabled()) {
+    // Бандл есть, но он НЕ новее установленной версии (или версия не читается) —
+    // грузим код из установки, а устаревший бандл удаляем, чтобы он не мешал
+    // и не вводил в заблуждение (панель Self-update показывала его версию).
+    try {
+      fs.rmSync(OTA_CURRENT(), { recursive: true, force: true });
+    } catch {}
   }
   loadMain(ASAR_DIR);
 })();
