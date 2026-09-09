@@ -274,6 +274,14 @@
           <button id="btn-push" class="btn btn-small" title="Отправить коммиты на GitHub (git push)">📤 Push</button>
           <button id="btn-pull" class="btn btn-small" title="Забрать изменения (git pull)">📥 Pull</button>
         </div>
+        <div id="change-select-bar" class="change-select-row">
+          <input type="checkbox" id="change-select-all" title="Выбрать все" />
+          <label for="change-select-all">Выбрать все</label>
+        </div>
+        <div id="change-actions-bar" class="change-actions-bar">
+          <button id="btn-unstage-selected" class="btn btn-ghost btn-small" title="Убрать из индекса (git reset HEAD)">↩ Убрать из staged</button>
+          <button id="btn-untrack-selected" class="btn btn-danger btn-small" title="Удалить из git и с диска (git rm)">🗑 Удалить выбранные</button>
+        </div>
         <div id="change-list" class="change-list"></div>
       </div>
       <div id="panel-commits" class="panel-body hidden">

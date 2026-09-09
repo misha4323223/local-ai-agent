@@ -2911,6 +2911,7 @@
 
   // ─────────────── Панель проекта: файлы + коммиты ───────────────
   let panelTab = "files";
+  const selectedChanges = new Set(); // выбранные файлы для массовых операций
   let repoRoot = null;
   let treeGitStatus = null; // rel-путь → "new" | "mod" для подсветки дерева
   const treeLoading = new Set();
@@ -3687,11 +3688,79 @@
         row.appendChild(badge);
         row.appendChild(nm);
         row.title = "Клик — показать дифф";
+        // Чекбокс для выбора файла
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = "change-cb";
+        cb.dataset.file = f;
+        cb.dataset.group = g.cls;
+        cb.checked = selectedChanges.has(f);
+        cb.onclick = (ev) => { ev.stopPropagation(); toggleChangeSelect(f, cb.checked); };
         row.onclick = () => showDiff(repoRoot, f);
+        row.insertBefore(cb, row.firstChild);
         listEl.appendChild(row);
       }
     }
+    updateChangeActions();
+  };
+
+  // ── Чекбоксы: выбор / снятие ──
+  function toggleChangeSelect(file, checked) {
+    if (checked) selectedChanges.add(file); else selectedChanges.delete(file);
+    updateChangeActions();
   }
+  function updateChangeActions() {
+    const bar = $("change-actions-bar");
+    bar.classList.toggle("visible", selectedChanges.size > 0);
+    // Обновить счётчик в кнопках
+    const n = selectedChanges.size;
+    const btnUnstage = $("btn-unstage-selected");
+    const btnDel = $("btn-untrack-selected");
+    btnUnstage.textContent = "↩ Убрать из staged" + (n ? " (" + n + ")" : "");
+    btnDel.textContent = "🗑 Удалить выбранные" + (n ? " (" + n + ")" : "");
+    // Select all checkbox
+    const all = document.querySelectorAll(".change-cb");
+    const selAll = $("change-select-all");
+    if (all.length) selAll.checked = Array.from(all).every((cb) => cb.checked);
+  }
+
+  // ── Выбрать все / снять все ──
+  $("change-select-all").onclick = () => {
+    const checked = $("change-select-all").checked;
+    document.querySelectorAll(".change-cb").forEach((cb) => {
+      cb.checked = checked;
+      const f = cb.dataset.file;
+      if (checked) selectedChanges.add(f); else selectedChanges.delete(f);
+    });
+    updateChangeActions();
+  };
+
+  // ── Убрать из staged ──
+  $("btn-unstage-selected").onclick = async () => {
+    if (!repoRoot || !selectedChanges.size) return;
+    for (const f of selectedChanges) {
+      await api.runCommand("git reset HEAD -- " + JSON.stringify(f), repoRoot);
+    }
+    selectedChanges.clear();
+    refreshChanges();
+  };
+
+  // ── Удалить выбранные ──
+  $("btn-untrack-selected").onclick = async () => {
+    if (!repoRoot || !selectedChanges.size) return;
+    const files = [...selectedChanges];
+    confirmModal(
+      "Удалить " + files.length + " файл(ов)?",
+      "Файлы будут удалены с диска и из git. Это необратимо.",
+      async () => {
+        for (const f of files) {
+          await api.runCommand("git rm -f " + JSON.stringify(f), repoRoot);
+        }
+        selectedChanges.clear();
+        refreshChanges();
+      }
+    );
+  };
 
   // Показ диффа/содержимого файла в оверлее
   async function showDiff(root, rel) {
