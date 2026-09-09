@@ -468,6 +468,24 @@
                 <button id="btn-refresh-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
               </div>
             </div>
+            <div class="field">
+              <label>Сохранённые подключения <span class="hint">(несколько OpenAI-совместимых API)</span></label>
+              <div class="input-row">
+                <select id="s-openai-profile" class="select" style="flex:1;min-width:0"></select>
+                <button id="btn-profile-save" class="btn btn-ghost" title="Сохранить текущие URL + ключ + модель как подключение (или обновить выбранное)">💾</button>
+                <button id="btn-profile-delete" class="btn btn-ghost" title="Удалить выбранное подключение">🗑</button>
+              </div>
+              <div class="hint-block">Каждый свой ключ храни отдельным подключением (например «DeepSeek», «OpenRouter», «Yandex») — потом переключайся между ними в один клик из списка. Ключи сохраняются зашифрованно.</div>
+            </div>
+            <div class="field">
+              <label class="check-row" title="При ошибке ключа/баланса/лимита автоматически переключаться на следующее сохранённое подключение">
+                <input id="s-auto-switch" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Авто-переключение при ошибке</b>
+                  <small>Если запрос упал из-за ключа, баланса или лимитов — приложение само переключится на следующее сохранённое подключение и повторит запрос. Нужно минимум 2 подключения с ключами.</small>
+                </span>
+              </label>
+            </div>
             <div class="field hidden" id="yandex-project-field">
               <label>Yandex folder ID (OpenAI-Project)</label>
               <input id="s-openai-project" placeholder="b1g74qv3u70jmct1ekvf — ID каталога из Yandex Cloud / AI Studio" spellcheck="false" />
@@ -573,6 +591,7 @@
             <div class="input-row">
               <button id="btn-ota-check" class="btn btn-ghost btn-small">Проверить сейчас</button>
               <button id="btn-ota-rollback" class="btn btn-ghost btn-small" title="Вернуться на предыдущую версию кода">↩ Откатить</button>
+              <button id="btn-ota-reset" class="btn btn-ghost btn-small" title="Удалить применённое обновление и папку ota/ рядом с кодом — приложение вернётся к установленной версии">🗑 Сбросить OTA</button>
             </div>
             <div class="hint-block">Как это работает: агент правит свой код в src/ → прогоняет node --check → собирает бандл командой <code>node scripts/make-ota.js</code> → приложение подхватывает обновление и перезапускается. GitHub и пересборка EXE не нужны.</div>
           </div>

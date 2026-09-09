@@ -101,6 +101,10 @@ const DEFAULT_SETTINGS = {
   // Локальный self-update (OTA): агент собирает бандл (scripts/make-ota.js), приложение применяет на ходу
   otaEnabled: true,
   otaDir: "", // необязательная папка-источник OTA (пусто — userData/ota + ota/ рядом с кодом)
+  // Сохранённые OpenAI-совместимые подключения (несколько ключей): { id, name, url, apiKey, model, project }
+  openaiProfiles: [],
+  openaiActiveProfile: "", // id активного подключения ("" — не выбрано)
+  autoSwitchProfiles: false, // при ошибке ключа/баланса/лимита — авто-переключение на следующее подключение
 };
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -115,6 +119,27 @@ function normalizeSettings(raw) {
   }
   if (!raw || raw.openaiApiKey === undefined) {
     if (raw && raw.apiKey !== undefined) s.openaiApiKey = raw.apiKey;
+  }
+  // Миграция на сохранённые OpenAI-подключения: единственный URL+ключ → первый профиль.
+  // (Только если поля openaiProfiles ещё не было вовсе — удалённые вручную профили не воскрешаем.)
+  if (!raw || !Array.isArray(raw.openaiProfiles)) {
+    const profUrl = String(s.openaiUrl || "").trim();
+    if (profUrl) {
+      s.openaiProfiles = [
+        {
+          id: "p-main",
+          name: openaiProfileNameFromUrl(profUrl),
+          url: profUrl,
+          apiKey: s.openaiApiKey || "",
+          model: s.openaiModel || "",
+          project: s.openaiProject || "",
+        },
+      ];
+      s.openaiActiveProfile = "p-main";
+    } else {
+      s.openaiProfiles = [];
+      s.openaiActiveProfile = "";
+    }
   }
   // Миграция на проекты: если списка ещё нет — заводим один проект из рабочей директории.
   if (!Array.isArray(raw.projects)) {
@@ -158,6 +183,40 @@ function saveSettings(s) {
   const { rest, sec } = secrets.splitSecrets(s);
   secrets.saveSecrets(sec);
   fs.writeFileSync(settingsFile(), JSON.stringify(rest, null, 2), "utf8");
+}
+
+// Имя подключения из URL: https://api.deepseek.com/v1 → deepseek.com
+function openaiProfileNameFromUrl(url) {
+  try {
+    const m = String(url || "").match(/^https?:\/\/([^\/:?#]+)/i);
+    return m ? m[1].replace(/^www\./, "") : "OpenAI";
+  } catch {
+    return "OpenAI";
+  }
+}
+
+// Список OpenAI-подключений, которые реально можно использовать (есть id и ключ).
+function openaiProfilesList(s) {
+  const arr = Array.isArray(s && s.openaiProfiles) ? s.openaiProfiles : [];
+  return arr.filter((p) => p && typeof p === "object" && p.id && String(p.apiKey || "").trim());
+}
+
+// Переключает активное OpenAI-подключение на следующее по кругу и зеркалит его
+// значения в основные поля настроек (их читает весь остальной код: чат, модели, тест).
+// Возвращает новый профиль или null (если переключать не на что).
+function switchOpenaiProfile(s) {
+  const profs = openaiProfilesList(s);
+  if (profs.length < 2) return null;
+  const cur = s.openaiActiveProfile;
+  const idx = Math.max(0, profs.findIndex((p) => p.id === cur));
+  const next = profs[(idx + 1) % profs.length];
+  if (!next) return null;
+  s.openaiActiveProfile = next.id;
+  s.openaiUrl = next.url || s.openaiUrl;
+  s.openaiApiKey = next.apiKey || "";
+  if (next.model) s.openaiModel = next.model;
+  if (next.project !== undefined) s.openaiProject = next.project || "";
+  return next;
 }
 
 function loadChats() {
@@ -3504,15 +3563,37 @@ async function runAi(settings, messages, win, opts) {
     const fatal = (e && e.name === "AbortError") || (e && e.fatal) || global.__agentStopRequested || (e && e.message && /Не выбрана модель/.test(e.message));
     if (fatal || attemptNum > AUTO_RETRY_LIMIT) throw e;
     const errText = String((e && e.message) || e).slice(0, 800);
+    // Авто-переключение на следующее сохранённое OpenAI-подключение: ошибка ключа/
+    // баланса/лимита/сети — пробуем другой ключ вместо бессмысленных повторов.
+    let switchedProfile = null;
+    if (settings.provider === "openai" && settings.autoSwitchProfiles) {
+      try {
+        switchedProfile = switchOpenaiProfile(settings);
+        if (switchedProfile) {
+          saveSettings(settings); // активное подключение сохраняется (ключи — в secrets.json)
+          emit({
+            type: "profile_switched",
+            name: switchedProfile.name || switchedProfile.id || "?",
+            id: switchedProfile.id,
+            error: errText,
+          });
+        }
+      } catch {}
+    }
     emit({ type: "text_override", text: "" }); // стираем частичный текст упавшей попытки в UI
-    emit({ type: "retry", attempt: attemptNum + 1, total: AUTO_RETRY_LIMIT + 1, error: errText });
+    emit({
+      type: "retry",
+      attempt: attemptNum + 1,
+      total: AUTO_RETRY_LIMIT + 1,
+      error: errText + (switchedProfile ? " — переключено на подключение «" + (switchedProfile.name || switchedProfile.id) + "»" : ""),
+    });
     finalText = "";
     await new Promise((r) => setTimeout(r, 3000)); // пауза: провайдеры сбрасывают лимиты за секунды
     canonical.push({
       role: "system",
       content:
         "⚠️ ПРЕДЫДУЩАЯ ПОПЫТКА УПАЛА — авто-повтор " + (attemptNum + 1) + " из " + (AUTO_RETRY_LIMIT + 1) + ".\n" +
-        "Ошибка: " + errText + "\n" +
+        "Ошибка: " + errText + (switchedProfile ? " (выполнено переключение на другое подключение — ключ «" + (switchedProfile.name || switchedProfile.id) + "»)" : "") + "\n" +
         "Продолжай с того места, где остановился, опираясь на уже сделанное (инструменты, файлы, результаты выше). " +
         "Не начинай заново и не повторяй выполненные шаги: сначала быстро оцени текущее состояние (например git status или чтение ключевых файлов), затем продолжи. " +
         "Если ошибка про лимиты/токены — работай компактнее: меньше файлов целиком, чаще searchFile/semanticSearch, короче выводы.",
@@ -3907,6 +3988,7 @@ ipcMain.handle("ota:check", async () => {
 });
 ipcMain.handle("ota:rollback", () => ota.rollback());
 ipcMain.handle("ota:openDir", () => ota.openDir());
+ipcMain.handle("ota:reset", (_e, removeSource) => ota.reset(!!removeSource, loadSettings()));
 
 ipcMain.handle("chats:load", () => loadChats());
 ipcMain.handle("chats:save", (_e, d) => {

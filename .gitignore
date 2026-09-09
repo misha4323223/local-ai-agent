@@ -10,4 +10,7 @@ build/
 *.iml
 
 # Локальный OTA-бандл (генерируется scripts/make-ota.js)
-ota/
+ota/*
+# Но рабочий бандл для доставки обновлений — коммитим (версия выше сломанной)
+!ota/manifest.json
+!ota/bundle.json

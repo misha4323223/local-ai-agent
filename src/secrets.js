@@ -25,6 +25,7 @@ const SECRET_KEYS = [
   "mobilePin",
   "visionKey",
   "agentEnv", // объект: пользователь кладёт сюда пароли/ключи для агента
+  "openaiProfiles", // массив сохранённых OpenAI-подключений (внутри — apiKey)
 ];
 
 let secretsFile = null; // полный путь к secrets.json
@@ -94,10 +95,10 @@ function loadSecrets() {
     if (typeof v === "string" && (v.startsWith("enc:") || v.startsWith("plain:"))) {
       const d = decryptText(v);
       if (d === null) continue; // не расшифровать — не подставляем
-      cache[k] = k === "agentEnv" ? safeParse(d) : d;
+      cache[k] = k === "agentEnv" || k === "openaiProfiles" ? safeParse(d) : d;
     } else {
       // старый формат: открытый текст — подхватываем как есть
-      cache[k] = k === "agentEnv" ? safeParse(v) : v;
+      cache[k] = k === "agentEnv" || k === "openaiProfiles" ? safeParse(v) : v;
     }
   }
   return cache;

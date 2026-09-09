@@ -106,4 +106,5 @@ contextBridge.exposeInMainWorld("api", {
   otaCheck: () => ipcRenderer.invoke("ota:check"),
   otaRollback: () => ipcRenderer.invoke("ota:rollback"),
   otaOpenDir: () => ipcRenderer.invoke("ota:openDir"),
+  otaReset: (removeSource) => ipcRenderer.invoke("ota:reset", removeSource),
 });

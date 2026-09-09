@@ -27,6 +27,9 @@
     githubAvatarUrl: "",
     projects: [], // до 10 проектов: { id, name, dir, createdAt, lastOpened }
     activeProjectId: "",
+    openaiProfiles: [], // сохранённые OpenAI-совместимые подключения: { id, name, url, apiKey, model, project }
+    openaiActiveProfile: "", // id активного подключения
+    autoSwitchProfiles: false, // при ошибке ключа/баланса/лимита — авто-переключение
   };
 
   // Пресеты для OpenAI-совместимых API (ключ/модель хранятся отдельно по каждому пресету? нет — единый URL+ключ).
@@ -366,6 +369,17 @@
     if (s.provider === "external") s.provider = "openai";
     if (raw && raw.openaiUrl === undefined && raw.externalUrl !== undefined) s.openaiUrl = raw.externalUrl;
     if (raw && raw.openaiApiKey === undefined && raw.apiKey !== undefined) s.openaiApiKey = raw.apiKey;
+    // Миграция на сохранённые OpenAI-подключения: единственный URL+ключ → первый профиль.
+    if (!raw || !Array.isArray(raw.openaiProfiles)) {
+      const profUrl = String(s.openaiUrl || "").trim();
+      if (profUrl) {
+        s.openaiProfiles = [{ id: "p-main", name: profileNameFromUrl(profUrl), url: profUrl, apiKey: s.openaiApiKey || "", model: s.openaiModel || "", project: s.openaiProject || "" }];
+        s.openaiActiveProfile = "p-main";
+      } else {
+        s.openaiProfiles = [];
+        s.openaiActiveProfile = "";
+      }
+    }
     return s;
   }
 
@@ -1297,6 +1311,29 @@
         toast("🔄 Попытка " + (ev.attempt || 2) + " из " + (ev.total || 3) + " после сбоя" + (rErr ? ": " + rErr : ""));
         break;
       }
+      case "profile_switched": {
+        // Авто-переключение между сохранёнными подключениями при ошибке ключа/баланса/лимита
+        const pName = ev.name || "?";
+        const pErr = String(ev.error || "").slice(0, 160);
+        const ch = session ? chatsData.chats.find((c) => c.id === session.chatId) : null;
+        if (ch) {
+          ch.messages.push({
+            id: uid(),
+            role: "system",
+            content: "🔄 Запрос упал" + (pErr ? ": " + pErr : "") + ".\nАвтоматически переключено на подключение «" + pName + "» — повторяю запрос с новым ключом.",
+            createdAt: Date.now(),
+          });
+          const el = buildMessageEl(ch.messages[ch.messages.length - 1]);
+          const w = ensureWorkGroup();
+          w.body.appendChild(el);
+          scrollBottom();
+        }
+        // Синхронизируем локальную копию настроек с main (активный профиль сменился)
+        settings.openaiActiveProfile = ev.id || settings.openaiActiveProfile;
+        if (isElectron) api.getSettings().then((s) => { if (s) settings = normalize(s); });
+        toast("🔄 Переключено на подключение «" + pName + "»");
+        break;
+      }
       case "done":
         // После завершения запуска обновляем панель git: авто-коммит мог очистить «Изменения»
         setTimeout(() => {
@@ -2129,8 +2166,32 @@
   // ─────────────── Веб-режим: чат напрямую из браузера ───────────────
   // Единый цикл на общем транспорте AgentCore (те же правила, что и в Electron main).
   // Инструменты (файлы/git) в браузере недоступны — только чат.
+  let webAutoSwitches = 0; // счётчик авто-переключений за запуск (защита от бесконечного круга)
+
+  // Авто-переключение между сохранёнными OpenAI-подключениями при ошибке (браузерный путь).
+  // Возвращает true, если переключились (вызывающий должен повторить раунд).
+  function tryWebAutoSwitch(errText) {
+    if (!settings.autoSwitchProfiles || settings.provider !== "openai") return false;
+    const profs = openaiProfilesArr().filter((p) => p && p.id && String(p.apiKey || "").trim());
+    if (profs.length < 2) return false;
+    if (webAutoSwitches >= profs.length) return false; // прошли полный круг — стоп
+    const cur = settings.openaiActiveProfile;
+    const idx = Math.max(0, profs.findIndex((p) => p.id === cur));
+    const next = profs[(idx + 1) % profs.length];
+    webAutoSwitches++;
+    settings.openaiActiveProfile = next.id;
+    settings.openaiUrl = next.url || settings.openaiUrl;
+    settings.openaiApiKey = next.apiKey || "";
+    if (next.model) settings.openaiModel = next.model;
+    if (next.project !== undefined) settings.openaiProject = next.project || "";
+    persistSettings();
+    onEvent({ type: "profile_switched", name: next.name || next.id, id: next.id, error: String(errText || "").slice(0, 160) });
+    return true;
+  }
+
   async function webSend(messages, onEvent, signal, opts) {
     opts = opts || {};
+    webAutoSwitches = 0; // сброс счётчика авто-переключений на каждый запуск
     const planMode = !!opts.plan;
     const provider = settings.provider || "openai";
     if (!settings.model) {
@@ -2184,6 +2245,7 @@
         res = await fetch(req.url, { method: "POST", headers: req.headers, body: req.body, signal });
       } catch (e) {
         if (e.name === "AbortError") throw e;
+        if (tryWebAutoSwitch(e.message)) { round--; continue; }
         onEvent({ type: "error", message: "Сетевая ошибка: " + e.message });
         return;
       }
@@ -2192,6 +2254,7 @@
         // Лимиты провайдера (Groq free ~7K токенов/мин): понятное объяснение вместо сырого JSON.
         const friendly = AgentCore.friendlyRateLimitError(res.status, detail, settings);
         if (friendly) {
+          if (tryWebAutoSwitch(friendly)) { round--; continue; }
           onEvent({ type: "error", message: friendly });
           return;
         }
@@ -2206,12 +2269,14 @@
           continue;
         }
         if (res.status === 402) {
+          if (tryWebAutoSwitch("API error 402: недостаточно средств")) { round--; continue; }
           onEvent({
             type: "error",
             message: "API error 402: Недостаточно средств на балансе провайдера. Пополни счёт (platform.deepseek.com → Top up) или выбери другого провайдера/модель в настройках.",
           });
           return;
         }
+        if (tryWebAutoSwitch("API error " + res.status + ": " + detail)) { round--; continue; }
         onEvent({ type: "error", message: "API error " + res.status + ": " + detail });
         return;
       }
@@ -2431,6 +2496,8 @@
     $("vision-model-hints").classList.add("hidden");
     $("s-ota-enabled").checked = settings.otaEnabled !== false;
     $("s-ota-dir").value = settings.otaDir || "";
+    renderOpenaiProfiles();
+    $("s-auto-switch").checked = !!settings.autoSwitchProfiles;
     renderOtaStatus();
   }
 
@@ -2460,8 +2527,106 @@
     settings.imageModel = $("s-image-model").value.trim();
     settings.otaEnabled = !!$("s-ota-enabled").checked;
     settings.otaDir = $("s-ota-dir").value.trim();
+    settings.autoSwitchProfiles = !!$("s-auto-switch").checked;
     // Зеркало модели активного провайдера
     settings.model = settings[MODEL_KEY[settings.provider]] || "";
+  }
+
+  // ── Сохранённые OpenAI-подключения (несколько ключей) ──
+  function profileNameFromUrl(url) {
+    try {
+      const m = String(url || "").match(/^https?:\/\/([^\/:?#]+)/i);
+      return m ? m[1].replace(/^www\./, "") : "OpenAI";
+    } catch {
+      return "OpenAI";
+    }
+  }
+
+  function openaiProfilesArr() {
+    return Array.isArray(settings.openaiProfiles) ? settings.openaiProfiles : [];
+  }
+
+  // Перерисовывает выпадающий список сохранённых подключений
+  function renderOpenaiProfiles() {
+    const sel = $("s-openai-profile");
+    if (!sel) return;
+    const profs = openaiProfilesArr();
+    sel.innerHTML = "";
+    const optNew = document.createElement("option");
+    optNew.value = "__new__";
+    optNew.textContent = "➕ Новое подключение…";
+    sel.appendChild(optNew);
+    for (const p of profs) {
+      const o = document.createElement("option");
+      o.value = p.id;
+      o.textContent = p.name + (p.model ? " · " + p.model : "") + (String(p.apiKey || "").trim() ? "" : " (без ключа)");
+      sel.appendChild(o);
+    }
+    sel.value =
+      settings.openaiActiveProfile && profs.some((p) => p.id === settings.openaiActiveProfile)
+        ? settings.openaiActiveProfile
+        : "__new__";
+  }
+
+  // Применяет выбранное подключение к полям URL/ключ/модель/проект
+  function applyOpenaiProfile(id) {
+    const p = openaiProfilesArr().find((x) => x.id === id);
+    if (!p) return;
+    settings.openaiActiveProfile = p.id;
+    $("s-openai-url").value = p.url || "";
+    $("s-openai-key").value = p.apiKey || "";
+    $("s-openai-model").value = p.model || "";
+    $("s-openai-project").value = p.project || "";
+    // Подсвечиваем пресет-чип по URL (не трогая поля — у подключения свои значения)
+    const url = String(p.url || "").toLowerCase();
+    let found = "";
+    for (const [k, v] of Object.entries(PRESETS)) {
+      if (v && v.url && url.includes(String(v.url).replace(/\/+$/, "").toLowerCase())) { found = k; break; }
+    }
+    document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.toggle("active", c.dataset.preset === (found || "custom")));
+    setSettingsMsg("Подключение «" + (p.name || p.id) + "» выбрано. Нажми «Сохранить настройки».", false);
+  }
+
+  // Сохраняет текущие URL/ключ/модель как новое подключение или обновляет выбранное
+  function saveOpenaiProfileFromFields() {
+    const sel = $("s-openai-profile");
+    const profs = openaiProfilesArr();
+    const url = $("s-openai-url").value.trim();
+    if (!url) { setSettingsMsg("Сначала заполни базовый URL — без него подключение не сохранить.", true); return; }
+    const key = $("s-openai-key").value.trim();
+    const model = $("s-openai-model").value.trim();
+    const project = $("s-openai-project").value.trim();
+    const editingId = sel.value !== "__new__" ? sel.value : "";
+    if (editingId) {
+      const p = profs.find((x) => x.id === editingId);
+      if (!p) return;
+      p.url = url; p.apiKey = key; p.model = model; p.project = project;
+      settings.openaiActiveProfile = p.id;
+      setSettingsMsg("Подключение «" + (p.name || p.id) + "» обновлено.", false);
+    } else {
+      let name = profileNameFromUrl(url);
+      const same = profs.filter((x) => x.name === name).length;
+      if (same) name = name + " #" + (same + 1);
+      profs.push({ id: uid(), name, url, apiKey: key, model, project });
+      settings.openaiActiveProfile = profs[profs.length - 1].id;
+      setSettingsMsg("Подключение «" + name + "» сохранено. Переключайся между ключами в один клик.", false);
+    }
+    persistSettings();
+    renderOpenaiProfiles();
+  }
+
+  function deleteOpenaiProfile() {
+    const sel = $("s-openai-profile");
+    if (sel.value === "__new__") { setSettingsMsg("Выбери подключение из списка, чтобы удалить его.", true); return; }
+    const profs = openaiProfilesArr();
+    const p = profs.find((x) => x.id === sel.value);
+    if (!p) return;
+    if (!confirm("Удалить подключение «" + (p.name || p.id) + "»?")) return;
+    settings.openaiProfiles = profs.filter((x) => x.id !== p.id);
+    if (settings.openaiActiveProfile === p.id) settings.openaiActiveProfile = "";
+    persistSettings();
+    renderOpenaiProfiles();
+    setSettingsMsg("Подключение удалено.", false);
   }
 
   // Статус локального self-update (OTA): версия, папка, источники
@@ -2900,6 +3065,14 @@
     testConnection();
   };
   $("btn-save-settings").onclick = saveSettingsUI;
+  // Сохранённые OpenAI-подключения: список, сохранить/обновить, удалить
+  $("s-openai-profile").onchange = () => {
+    const v = $("s-openai-profile").value;
+    if (v === "__new__") { settings.openaiActiveProfile = ""; return; }
+    applyOpenaiProfile(v);
+  };
+  $("btn-profile-save").onclick = saveOpenaiProfileFromFields;
+  $("btn-profile-delete").onclick = deleteOpenaiProfile;
   $("btn-pick-dir").onclick = async () => {
     if (!isElectron) {
       toast("Выбор папки доступен только в приложении на ПК");
@@ -4839,6 +5012,26 @@
     confirmModal("Откатить на предыдущую версию кода?", "Приложение перезапустится с прошлой версией.", () => {
       api.otaRollback();
     });
+  };
+  $("btn-ota-reset").onclick = () => {
+    if (!isElectron) {
+      toast("Self-update доступен в приложении на ПК");
+      return;
+    }
+    confirmModal(
+      "Полностью сбросить OTA-обновления?",
+      "Будет удалён применённый бандл (userData/ota) и папка ota/ рядом с кодом — нерабочее обновление больше не подхватится. Приложение вернётся к установленной версии кода (перезапусти его).",
+      () => {
+        api.otaReset(true).then((r) => {
+          if (r && r.ok) {
+            toast("OTA сброшен — код вернётся к установленной версии после перезапуска");
+            renderOtaStatus();
+          } else {
+            toast("Ошибка сброса OTA");
+          }
+        });
+      }
+    );
   };
   $("btn-ota-open").onclick = () => {
     if (isElectron) api.otaOpenDir();

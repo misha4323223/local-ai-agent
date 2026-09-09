@@ -46,3 +46,21 @@
 
 ## Инструменты (важно!)
 - `str_replace` в этой среде **не находит текст дальше ~1100 строк файла** (глюк кэша). Для правок в хвосте больших файлов (`src/main.js`, `src/renderer/app.js`) использовать временный Node-скрипт с точными заменами (`.tmp-patch*.js`, писать через write_file, запускать `node`, потом удалять), после — `node --check`.
+## Сохранённые OpenAI-подключения (несколько ключей) — 9 сентября 2026
+- `settings.openaiProfiles` — массив `{ id, name, url, apiKey, model, project }`; `settings.openaiActiveProfile` — id активного; `settings.autoSwitchProfiles` — авто-переключение при ошибке.
+- Хранение: `openaiProfiles` добавлен в `SECRET_KEYS` (secrets.js) — ключи шифруются (safeStorage/DPAPI), в settings.json их нет.
+- Миграция: старые `openaiUrl`+`openaiApiKey` → первый профиль «p-main» (и в main.js normalizeSettings, и в app.js normalize) — только если `openaiProfiles` вообще не было.
+- UI: `s-openai-profile` (select), кнопки `btn-profile-save` (💾 сохранить/обновить), `btn-profile-delete` (🗑), чекбокс `s-auto-switch` — в блоке openai-fields (index.html).
+- Выбор профиля → `applyOpenaiProfile` заполняет поля URL/ключ/модель/проект (активный профиль зеркалится в openaiUrl/openaiApiKey — весь остальной код чата/теста не менялся).
+- Авто-переключение: main.js catch авто-повтора runAi (только provider=openai, autoSwitchProfiles, ≥2 профилей с ключами) → `switchOpenaiProfile` по кругу → saveSettings → событие `profile_switched` → renderer показывает пометку в чате и перечитывает настройки (`api.getSettings`). Браузерный путь: `tryWebAutoSwitch` в webSend (счётчик webAutoSwitches — защита от бесконечного круга).
+
+## OTA: кнопка «🗑 Сбросить OTA» — 9 сентября 2026
+- Проблема: локально собранный OTA-бандл (scripts/make-ota.js → ota/ рядом с кодом) может быть нерабочим; bootstrap.js грузит код из userData/ota/current, а findCandidate применяет бандл с версией СТРОГО выше установленной — поэтому нерабочий бандл «переживает» переустановку кода с GitHub (папка ota/ рядом с кодом остаётся источником).
+- Решение: `ota.reset(removeSource, settings)` в ota.js — удаляет userData/ota (применённый бандл) и, при removeSource=true, папку ota/ рядом с кодом. IPC `ota:reset`, кнопка «🗑 Сбросить OTA» в Настройки → Self-update (с confirmModal). После сброса — перезапуск приложения.
+- Вручную: удалить ota/ рядом с кодом проекта и %APPDATA%/<AppName>/ota (userData) — или выключить чекбокс OTA в настройках.
+
+## Версия 1.5.0 (OTA-бандл в репо) — 9 сентября 2026
+- package.json version = 1.5.0 — выше любой локально накопленной версии сломанных бандлов («на тройке» — 1.3.x/1.0.3x).
+- ota/manifest.json + ota/bundle.json (рабочий бандл из актуального кода) коммитятся в репо (.gitignore: ota/* с исключениями !ota/manifest.json !ota/bundle.json).
+- Механика: OTA применяет бандл, если manifest.version СТРОГО выше установленной (userData/ota/current/version.json). 1.5.0 > любая сломанная 1.x.y < 1.5 → применится поверх без ручной чистки.
+- Пересобрать бандл вручную: node scripts/make-ota.js [--version X.Y.Z].

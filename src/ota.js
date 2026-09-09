@@ -197,4 +197,30 @@ function openDir() {
   return true;
 }
 
-module.exports = { check, status, rollback, openDir, resolveCurrent: CURRENT, installedInfo, OTA_ROOT, findCandidate, applyBundle, versionGt };
+// Полный сброс OTA: удаляет применённый бандл (userData/ota) — приложение вернётся
+// к коду из установки. При removeSource=true дополнительно удаляет папку-источник
+// разработки ota/ рядом с кодом (там лежит локально собранный бандл), чтобы
+// нерабочее обновление не подхватилось снова.
+function reset(removeSource, settings) {
+  const removedUser = [];
+  const removedSource = [];
+  if (fs.existsSync(OTA_ROOT())) {
+    fs.rmSync(OTA_ROOT(), { recursive: true, force: true });
+    removedUser.push(OTA_ROOT());
+  }
+  if (removeSource) {
+    const src = path.join(__dirname, "..", "ota");
+    if (fs.existsSync(src)) {
+      fs.rmSync(src, { recursive: true, force: true });
+      removedSource.push(src);
+    }
+  }
+  return {
+    ok: true,
+    removedUser,
+    removedSource,
+    sourcesLeft: sources(settings).map((d) => path.join(d, "manifest.json")),
+  };
+}
+
+module.exports = { check, status, rollback, openDir, resolveCurrent: CURRENT, installedInfo, OTA_ROOT, findCandidate, applyBundle, versionGt, reset };
