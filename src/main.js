@@ -3635,6 +3635,18 @@ function createWindow() {
     return _wcSend(ch, ev);
   };
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+  // Кликабельные ссылки из чата: http(s) открываются в браузере пользователя,
+  // а не в новом окне Electron.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
+    return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (e, url) => {
+    if (/^https?:/i.test(url)) {
+      e.preventDefault();
+      shell.openExternal(url).catch(() => {});
+    }
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });

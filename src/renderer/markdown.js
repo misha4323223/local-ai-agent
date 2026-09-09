@@ -24,6 +24,12 @@
     s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?;:—–-]|$)/g, "$1<em>$2</em>");
     s = s.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
     s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (_, txt, url) => '<a href="' + url + '" target="_blank" rel="noopener">' + txt + "</a>"); // url уже экранирован
+    // Голые URL → кликабельные ссылки (после markdown-ссылок, чтобы не задвоить).
+    // Отрезаем хвостовую пунктуацию: «Смотри: https://x.com/test.» → ссылка без точки.
+    s = s.replace(/(^|[\s(>])(https?:\/\/[^\s<]+)/g, (m, pre, url) => {
+      let u = String(url).replace(/[.,;:!?)]+$/, "");
+      return pre + '<a href="' + u + '" target="_blank" rel="noopener">' + u + "</a>";
+    });
     return s;
   }
 

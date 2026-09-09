@@ -972,13 +972,20 @@
   function ensureWorkGroup() {
     if (turnPlan) return turnPlan;
     const wrap = document.createElement("div");
-    wrap.className = "msg tool work-wrap";
+    wrap.className = "work-wrap";
     const body = document.createElement("div");
     body.className = "work-group";
     wrap.appendChild(body);
-    const msgWrap = $("messages");
-    // События приходят строго по порядку — конец списка и есть «ниже последнего».
-    msgWrap.appendChild(wrap);
+    // Живая панель действий агента — над полем ввода. Новый запуск = новая панель
+    // (предыдущая заменяется, чтобы не копились десятки блоков).
+    const panel = $("work-panel");
+    if (panel) {
+      panel.innerHTML = "";
+      panel.appendChild(wrap);
+    } else {
+      // Fallback (старый layout): как раньше, в конец ленты сообщений.
+      $("messages").appendChild(wrap);
+    }
     const head = document.createElement("div");
     head.className = "work-head";
     const dot = document.createElement("span");
@@ -2438,16 +2445,28 @@
   function setProviderUI(p) {
     if (p !== "ollama" && p !== "openai" && p !== "anthropic") p = "openai";
     settings.provider = p;
-    const segMap = { ollama: "seg-ollama", openai: "seg-openai", anthropic: "seg-anthropic" };
-    for (const [key, id] of Object.entries(segMap)) $(id).classList.toggle("active", key === p);
-    $("ollama-fields").classList.toggle("hidden", p !== "ollama");
-    $("openai-fields").classList.toggle("hidden", p !== "openai");
-    $("anthropic-fields").classList.toggle("hidden", p !== "anthropic");
+    const provSel = $("s-provider-select");
+    if (provSel) provSel.value = p;
+    // Аккордеон: раскрываем карточку активного провайдера, остальные сворачиваем.
+    // Вручную раскрыть другую карточку можно кликом по её заголовку — это не меняет выбор.
+    for (const key of ["ollama", "openai", "anthropic"]) {
+      const acc = document.querySelector('.acc[data-acc="' + key + '"]');
+      if (!acc) continue;
+      acc.classList.toggle("open", key === p);
+      const badge = acc.querySelector(".acc-badge");
+      if (badge) badge.classList.toggle("hidden", key !== p);
+    }
     // Переключаем зеркало модели на сохранённую модель выбранного провайдера,
     // чтобы случайно не отправить модель от другого провайдера.
     settings.model = settings[MODEL_KEY[p]] || "";
     updateBadge();
     renderModelHints(null, null); // подсказки моделей относятся к активному провайдеру
+  }
+
+  // Переключение вкладок настроек
+  function showSettingsTab(name) {
+    document.querySelectorAll(".stab").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+    document.querySelectorAll(".settings-tab-body").forEach((b) => b.classList.toggle("hidden", b.dataset.tabBody !== name));
   }
 
   function setPreset(p) {
@@ -2651,6 +2670,7 @@
   function openSettings() {
     renderEnvVars();
     fillSettingsUI();
+    showSettingsTab("model"); // всегда открываем с вкладки «Модель»
     setProviderUI(settings.provider || "openai");
     setPreset(currentPreset);
     // Определяем пресет по сохранённому URL (если он не пустой и совпадает с известным)
@@ -3038,8 +3058,30 @@
   });
   $("btn-toggle-key").onclick = () => toggleKey("s-openai-key");
   $("btn-toggle-anth-key").onclick = () => toggleKey("s-anth-key");
-  document.querySelectorAll(".seg").forEach((b) => {
-    b.onclick = () => setProviderUI(b.dataset.provider);
+  const provSel = $("s-provider-select");
+  if (provSel) {
+    provSel.onchange = () => setProviderUI(provSel.value);
+  }
+  // Вкладки настроек
+  document.querySelectorAll(".stab").forEach((b) => {
+    b.onclick = () => showSettingsTab(b.dataset.tab);
+  });
+  // Аккордеон: карточки провайдеров — клик по свёрнутой выбирает провайдера и раскрывает,
+  // по раскрытой — сворачивает; вложенные блоки (data-acc-head="presets") — просто раскрытие.
+  document.querySelectorAll("[data-acc-head]").forEach((h) => {
+    h.onclick = () => {
+      const acc = h.closest(".acc");
+      const isProvider = acc.dataset.acc === "ollama" || acc.dataset.acc === "openai" || acc.dataset.acc === "anthropic";
+      if (isProvider) {
+        if (acc.classList.contains("open")) {
+          acc.classList.remove("open");
+        } else {
+          setProviderUI(acc.dataset.acc);
+        }
+      } else {
+        acc.classList.toggle("open");
+      }
+    };
   });
   document.querySelectorAll(".chip[data-preset]").forEach((b) => {
     b.onclick = () => setPreset(b.dataset.preset);

@@ -138,6 +138,9 @@
         <span>Думаю...</span>
       </div>
 
+      <!-- Живая панель действий агента: инструменты, правки кода — над полем ввода -->
+      <div id="work-panel"></div>
+
       <footer id="input-bar">
         <div class="composer">
           <div id="attach-bar" class="attach-bar hidden">
@@ -408,125 +411,163 @@
         <button id="btn-close-settings" class="btn btn-ghost">✕</button>
       </div>
       <div class="settings-body">
-        <div class="settings-section">
-          <div class="settings-section-title">Модель</div>
-          <div class="field">
-            <label>Провайдер AI</label>
-            <div class="segmented">
-              <button data-provider="ollama" class="seg" id="seg-ollama">🖥️ Ollama</button>
-              <button data-provider="openai" class="seg" id="seg-openai">🌐 OpenAI-совместимые</button>
-              <button data-provider="anthropic" class="seg" id="seg-anthropic">🤖 Claude</button>
+        <div class="settings-tabs">
+          <button class="stab active" data-tab="model" title="Основная модель: провайдер, ключ, сохранённые подключения">🤖 Модель</button>
+          <button class="stab" data-tab="vision" title="Вспомогательная модель: зрение и генерация изображений">👁 Зрение</button>
+          <button class="stab" data-tab="project" title="Рабочая директория, GitHub, git">📁 Проект и GitHub</button>
+          <button class="stab" data-tab="mobile" title="Доступ с телефона по локальной сети">📱 Мобильный</button>
+          <button class="stab" data-tab="secrets" title="Переменные окружения и секреты для команд">🔒 Секреты</button>
+          <button class="stab" data-tab="ota" title="Локальные обновления кода на ходу">🔄 Self-update</button>
+        </div>
+
+        <!-- ── Вкладка: Модель ── -->
+        <div class="settings-tab-body" data-tab-body="model">
+          <div class="settings-section">
+            <div class="settings-section-title">Провайдер AI</div>
+            <div class="field">
+              <label>Активный провайдер <span class="hint">(остальные карточки ниже можно открыть для настройки)</span></label>
+              <select id="s-provider-select" class="select">
+                <option value="ollama">🖥️ Ollama — локально на ПК</option>
+                <option value="openai">🌐 OpenAI-совместимые — DeepSeek, OpenRouter, Yandex…</option>
+                <option value="anthropic">🤖 Claude — Anthropic</option>
+              </select>
             </div>
           </div>
 
-          <div id="ollama-fields">
-            <div class="field">
-              <label>Ollama URL</label>
-              <input id="s-ollama-url" placeholder="http://localhost:11434" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label>Модель</label>
-              <div class="input-row">
-                <input id="s-ollama-model" placeholder="Например: qwen3:4b, llama3.1, deepseek-r1" spellcheck="false" />
-                <button id="btn-refresh-ollama-models" class="btn btn-ghost" title="Загрузить список моделей из Ollama">↻</button>
+          <div class="acc open" data-acc="ollama">
+            <button type="button" class="acc-head" data-acc-head="ollama">
+              <span class="acc-title">🖥️ Ollama <small>локально на ПК</small></span>
+              <span class="acc-badge hidden">✓ активен</span>
+              <span class="acc-chev">▾</span>
+            </button>
+            <div class="acc-body" id="ollama-fields">
+              <div class="field">
+                <label>Ollama URL</label>
+                <input id="s-ollama-url" placeholder="http://localhost:11434" spellcheck="false" />
               </div>
-            </div>
-          </div>
-
-          <div id="openai-fields">
-            <div class="field">
-              <label>Провайдер</label>
-              <div class="chips">
-                <button data-preset="deepseek" class="chip">DeepSeek</button>
-                <button data-preset="openai" class="chip">OpenAI (GPT)</button>
-                <button data-preset="groq" class="chip">Groq</button>
-                <button data-preset="cerebras" class="chip">Cerebras</button>
-                <button data-preset="ollamacloud" class="chip">Ollama Cloud</button>
-                <button data-preset="openrouter" class="chip">OpenRouter</button>
-                <button data-preset="nvidia" class="chip">NVIDIA NIM</button>
-                <button data-preset="mistral" class="chip">Mistral Devstral</button>
-                <button data-preset="yandex" class="chip">Yandex AI Studio</button>
-                <button data-preset="g4f" class="chip">G4F (локально)</button>
-                <button data-preset="custom" class="chip">Свой (OpenAI-совместимый)</button>
-              </div>
-            </div>
-            <div class="field">
-              <label>Базовый URL</label>
-              <input id="s-openai-url" placeholder="https://api.deepseek.com/v1" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label>API-ключ</label>
-              <div class="input-row">
-                <input id="s-openai-key" type="password" placeholder="sk-..." spellcheck="false" />
-                <button id="btn-toggle-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
-              </div>
-            </div>
-            <div class="field">
-              <label>Модель</label>
-              <div class="input-row">
-                <input id="s-openai-model" placeholder="deepseek-chat · gpt-4o · llama-3.3-70b..." spellcheck="false" />
-                <button id="btn-refresh-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
-              </div>
-            </div>
-            <div class="field">
-              <label>Сохранённые подключения <span class="hint">(несколько OpenAI-совместимых API)</span></label>
-              <div class="input-row">
-                <select id="s-openai-profile" class="select" style="flex:1;min-width:0"></select>
-                <button id="btn-profile-save" class="btn btn-ghost" title="Сохранить текущие URL + ключ + модель как подключение (или обновить выбранное)">💾</button>
-                <button id="btn-profile-delete" class="btn btn-ghost" title="Удалить выбранное подключение">🗑</button>
-              </div>
-              <div class="hint-block">Каждый свой ключ храни отдельным подключением (например «DeepSeek», «OpenRouter», «Yandex») — потом переключайся между ними в один клик из списка. Ключи сохраняются зашифрованно.</div>
-            </div>
-            <div class="field">
-              <label class="check-row" title="При ошибке ключа/баланса/лимита автоматически переключаться на следующее сохранённое подключение">
-                <input id="s-auto-switch" type="checkbox" />
-                <span class="check-row-text">
-                  <b>Авто-переключение при ошибке</b>
-                  <small>Если запрос упал из-за ключа, баланса или лимитов — приложение само переключится на следующее сохранённое подключение и повторит запрос. Нужно минимум 2 подключения с ключами.</small>
-                </span>
-              </label>
-            </div>
-            <div class="field hidden" id="yandex-project-field">
-              <label>Yandex folder ID (OpenAI-Project)</label>
-              <input id="s-openai-project" placeholder="b1g74qv3u70jmct1ekvf — ID каталога из Yandex Cloud / AI Studio" spellcheck="false" />
-              <div class="hint-block">Только для Yandex AI Studio: ID каталога (папки), в котором создан API-ключ. Отправляется заголовком <code>OpenAI-Project</code>. Модель — <code>gpt://&lt;folder&gt;/deepseek-v4-flash/latest</code> (подтяни кнопкой ↻ или вставь свою).</div>
-            </div>
-            <div id="g4f-hint" class="hint-block hidden">
-              G4F — бесплатные модели без ключа. Запусти на ПК: <code>pip install -U g4f</code>, затем <code>g4f api</code> — современный interference-API живёт на <b>порту 1337</b> (<code>http://localhost:1337/v1</code>), в старых сборках это порт 8080 (<code>http://localhost:8080/v1</code>) — если один не отвечает, поправь URL выше (при выборе пресета G4F приложение само проверит оба порта и подставит рабочий URL). Ключ НЕ нужен: поле можно оставить пустым (некоторые сборки принимают любую заглушку). Выбери провайдера в списке ниже (★ — стабильные, без входа): его типовые модели появятся сразу — нажми нужную, и «Провайдер:модель» подставится сам. Кнопка <b>▶</b> у провайдера — тест: что отвечает g4f и какие модели отдаёт, подробный лог уйдёт в правую панель «Консоль». Если g4f запущен, приложение само подтянет точный список моделей; кнопка ↻ у поля модели — на всякий случай. Провайдер передаётся g4f отдельным полем <code>provider</code>. Если провайдер отвечает «зарегистрируйтесь…» или молчит — просто выбери другого из списка. Инструменты агента работают через текстовый фолбэк — не все бесплатные провайдеры G4F поддерживают нативные вызовы инструментов.
-            </div>
-            <div id="g4f-provider-box" class="gh-repos hidden">
-              <div class="gh-repos-head" id="g4f-provider-head">
-                <span class="settings-section-title" style="text-transform:none;letter-spacing:0">Провайдер G4F <span style="font-weight:500;opacity:.75">— маршрут <code>Провайдер:модель</code></span></span>
-                <span class="repo-chev" id="g4f-prov-chev">▸</span>
-              </div>
-              <div class="gh-repos-body hidden" id="g4f-provider-body">
-                <div class="gh-repo-search">
-                  <input id="g4f-provider-search" placeholder="Поиск провайдера по буквам… (deepinfra, hugging, together, pollinations)" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
-                  <button id="g4f-provider-clear" class="btn btn-ghost btn-small hidden" title="Очистить поиск">✕</button>
+              <div class="field">
+                <label>Модель</label>
+                <div class="input-row">
+                  <input id="s-ollama-model" placeholder="Например: qwen3:4b, llama3.1, deepseek-r1" spellcheck="false" />
+                  <button id="btn-refresh-ollama-models" class="btn btn-ghost" title="Загрузить список моделей из Ollama">↻</button>
                 </div>
-                <div class="gh-repos-status" id="g4f-provider-status"></div>
-                <div class="gh-repo-list" id="g4f-provider-list"></div>
               </div>
             </div>
           </div>
 
-          <div id="anthropic-fields">
-            <div class="field">
-              <label>Базовый URL <span class="hint">(по умолчанию — официальный API Anthropic)</span></label>
-              <input id="s-anth-url" placeholder="https://api.anthropic.com" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label>API-ключ <span class="hint">(sk-ant-...)</span></label>
-              <div class="input-row">
-                <input id="s-anth-key" type="password" placeholder="sk-ant-api03-..." spellcheck="false" />
-                <button id="btn-toggle-anth-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+          <div class="acc" data-acc="openai">
+            <button type="button" class="acc-head" data-acc-head="openai">
+              <span class="acc-title">🌐 OpenAI-совместимые <small>DeepSeek, OpenRouter, Yandex, свои ключи</small></span>
+              <span class="acc-badge hidden">✓ активен</span>
+              <span class="acc-chev">▾</span>
+            </button>
+            <div class="acc-body" id="openai-fields">
+              <div class="acc mini-acc">
+                <button type="button" class="acc-head" data-acc-head="presets">
+                  <span class="acc-title">Провайдер <small>DeepSeek · OpenRouter · Yandex · свой…</small></span>
+                  <span class="acc-chev">▾</span>
+                </button>
+                <div class="acc-body" id="preset-chips">
+                  <div class="chips">
+                    <button data-preset="deepseek" class="chip">DeepSeek</button>
+                    <button data-preset="openai" class="chip">OpenAI (GPT)</button>
+                    <button data-preset="groq" class="chip">Groq</button>
+                    <button data-preset="cerebras" class="chip">Cerebras</button>
+                    <button data-preset="ollamacloud" class="chip">Ollama Cloud</button>
+                    <button data-preset="openrouter" class="chip">OpenRouter</button>
+                    <button data-preset="nvidia" class="chip">NVIDIA NIM</button>
+                    <button data-preset="mistral" class="chip">Mistral Devstral</button>
+                    <button data-preset="yandex" class="chip">Yandex AI Studio</button>
+                    <button data-preset="g4f" class="chip">G4F (локально)</button>
+                    <button data-preset="custom" class="chip">Свой (OpenAI-совместимый)</button>
+                  </div>
+                </div>
+              </div>
+              <div class="field">
+                <label>Базовый URL</label>
+                <input id="s-openai-url" placeholder="https://api.deepseek.com/v1" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label>API-ключ</label>
+                <div class="input-row">
+                  <input id="s-openai-key" type="password" placeholder="sk-..." spellcheck="false" />
+                  <button id="btn-toggle-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>Модель</label>
+                <div class="input-row">
+                  <input id="s-openai-model" placeholder="deepseek-chat · gpt-4o · llama-3.3-70b..." spellcheck="false" />
+                  <button id="btn-refresh-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>Сохранённые подключения <span class="hint">(несколько OpenAI-совместимых API)</span></label>
+                <div class="input-row">
+                  <select id="s-openai-profile" class="select" style="flex:1;min-width:0"></select>
+                  <button id="btn-profile-save" class="btn btn-ghost" title="Сохранить текущие URL + ключ + модель как подключение (или обновить выбранное)">💾</button>
+                  <button id="btn-profile-delete" class="btn btn-ghost" title="Удалить выбранное подключение">🗑</button>
+                </div>
+                <div class="hint-block">Каждый свой ключ храни отдельным подключением (например «DeepSeek», «OpenRouter», «Yandex») — потом переключайся между ними в один клик из списка. Ключи сохраняются зашифрованно.</div>
+              </div>
+              <div class="field">
+                <label class="check-row" title="При ошибке ключа/баланса/лимита автоматически переключаться на следующее сохранённое подключение">
+                  <input id="s-auto-switch" type="checkbox" />
+                  <span class="check-row-text">
+                    <b>Авто-переключение при ошибке</b>
+                    <small>Если запрос упал из-за ключа, баланса или лимитов — приложение само переключится на следующее сохранённое подключение и повторит запрос. Нужно минимум 2 подключения с ключами.</small>
+                  </span>
+                </label>
+              </div>
+              <div class="field hidden" id="yandex-project-field">
+                <label>Yandex folder ID (OpenAI-Project)</label>
+                <input id="s-openai-project" placeholder="b1g74qv3u70jmct1ekvf — ID каталога из Yandex Cloud / AI Studio" spellcheck="false" />
+                <div class="hint-block">Только для Yandex AI Studio: ID каталога (папки), в котором создан API-ключ. Отправляется заголовком <code>OpenAI-Project</code>. Модель — <code>gpt://&lt;folder&gt;/deepseek-v4-flash/latest</code> (подтяни кнопкой ↻ или вставь свою).</div>
+              </div>
+              <div id="g4f-hint" class="hint-block hidden">
+                G4F — бесплатные модели без ключа. Запусти на ПК: <code>pip install -U g4f</code>, затем <code>g4f api</code> — современный interference-API живёт на <b>порту 1337</b> (<code>http://localhost:1337/v1</code>), в старых сборках это порт 8080 (<code>http://localhost:8080/v1</code>) — если один не отвечает, поправь URL выше (при выборе пресета G4F приложение само проверит оба порта и подставит рабочий URL). Ключ НЕ нужен: поле можно оставить пустым (некоторые сборки принимают любую заглушку). Выбери провайдера в списке ниже (★ — стабильные, без входа): его типовые модели появятся сразу — нажми нужную, и «Провайдер:модель» подставится сам. Кнопка <b>▶</b> у провайдера — тест: что отвечает g4f и какие модели отдаёт, подробный лог уйдёт в правую панель «Консоль». Если g4f запущен, приложение само подтянет точный список моделей; кнопка ↻ у поля модели — на всякий случай. Провайдер передаётся g4f отдельным полем <code>provider</code>. Если провайдер отвечает «зарегистрируйтесь…» или молчит — просто выбери другого из списка. Инструменты агента работают через текстовый фолбэк — не все бесплатные провайдеры G4F поддерживают нативные вызовы инструментов.
+              </div>
+              <div id="g4f-provider-box" class="gh-repos hidden">
+                <div class="gh-repos-head" id="g4f-provider-head">
+                  <span class="settings-section-title" style="text-transform:none;letter-spacing:0">Провайдер G4F <span style="font-weight:500;opacity:.75">— маршрут <code>Провайдер:модель</code></span></span>
+                  <span class="repo-chev" id="g4f-prov-chev">▸</span>
+                </div>
+                <div class="gh-repos-body hidden" id="g4f-provider-body">
+                  <div class="gh-repo-search">
+                    <input id="g4f-provider-search" placeholder="Поиск провайдера по буквам… (deepinfra, hugging, together, pollinations)" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+                    <button id="g4f-provider-clear" class="btn btn-ghost btn-small hidden" title="Очистить поиск">✕</button>
+                  </div>
+                  <div class="gh-repos-status" id="g4f-provider-status"></div>
+                  <div class="gh-repo-list" id="g4f-provider-list"></div>
+                </div>
               </div>
             </div>
-            <div class="field">
-              <label>Модель</label>
-              <div class="input-row">
-                <input id="s-anth-model" placeholder="claude-sonnet-4-5 · claude-opus-4-1 · claude-haiku-4-5..." spellcheck="false" />
-                <button id="btn-refresh-anth-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
+          </div>
+
+          <div class="acc" data-acc="anthropic">
+            <button type="button" class="acc-head" data-acc-head="anthropic">
+              <span class="acc-title">🤖 Claude <small>Anthropic</small></span>
+              <span class="acc-badge hidden">✓ активен</span>
+              <span class="acc-chev">▾</span>
+            </button>
+            <div class="acc-body" id="anthropic-fields">
+              <div class="field">
+                <label>Базовый URL <span class="hint">(по умолчанию — официальный API Anthropic)</span></label>
+                <input id="s-anth-url" placeholder="https://api.anthropic.com" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label>API-ключ <span class="hint">(sk-ant-...)</span></label>
+                <div class="input-row">
+                  <input id="s-anth-key" type="password" placeholder="sk-ant-api03-..." spellcheck="false" />
+                  <button id="btn-toggle-anth-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>Модель</label>
+                <div class="input-row">
+                  <input id="s-anth-model" placeholder="claude-sonnet-4-5 · claude-opus-4-1 · claude-haiku-4-5..." spellcheck="false" />
+                  <button id="btn-refresh-anth-models" class="btn btn-ghost" title="Загрузить список моделей с сервера">↻</button>
+                </div>
               </div>
             </div>
           </div>
@@ -534,201 +575,212 @@
           <div id="model-hints" class="model-hints hidden"></div>
         </div>
 
-        <div class="settings-section">
-          <div class="settings-section-title">Проект</div>
-          <div class="field">
-            <label>Рабочая директория</label>
-            <div class="input-row">
-              <input id="s-workdir" placeholder="Папка, с которой работает агент (файлы + git)" spellcheck="false" />
-              <button id="btn-pick-dir" class="btn btn-ghost" title="Выбрать папку">📁</button>
+        <!-- ── Вкладка: Зрение и генерация ── -->
+        <div class="settings-tab-body hidden" data-tab-body="vision">
+          <div class="settings-section">
+            <div class="settings-section-title">🖼 Зрение и генерация изображений</div>
+            <div class="field">
+              <label class="check-row" title="Вторая модель (например, второй ключ OpenRouter): читает скриншоты и генерирует картинки. Основная модель продолжает писать код.">
+                <input id="s-vision-enabled" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Использовать вспомогательную модель</b>
+                  <small>Отдельный ключ/модель для чтения изображений (vision) и генерации картинок. Присланный скриншот сначала разбирает vision-модель, описание уходит кодеру; картинки для проекта агент создаёт инструментом generateImage.</small>
+                </span>
+              </label>
             </div>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <div class="settings-section-title">📱 Мобильный доступ</div>
-          <div class="field">
-            <label class="check-row" title="Телефон в той же Wi-Fi сети — чат, консоль, превью, файлы и git работают с телефона (PWA).">
-              <input id="s-mobile-enabled" type="checkbox" />
-              <span class="check-row-text">
-                <b>Разрешить доступ с телефона</b>
-                <small>Приложение поднимет защищённый PIN-кодом мост по локальной сети: открой адрес ниже в браузере телефона, введи PIN — и управляй агентом с телефона. Установится как приложение («Добавить на главный экран»).</small>
-              </span>
-            </label>
-          </div>
-          <div class="field mobile-fields hidden" id="mobile-fields">
-            <label>Порт моста</label>
-            <input id="s-mobile-port" type="number" min="1024" max="65535" placeholder="9090" spellcheck="false" autocomplete="off" />
-            <label>PIN-код для подключения <span class="hint">(показывается при подключении с телефона)</span></label>
-            <div class="input-row">
-              <input id="s-mobile-pin" readonly class="mobile-pin-input" spellcheck="false" autocomplete="off" />
-              <button id="btn-mobile-pin-regen" class="btn btn-ghost btn-small" title="Сгенерировать новый PIN">↻ Новый PIN</button>
-            </div>
-            <label>Адреса для телефона <span class="hint">(телефон должен быть в той же Wi-Fi сети)</span></label>
-            <div id="mobile-urls" class="mobile-urls"></div>
-            <div class="hint-block">Открой адрес в браузере телефона → введи PIN → в меню браузера «Добавить на главный экран» — работает как приложение. Если адреса нет — проверь, что ПК и телефон в одной сети.</div>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <div class="settings-section-title">🔄 Самосовершенствование (OTA)</div>
-          <div class="field">
-            <label class="check-row" title="Агент может улучшать собственный код: правит src/, проверяет синтаксис, собирает бандл (scripts/make-ota.js) — приложение применяет обновление на ходу и перезапускается. Без пересборки EXE, всё локально.">
-              <input id="s-ota-enabled" type="checkbox" />
-              <span class="check-row-text">
-                <b>Разрешить локальные обновления на ходу</b>
-                <small>Напиши агенту «улучши себя» — он исправит свой код, соберёт бандл, и приложение применит его в течение минуты (проверка при старте и каждые 60 секунд).</small>
-              </span>
-            </label>
-          </div>
-          <div class="field" id="ota-fields">
-            <label>Папка обновлений (источник OTA) <span class="hint">(пусто — папка приложения и ota/ рядом с кодом)</span></label>
-            <div class="input-row">
-              <input id="s-ota-dir" placeholder="C:\...\local-ai-agent\ota" spellcheck="false" autocomplete="off" />
-              <button id="btn-ota-open" class="btn btn-ghost" title="Открыть папку обновлений">📁</button>
-            </div>
-            <div id="ota-status" class="ota-status">—</div>
-            <div class="input-row">
-              <button id="btn-ota-check" class="btn btn-ghost btn-small">Проверить сейчас</button>
-              <button id="btn-ota-rollback" class="btn btn-ghost btn-small" title="Вернуться на предыдущую версию кода">↩ Откатить</button>
-              <button id="btn-ota-reset" class="btn btn-ghost btn-small" title="Удалить применённое обновление и папку ota/ рядом с кодом — приложение вернётся к установленной версии">🗑 Сбросить OTA</button>
-            </div>
-            <div class="hint-block">Как это работает: агент правит свой код в src/ → прогоняет node --check → собирает бандл командой <code>node scripts/make-ota.js</code> → приложение подхватывает обновление и перезапускается. GitHub и пересборка EXE не нужны.</div>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <div class="settings-section-title">Секреты · переменные окружения</div>
-          <div class="field">
-            <label>Задаются один раз — автоматически подставляются во все команды (агент, терминал, git, docker). В чат не выводятся.</label>
-            <div id="env-list" class="env-list"></div>
-            <div class="env-add">
-              <input id="s-env-key" placeholder="ИМЯ_ПЕРЕМЕННОЙ" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
-              <input id="s-env-value" type="password" placeholder="значение" spellcheck="false" autocomplete="off" />
-              <button id="btn-env-add" class="btn btn-primary btn-small" title="Добавить переменную">Добавить</button>
-            </div>
-            <label>Импорт из файла .env <span class="hint">(строки KEY=VALUE, комментарии # игнорируются)</span></label>
-            <textarea id="s-env-import" rows="4" placeholder="DATABASE_URL=postgres://...&#10;API_KEY=sk-...&#10;NODE_ENV=production" spellcheck="false"></textarea>
-            <div class="env-import-btns">
-              <button id="btn-env-import" class="btn btn-ghost btn-small" title="Вставить список переменных из текста выше">Вставить список</button>
-              <button id="btn-env-file" class="btn btn-ghost btn-small" title="Выбрать файл .env и импортировать всё">📄 Выбрать файл .env</button>
-              <input id="env-file-input" type="file" accept=".env,.txt,text/plain" class="hidden" />
-            </div>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <div class="settings-section-title">GitHub</div>
-          <div class="field">
-            <label>Авторизация <span class="hint">(приватные репозитории, клонирование, пуш)</span></label>
-            <div id="gh-connected" class="gh-connected hidden">
-              <img id="gh-avatar" class="gh-avatar hidden" alt="" />
-              <span id="gh-login">@github</span>
-              <button id="btn-gh-disconnect" class="btn btn-ghost btn-small">Выйти</button>
-            </div>
-            <div id="gh-disconnected">
+            <div class="field vision-fields hidden" id="vision-fields">
+              <label>Базовый URL <span class="hint">(по умолчанию OpenRouter)</span></label>
+              <input id="s-vision-url" placeholder="https://openrouter.ai/api/v1" spellcheck="false" autocomplete="off" />
+              <label>API-ключ второго аккаунта <span class="hint">(если пусто — используется основной ключ)</span></label>
               <div class="input-row">
-                <input id="s-gh-client-id" placeholder="Client ID OAuth-приложения GitHub" spellcheck="false" />
-                <button id="btn-gh-connect" class="btn btn-primary">Войти через GitHub</button>
+                <input id="s-vision-key" type="password" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
+                <button id="btn-toggle-vision-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
               </div>
-              <div class="hint-block">
-                Нужен Client ID OAuth-приложения: GitHub → Settings → Developer settings → OAuth Apps → New OAuth app.
-                <button id="btn-gh-create-app" class="link-btn">Открыть страницу создания</button>.
-                Приложение пришлёт код — введёшь его на github.com/login/device, и GitHub сам выдаст доступ (без токена).
+              <label>Модель-зрение <span class="hint">(читает скриншоты; напр. google/gemini-2.0-flash-001, openai/gpt-4o-mini)</span></label>
+              <div class="input-row">
+                <input id="s-vision-model" placeholder="google/gemini-2.0-flash-001" spellcheck="false" autocomplete="off" />
+                <button id="btn-refresh-vision-models" class="btn btn-ghost" title="Загрузить список моделей">↻</button>
               </div>
-              <div class="input-row gh-token-row">
-                <input id="s-gh-token" type="password" placeholder="или вставь токен вручную (ghp_...)" spellcheck="false" />
+              <label>Модель-генерация <span class="hint">(создаёт картинки; напр. openai/dall-e-3, black-forest-labs/flux-1.1-pro)</span></label>
+              <div class="input-row">
+                <input id="s-image-model" placeholder="openai/dall-e-3" spellcheck="false" autocomplete="off" />
+                <button id="btn-refresh-image-models" class="btn btn-ghost" title="Загрузить список моделей">↻</button>
+              </div>
+              <label class="check-row" title="Присланный скриншот сначала разбирает модель-зрение, описание передаётся кодеру — даже если его модель не умеет видеть картинки.">
+                <input id="s-vision-auto" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Автоматически разбирать присланные картинки</b>
+                  <small>Скриншот → описание вспомогательной моделью → кодер работает с текстом. Выключи, если хочешь слать картинки напрямую основной модели (умеющей видеть).</small>
+                </span>
+              </label>
+              <div id="vision-model-hints" class="model-hints hidden"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Вкладка: Проект и GitHub ── -->
+        <div class="settings-tab-body hidden" data-tab-body="project">
+          <div class="settings-section">
+            <div class="settings-section-title">Проект</div>
+            <div class="field">
+              <label>Рабочая директория</label>
+              <div class="input-row">
+                <input id="s-workdir" placeholder="Папка, с которой работает агент (файлы + git)" spellcheck="false" />
+                <button id="btn-pick-dir" class="btn btn-ghost" title="Выбрать папку">📁</button>
               </div>
             </div>
           </div>
-          <div class="field">
-            <div class="gh-repos hidden" id="gh-repos">
-              <div class="gh-repos-head" id="gh-repos-head">
-                <span class="settings-section-title" style="text-transform:none;letter-spacing:0">Мой репозиторий на GitHub</span>
-                <span class="repo-chev" id="repo-chev">▸</span>
-                <button id="btn-gh-unselect-repo" class="btn btn-ghost btn-small" title="Не работать с выбранным репозиторием">Снять выбор</button>
+          <div class="settings-section">
+            <div class="settings-section-title">🐙 GitHub</div>
+            <div class="field">
+              <label>Авторизация <span class="hint">(приватные репозитории, клонирование, пуш)</span></label>
+              <div id="gh-connected" class="gh-connected hidden">
+                <img id="gh-avatar" class="gh-avatar hidden" alt="" />
+                <span id="gh-login">@github</span>
+                <button id="btn-gh-disconnect" class="btn btn-ghost btn-small">Выйти</button>
               </div>
-              <div class="gh-repos-body hidden" id="gh-repos-body">
-                <div class="gh-repo-search">
-                  <input id="gh-repo-search" placeholder="Поиск по имени репозитория — найдутся все, не только первые 100…" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
-                  <button id="gh-repo-search-clear" class="btn btn-ghost btn-small hidden" title="Очистить поиск">✕</button>
+              <div id="gh-disconnected">
+                <div class="input-row">
+                  <input id="s-gh-client-id" placeholder="Client ID OAuth-приложения GitHub" spellcheck="false" />
+                  <button id="btn-gh-connect" class="btn btn-primary">Войти через GitHub</button>
                 </div>
-                <div class="gh-repos-status" id="gh-repos-status">Загрузка списка репозиториев...</div>
-                <div class="gh-repo-list" id="gh-repo-list"></div>
-                <button id="gh-repo-more" class="btn btn-ghost btn-small gh-more hidden" title="Загрузить следующие 100">Показать ещё 100</button>
+                <div class="hint-block">
+                  Нужен Client ID OAuth-приложения: GitHub → Settings → Developer settings → OAuth Apps → New OAuth app.
+                  <button id="btn-gh-create-app" class="link-btn">Открыть страницу создания</button>.
+                  Приложение пришлёт код — введёшь его на github.com/login/device, и GitHub сам выдаст доступ (без токена).
+                </div>
+                <div class="input-row gh-token-row">
+                  <input id="s-gh-token" type="password" placeholder="или вставь токен вручную (ghp_...)" spellcheck="false" />
+                </div>
+              </div>
+            </div>
+            <div class="field">
+              <div class="gh-repos hidden" id="gh-repos">
+                <div class="gh-repos-head" id="gh-repos-head">
+                  <span class="settings-section-title" style="text-transform:none;letter-spacing:0">Мой репозиторий на GitHub</span>
+                  <span class="repo-chev" id="repo-chev">▸</span>
+                  <button id="btn-gh-unselect-repo" class="btn btn-ghost btn-small" title="Не работать с выбранным репозиторием">Снять выбор</button>
+                </div>
+                <div class="gh-repos-body hidden" id="gh-repos-body">
+                  <div class="gh-repo-search">
+                    <input id="gh-repo-search" placeholder="Поиск по имени репозитория — найдутся все, не только первые 100…" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+                    <button id="gh-repo-search-clear" class="btn btn-ghost btn-small hidden" title="Очистить поиск">✕</button>
+                  </div>
+                  <div class="gh-repos-status" id="gh-repos-status">Загрузка списка репозиториев...</div>
+                  <div class="gh-repo-list" id="gh-repo-list"></div>
+                  <button id="gh-repo-more" class="btn btn-ghost btn-small gh-more hidden" title="Загрузить следующие 100">Показать ещё 100</button>
+                </div>
+              </div>
+            </div>
+            <div class="field">
+              <label class="check-row" title="Агент не сможет пушить, пока выключено. Кнопка Push в панели проекта работает всегда.">
+                <input id="s-allow-agent-push" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Разрешить агенту выполнять git push</b>
+                  <small>Выключено по умолчанию: инструмент gitPush у агента будет заблокирован, пока ты явно не разрешишь. Кнопка «Push» в панели проекта работает всегда — это твоё ручное действие.</small>
+                </span>
+              </label>
+            </div>
+            <div class="field">
+              <label class="check-row" title="После каждого завершённого задания агента создаётся локальный коммит-чекпоинт (без пуша) — как в Replit: одна задача = один коммит.">
+                <input id="s-agent-auto-commit" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Авто-коммит после задания агента</b>
+                  <small>Включено по умолчанию: когда агент закончил работу и менял файлы в git-репозитории — приложение само делает локальный коммит «Авто-коммит агента: …». На GitHub ничего не уходит: пушишь только ты кнопкой «Push».</small>
+                </span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Вкладка: Мобильный доступ ── -->
+        <div class="settings-tab-body hidden" data-tab-body="mobile">
+          <div class="settings-section">
+            <div class="settings-section-title">📱 Мобильный доступ</div>
+            <div class="field">
+              <label class="check-row" title="Телефон в той же Wi-Fi сети — чат, консоль, превью, файлы и git работают с телефона (PWA).">
+                <input id="s-mobile-enabled" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Разрешить доступ с телефона</b>
+                  <small>Приложение поднимет защищённый PIN-кодом мост по локальной сети: открой адрес ниже в браузере телефона, введи PIN — и управляй агентом с телефона. Установится как приложение («Добавить на главный экран»).</small>
+                </span>
+              </label>
+            </div>
+            <div class="field mobile-fields hidden" id="mobile-fields">
+              <label>Порт моста</label>
+              <input id="s-mobile-port" type="number" min="1024" max="65535" placeholder="9090" spellcheck="false" autocomplete="off" />
+              <label>PIN-код для подключения <span class="hint">(показывается при подключении с телефона)</span></label>
+              <div class="input-row">
+                <input id="s-mobile-pin" readonly class="mobile-pin-input" spellcheck="false" autocomplete="off" />
+                <button id="btn-mobile-pin-regen" class="btn btn-ghost btn-small" title="Сгенерировать новый PIN">↻ Новый PIN</button>
+              </div>
+              <label>Адреса для телефона <span class="hint">(телефон должен быть в той же Wi-Fi сети)</span></label>
+              <div id="mobile-urls" class="mobile-urls"></div>
+              <div class="hint-block">Открой адрес в браузере телефона → введи PIN → в меню браузера «Добавить на главный экран» — работает как приложение. Если адреса нет — проверь, что ПК и телефон в одной сети.</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Вкладка: Секреты ── -->
+        <div class="settings-tab-body hidden" data-tab-body="secrets">
+          <div class="settings-section">
+            <div class="settings-section-title">🔒 Секреты · переменные окружения</div>
+            <div class="field">
+              <label>Задаются один раз — автоматически подставляются во все команды (агент, терминал, git, docker). В чат не выводятся.</label>
+              <div id="env-list" class="env-list"></div>
+              <div class="env-add">
+                <input id="s-env-key" placeholder="ИМЯ_ПЕРЕМЕННОЙ" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+                <input id="s-env-value" type="password" placeholder="значение" spellcheck="false" autocomplete="off" />
+                <button id="btn-env-add" class="btn btn-primary btn-small" title="Добавить переменную">Добавить</button>
+              </div>
+              <label>Импорт из файла .env <span class="hint">(строки KEY=VALUE, комментарии # игнорируются)</span></label>
+              <textarea id="s-env-import" rows="4" placeholder="DATABASE_URL=postgres://...&#10;API_KEY=sk-...&#10;NODE_ENV=production" spellcheck="false"></textarea>
+              <div class="env-import-btns">
+                <button id="btn-env-import" class="btn btn-ghost btn-small" title="Вставить список переменных из текста выше">Вставить список</button>
+                <button id="btn-env-file" class="btn btn-ghost btn-small" title="Выбрать файл .env и импортировать всё">📄 Выбрать файл .env</button>
+                <input id="env-file-input" type="file" accept=".env,.txt,text/plain" class="hidden" />
               </div>
             </div>
           </div>
         </div>
 
-        <div class="settings-section">
-          <div class="settings-section-title">🖼 Зрение и генерация изображений</div>
-          <div class="field">
-            <label class="check-row" title="Вторая модель (например, второй ключ OpenRouter): читает скриншоты и генерирует картинки. Основная модель продолжает писать код.">
-              <input id="s-vision-enabled" type="checkbox" />
-              <span class="check-row-text">
-                <b>Использовать вспомогательную модель</b>
-                <small>Отдельный ключ/модель для чтения изображений (vision) и генерации картинок. Присланный скриншот сначала разбирает vision-модель, описание уходит кодеру; картинки для проекта агент создаёт инструментом generateImage.</small>
-              </span>
-            </label>
-          </div>
-          <div class="field vision-fields hidden" id="vision-fields">
-            <label>Базовый URL <span class="hint">(по умолчанию OpenRouter)</span></label>
-            <input id="s-vision-url" placeholder="https://openrouter.ai/api/v1" spellcheck="false" autocomplete="off" />
-            <label>API-ключ второго аккаунта <span class="hint">(если пусто — используется основной ключ)</span></label>
-            <div class="input-row">
-              <input id="s-vision-key" type="password" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
-              <button id="btn-toggle-vision-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+        <!-- ── Вкладка: Self-update (OTA) ── -->
+        <div class="settings-tab-body hidden" data-tab-body="ota">
+          <div class="settings-section">
+            <div class="settings-section-title">🔄 Самосовершенствование (OTA)</div>
+            <div class="field">
+              <label class="check-row" title="Агент может улучшать собственный код: правит src/, проверяет синтаксис, собирает бандл (scripts/make-ota.js) — приложение применяет обновление на ходу и перезапускается. Без пересборки EXE, всё локально.">
+                <input id="s-ota-enabled" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Разрешить локальные обновления на ходу</b>
+                  <small>Напиши агенту «улучши себя» — он исправит свой код, соберёт бандл, и приложение применит его в течение минуты (проверка при старте и каждые 60 секунд).</small>
+                </span>
+              </label>
             </div>
-            <label>Модель-зрение <span class="hint">(читает скриншоты; напр. google/gemini-2.0-flash-001, openai/gpt-4o-mini)</span></label>
-            <div class="input-row">
-              <input id="s-vision-model" placeholder="google/gemini-2.0-flash-001" spellcheck="false" autocomplete="off" />
-              <button id="btn-refresh-vision-models" class="btn btn-ghost" title="Загрузить список моделей">↻</button>
+            <div class="field" id="ota-fields">
+              <label>Папка обновлений (источник OTA) <span class="hint">(пусто — папка приложения и ota/ рядом с кодом)</span></label>
+              <div class="input-row">
+                <input id="s-ota-dir" placeholder="C:\...\local-ai-agent\ota" spellcheck="false" autocomplete="off" />
+                <button id="btn-ota-open" class="btn btn-ghost" title="Открыть папку обновлений">📁</button>
+              </div>
+              <div id="ota-status" class="ota-status">—</div>
+              <div class="input-row">
+                <button id="btn-ota-check" class="btn btn-ghost btn-small">Проверить сейчас</button>
+                <button id="btn-ota-rollback" class="btn btn-ghost btn-small" title="Вернуться на предыдущую версию кода">↩ Откатить</button>
+                <button id="btn-ota-reset" class="btn btn-ghost btn-small" title="Удалить применённое обновление и папку ota/ рядом с кодом — приложение вернётся к установленной версии">🗑 Сбросить OTA</button>
+              </div>
+              <div class="hint-block">Как это работает: агент правит свой код в src/ → прогоняет node --check → собирает бандл командой <code>node scripts/make-ota.js</code> → приложение подхватывает обновление и перезапускается. GitHub и пересборка EXE не нужны.</div>
             </div>
-            <label>Модель-генерация <span class="hint">(создаёт картинки; напр. openai/dall-e-3, black-forest-labs/flux-1.1-pro)</span></label>
-            <div class="input-row">
-              <input id="s-image-model" placeholder="openai/dall-e-3" spellcheck="false" autocomplete="off" />
-              <button id="btn-refresh-image-models" class="btn btn-ghost" title="Загрузить список моделей">↻</button>
-            </div>
-            <label class="check-row" title="Присланный скриншот сначала разбирает модель-зрение, описание передаётся кодеру — даже если его модель не умеет видеть картинки.">
-              <input id="s-vision-auto" type="checkbox" />
-              <span class="check-row-text">
-                <b>Автоматически разбирать присланные картинки</b>
-                <small>Скриншот → описание вспомогательной моделью → кодер работает с текстом. Выключи, если хочешь слать картинки напрямую основной модели (умеющей видеть).</small>
-              </span>
-            </label>
-            <div id="vision-model-hints" class="model-hints hidden"></div>
           </div>
         </div>
 
-        <div class="field">
-          <label class="check-row" title="Агент не сможет пушить, пока выключено. Кнопка Push в панели проекта работает всегда.">
-            <input id="s-allow-agent-push" type="checkbox" />
-            <span class="check-row-text">
-              <b>Разрешить агенту выполнять git push</b>
-              <small>Выключено по умолчанию: инструмент gitPush у агента будет заблокирован, пока ты явно не разрешишь. Кнопка «Push» в панели проекта работает всегда — это твоё ручное действие.</small>
-            </span>
-          </label>
-        </div>
-        <div class="field">
-          <label class="check-row" title="После каждого завершённого задания агента создаётся локальный коммит-чекпоинт (без пуша) — как в Replit: одна задача = один коммит.">
-            <input id="s-agent-auto-commit" type="checkbox" />
-            <span class="check-row-text">
-              <b>Авто-коммит после задания агента</b>
-              <small>Включено по умолчанию: когда агент закончил работу и менял файлы в git-репозитории — приложение само делает локальный коммит «Авто-коммит агента: …». На GitHub ничего не уходит: пушишь только ты кнопкой «Push».</small>
-            </span>
-          </label>
-        </div>
-        <div class="field row">
+        <div class="settings-footer">
           <button id="btn-test" class="btn btn-ghost">🔌 Проверить подключение</button>
           <button id="btn-save-settings" class="btn btn-primary">💾 Сохранить настройки</button>
         </div>
         <div id="settings-msg" class="settings-msg"></div>
       </div>
-    </div>
-  </div>
-
-  <script src="agent-core.js"></script>
+<script src="agent-core.js"></script>
   <script src="markdown.js"></script>
   <script src="bootstrap.js"></script>
   <script src="mobile-api.js"></script>
