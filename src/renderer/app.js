@@ -2180,6 +2180,12 @@
       }
       if (!res.ok) {
         const detail = await AgentCore.readApiError(res);
+        // Лимиты провайдера (Groq free ~7K токенов/мин): понятное объяснение вместо сырого JSON.
+        const friendly = AgentCore.friendlyRateLimitError(res.status, detail, settings);
+        if (friendly) {
+          onEvent({ type: "error", message: friendly });
+          return;
+        }
         // Переполнение контекста: один раз повторяем с резко урезанной историей
         if (!contextRetried && /context|too long|maximum|num_ctx|token/i.test(detail) && budget > 3000) {
           contextRetried = true;
@@ -2301,11 +2307,26 @@
           } catch (e) {
             result = "Ошибка " + c.name + ": " + (e && e.message ? e.message : "сеть недоступна");
           }
+        } else if (c.name === "waitUntil") {
+          // Обычная пауза — работает и в браузере.
+          const secs = Math.max(1, Math.min(parseInt((c.args && c.args.seconds) || "5", 10) || 5, 300));
+          await new Promise((r) => setTimeout(r, secs * 1000));
+          result = "OK — подождал " + secs + " с. Теперь перепроверь состояние (checkPort/checkUrl/backgroundOutput).";
+        } else if (c.name === "semanticSearch") {
+          result =
+            "⚠️ Семантический поиск (semanticSearch) доступен только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
+        } else if (c.name === "applyPatch" || c.name === "gitStash" || c.name === "gitCherryPick" || c.name === "gitBlame") {
+          result =
+            "⚠️ Инструменты applyPatch и gitStash/gitCherryPick/gitBlame доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
         } else if (c.name && (c.name.startsWith("browser") || c.name.startsWith("app"))) {
           // Браузерные (Playwright) и app-инструменты (управление собственным окном)
           // работают только в desktop-приложении (main-процесс Electron).
           result =
             "⚠️ Инструменты браузера (browserOpen и др.) и управления окном приложения (appRead/appClick и др.) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
+        } else if (c.name && (c.name === "noteSave" || c.name === "noteRead" || c.name === "noteList" || c.name === "noteDelete" || c.name === "checkpointSave" || c.name === "checkpointList" || c.name === "checkpointRollback")) {
+          // Память проекта и точки отката работают только в desktop-приложении.
+          result =
+            "⚠️ Инструменты памяти проекта (noteSave/noteRead/noteList/noteDelete) и точек отката (checkpointSave/checkpointList/checkpointRollback) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
         } else {
           result =
             "⚠️ Файловые операции и git недоступны в веб-версии. Запустите приложение на Windows (bun run dist:win).";

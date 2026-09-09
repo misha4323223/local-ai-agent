@@ -41,8 +41,11 @@
 21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url), управляй страницей через browserClick / browserFill / browserSelect / browserPress, читай содержимое через browserText, список вкладок — browserStatus, скриншот — browserScreenshot. Селекторы: CSS (#id, .class, input[name="..."]) или text=Текст кнопки, xpath=//button. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли бери ТОЛЬКО у пользователя через askUser (или из agentEnv, если он сам их туда положил) — не выдумывай и не записывай их в код. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
 22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — прочитать, что сейчас видно в окне (вкладка, кнопки, поля, номера [N]), appClick — кликнуть по тексту/селектору/номеру, appFill — ввести текст в поле, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
 23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
+25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
+26. Семантический поиск: semanticSearch(query) ищет по коду проекта по смыслу (стебли слов, camelCase/snake_case, BM25-ранжирование) и показывает сниппеты с номерами строк. Используй его для поиска «где находится X» и «как устроен Y» — быстрее и точнее, чем читать файлы подряд. Точный регулярный поиск — searchFile/searchProject.
+24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList).
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -1380,6 +1383,169 @@
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "noteSave",
+        description: "Сохранить заметку проекта под ключом key (латиница/цифры/точка/дефис/подчёркивание, до 64 символов). Заметки переживают перезапуск и видны в следующих сессиях — это твоя долговременная память о проекте: архитектура, решения, договорённости, что уже сделано. Перезаписывает заметку с тем же key. Содержимое — до 6000 символов.",
+        parameters: {
+          type: "object",
+          properties: {
+            key: { type: "string", description: "Короткое имя заметки, например architecture, todos, decisions, api-notes" },
+            content: { type: "string", description: "Текст заметки (до 6000 символов)" },
+          },
+          required: ["key", "content"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "noteRead",
+        description: "Прочитать заметки проекта. Без key — все заметки (свежие первыми); с key — одну заметку. Используй в начале работы и при сомнении о договорённостях или состоянии проекта.",
+        parameters: {
+          type: "object",
+          properties: { key: { type: "string", description: "Имя заметки (необязательно; без него — все)" } },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "noteList",
+        description: "Показать только ключи всех заметок проекта (без содержимого).",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "noteDelete",
+        description: "Удалить заметку проекта по ключу.",
+        parameters: {
+          type: "object",
+          properties: { key: { type: "string", description: "Имя заметки для удаления" } },
+          required: ["key"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "checkpointSave",
+        description: "Создать точку отката: полный снимок текстовых файлов рабочей директории (без .git, node_modules, dist, build и т.п.). Делай ПЕРЕД серией рискованных правок или рефакторингом — потом можно вернуть всё разом через checkpointRollback(id). Хранится до 15 чекпоинтов, старые вытесняются.",
+        parameters: {
+          type: "object",
+          properties: { label: { type: "string", description: "Короткая подпись, например «до рефакторинга api» (необязательно)" } },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "checkpointList",
+        description: "Показать все точки отката: id, подпись, дата, число файлов.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "checkpointRollback",
+        description: "Откатить рабочую директорию к точке отката: восстановить все файлы из снимка checkpointSave (перезаписывает текущее содержимое). Файлы, созданные после чекпоинта, не удаляются. Используй, когда серия правок сломала проект.",
+        parameters: {
+          type: "object",
+          properties: { id: { type: "string", description: "Идентификатор чекпоинта (из checkpointList)" } },
+          required: ["id"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "applyPatch",
+        description: "Применить unified diff (формат git diff) — правка нескольких файлов одним вызовом. patch — текст диффа с заголовками --- / +++ и хунками @@. Изменяет существующие файлы, создаёт новые (--- /dev/null), удаляет файлы (+++ /dev/null). basePath — папка, относительно которой идут пути (по умолчанию рабочая директория). Генерируй патч аккуратно: контекст должен точно совпадать с содержимым файлов (перечитай их через readFile). После применения запусти validateProject.",
+        parameters: {
+          type: "object",
+          properties: {
+            patch: { type: "string", description: "Unified diff (git diff): --- a/путь, +++ b/путь, хунки @@ -N,M +N,M @@" },
+            basePath: { type: "string", description: "Базовая папка для путей из патча (по умолчанию — рабочая директория)" },
+          },
+          required: ["patch"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "waitUntil",
+        description: "Подождать seconds секунд (1–300) и вернуться. Используй перед повторной проверкой состояния: сервер ещё стартует (checkPort/checkUrl), тест ещё работает, файл должен появиться. Сразу после — перепроверь то, ради чего ждал.",
+        parameters: {
+          type: "object",
+          properties: {
+            seconds: { type: "integer", description: "Сколько секунд ждать (1–300)" },
+            reason: { type: "string", description: "Зачем ждём (показывается пользователю)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "gitStash",
+        description: "Работа со stash git: action push — спрятать незакоммиченные изменения и очистить рабочее дерево (message — подпись); pop — вернуть последний stash; list — показать стек stash.",
+        parameters: {
+          type: "object",
+          properties: {
+            action: { type: "string", description: "push / pop / list (по умолчанию push)" },
+            message: { type: "string", description: "Подпись stash (для action: push)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "gitCherryPick",
+        description: "Перенести коммит из другой ветки/истории на текущую ветку (git cherry-pick). commit — хэш или ссылка (например abc123 или HEAD~2).",
+        parameters: {
+          type: "object",
+          properties: { commit: { type: "string", description: "Хэш коммита или ссылка" } },
+          required: ["commit"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "gitBlame",
+        description: "Показать историю строк файла (git blame): кто и в каком коммите менял каждую строку. path — путь к файлу; lines — сколько первых строк показать (необязательно). Полезно, чтобы понять, когда и зачем появился код.",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Путь к файлу" },
+            lines: { type: "integer", description: "Сколько первых строк показать (необязательно)" },
+          },
+          required: ["path"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "semanticSearch",
+        description: "Семантический поиск по коду проекта: ищет по смыслу, а не по точному тексту (auth находит authenticate, распознаёт camelCase/snake_case), ранжирует файлы по релевантности и показывает сниппет с номерами строк. query — запрос своими словами (что нужно найти), maxResults — сколько файлов вернуть (по умолчанию 8), path — папка поиска (по умолчанию рабочая). Для точного регулярного поиска используй searchFile/searchProject.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Что ищем своими словами, например «валидация входа», «подключение к базе», «обработка ошибок API»" },
+            maxResults: { type: "integer", description: "Сколько файлов вернуть (1–20, по умолчанию 8)" },
+            path: { type: "string", description: "Папка поиска (по умолчанию рабочая директория)" },
+          },
+          required: ["query"],
+        },
+      },
+    },
   ];
 
   // ── Контекст-окно: грубая оценка токенов и обрезка истории ──
@@ -2611,6 +2777,32 @@
     return detail;
   }
 
+  // Понятное объяснение лимитных ошибок провайдеров вместо сырого JSON.
+  // Groq free: ~7K входных токенов/мин (ITPM) для всех моделей, а системный
+  // промпт + схемы инструментов агента весят десятки тысяч токенов — обрезка
+  // истории не поможет, нужен другой провайдер или платный тир.
+  function friendlyRateLimitError(status, detail, settings) {
+    const s = settings || {};
+    const base = String(s.openaiUrl || s.externalUrl || "");
+    const isGroq = /groq\.com/i.test(base);
+    const d = String(detail || "");
+    const isTokenMinute =
+      /per minute|tokens per minute|ITPM|rate_limit_exceeded|reduce your message size/i.test(d);
+    if (isGroq && (status === 413 || status === 429) && isTokenMinute) {
+      return (
+        "API error " + status + ": Groq (бесплатный тариф) ограничивает входные токены ~7 000/мин, "
+        + "а запрос агента (системный промпт + схемы инструментов + контекст) весит десятки тысяч "
+        + "токенов — лимит исчерпывается ещё до ответа, и обрезка истории здесь не поможет.\n\n"
+        + "Как продолжить:\n"
+        + "1) переключись в Настройках → «🌐 OpenAI-совместимые» на чип Ollama Cloud (gpt-oss:120b), "
+        + "Yandex (DeepSeek V4 Flash) или Cerebras — они уже настроены и без этого лимита;\n"
+        + "2) либо включи Groq Dev Tier (console.groq.com/settings/billing) — лимит вырастет.\n"
+        + "Бесплатный Groq подходит только для коротких сообщений без инструментов."
+      );
+    }
+    return null;
+  }
+
   // ── Вспомогательная модель (второй ключ): зрение + генерация изображений ──
   function auxConfig(s) {
     s = s || {};
@@ -2917,6 +3109,7 @@
     consumeProviderStream,
     listModels,
     readApiError,
+    friendlyRateLimitError,
     genCallId,
     // контекст
     estimateTokens,

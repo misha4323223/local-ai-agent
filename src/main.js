@@ -17,6 +17,7 @@ const {
   consumeProviderStream,
   listModels,
   readApiError,
+  friendlyRateLimitError,
   genCallId,
   contextBudget,
   trimConversation,
@@ -46,6 +47,9 @@ const MobileBridge = require("./mobile-bridge.js");
 const browserTools = require("./browser-tools.js"); // браузерные инструменты агента (Playwright)
 const appUi = require("./app-ui-tools.js"); // инструменты управления собственным окном приложения (app-*)
 const secrets = require("./secrets.js"); // секреты: ключи, токены, PIN, agentEnv (safeStorage)
+const agentStore = require("./agent-store.js"); // память проекта (заметки) и точки отката (чекпоинты)
+const unifiedPatch = require("./unified-patch.js"); // применение unified diff (applyPatch)
+const codeIndex = require("./code-index.js"); // семантический индекс кода (BM25 + стемминг)
 secrets.init(path.join(app.getPath("userData"), "secrets.json"));
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
 const ipcHandlerMap = new Map();
@@ -2855,6 +2859,142 @@ async function executeTool(name, args, settings) {
             : "\n\nПроверь: checkInstalledProgram(\"" + (name || "программа") + "\").")
         );
       }
+      case "noteSave": {
+        const nKey = String(args.key || "").trim();
+        const nContent = String(args.content ?? "");
+        const nR = agentStore.noteSave(app.getPath("userData"), agentWorkDir(settings), nKey, nContent);
+        return nR.ok ? "OK — " + nR.message : "Ошибка: " + nR.error;
+      }
+      case "noteRead": {
+        const nrKey = String(args.key || "").trim();
+        const nrR = agentStore.noteRead(app.getPath("userData"), agentWorkDir(settings), nrKey);
+        if (!nrR.ok) return "Ошибка: " + nrR.error;
+        if (nrR.key) return "Заметка «" + nrR.key + "»:\n" + nrR.content;
+        if (!nrR.notes.length) {
+          return "Заметок проекта пока нет. Сохрани первую через noteSave(key, content) — они переживают перезапуск и помогают продолжать работу в новых сессиях.";
+        }
+        const nrRows = nrR.notes.map((n) => "• " + n.key + " (" + new Date(n.ts).toLocaleString() + "):\n  " + n.content.replace(/\n/g, "\n  "));
+        return "Заметки проекта (" + nrR.notes.length + "):\n" + nrRows.join("\n\n");
+      }
+      case "noteList": {
+        const nlR = agentStore.noteRead(app.getPath("userData"), agentWorkDir(settings), "");
+        if (!nlR.ok) return "Ошибка: " + nlR.error;
+        if (!nlR.notes.length) return "Заметок проекта пока нет. Сохрани первую через noteSave(key, content).";
+        return "Заметки проекта (" + nlR.notes.length + "):\n" + nlR.notes.map((n) => "• " + n.key).join("\n");
+      }
+      case "noteDelete": {
+        const ndKey = String(args.key || "").trim();
+        const ndR = agentStore.noteDelete(app.getPath("userData"), agentWorkDir(settings), ndKey);
+        return ndR.ok ? "OK — " + ndR.message : "Ошибка: " + ndR.error;
+      }
+      case "checkpointSave": {
+        const csR = agentStore.checkpointSave(app.getPath("userData"), agentWorkDir(settings), args.label);
+        return csR.ok ? "OK — " + csR.message : "Ошибка: " + csR.error;
+      }
+      case "checkpointList": {
+        const clR = agentStore.checkpointList(app.getPath("userData"));
+        if (!clR.checkpoints.length) {
+          return "Чекпоинтов пока нет. Создай первый через checkpointSave(label) перед серией правок — потом можно откатиться через checkpointRollback(id).";
+        }
+        const clRows = clR.checkpoints.map((c) => "• " + c.id + " — «" + c.label + "», " + c.files + " файлов, " + new Date(c.createdAt).toLocaleString());
+        return "Чекпоинты (" + clR.checkpoints.length + "):\n" + clRows.join("\n");
+      }
+      case "checkpointRollback": {
+        const crId = String(args.id || "").trim();
+        if (!crId) return "Ошибка: укажи id чекпоинта (смотри checkpointList).";
+        const crR = agentStore.checkpointRollback(app.getPath("userData"), crId);
+        if (!crR.ok) return "Ошибка: " + crR.error;
+        return "OK — " + crR.message + (crR.errors && crR.errors.length ? "\nОшибки: " + crR.errors.join("; ") : "");
+      }
+      case "applyPatch": {
+        const patch = String(args.patch ?? "");
+        if (!patch.trim()) return "Ошибка: укажи patch — unified diff (формат git diff) с изменениями файлов.";
+        const base = args.basePath ? resolvePath(args.basePath, settings) : agentWorkDir(settings);
+        if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) return "Ошибка: базовой директории нет: " + base;
+        // Снимаем undo-снимки для всех файлов, которые затронет патч.
+        for (const f of unifiedPatch.parsePatch(patch)) {
+          const rel = unifiedPatch.safeRel(base, f.b || f.a);
+          if (!rel) continue;
+          const abs = path.join(base, rel);
+          if (fs.existsSync(abs) && fs.statSync(abs).isFile()) snapshotFileForUndo(abs);
+        }
+        const r = unifiedPatch.applyUnifiedPatch(base, patch);
+        if (!r.ok) {
+          return "Ошибка применения патча:\n" + r.errors.map((e) => "• " + e.path + " — " + e.error).join("\n") +
+            "\n\nПеречитай файлы (readFile) и сгенерируй патч заново с точным контекстом, либо правь файлы по одному через editFile.";
+        }
+        return "OK — патч применён, изменено файлов: " + r.changed.length + (r.changed.length ? "\n" + r.changed.map((f) => "• " + f).join("\n") : "");
+      }
+      case "waitUntil": {
+        const secs = Math.max(1, Math.min(parseInt(args.seconds, 10) || 5, 300));
+        if (args.reason) termAgentEcho("⏳ " + args.reason + " (жду " + secs + " с)");
+        await new Promise((res) => setTimeout(res, secs * 1000));
+        return "OK — подождал " + secs + " с" + (args.reason ? " (" + args.reason + ")" : "") + ". Теперь перепроверь состояние (например checkPort/checkUrl/backgroundOutput).";
+      }
+      case "gitStash": {
+        const cwd = agentWorkDir(settings);
+        const action = String(args.action || "push").toLowerCase();
+        const isList = action === "list";
+        const isPop = action === "pop";
+        const isPush = action === "push";
+        if (!isList && !isPop && !isPush) return "Ошибка: action может быть push (сохранить изменения), pop (вернуть) или list (показать).";
+        if (isList) {
+          const r = await runGit(cwd, ["stash", "list"], settings);
+          return r.ok ? (r.out || "Стеков stash нет.") : "Ошибка git: " + r.err;
+        }
+        if (isPop) {
+          const r = await runGit(cwd, ["stash", "pop"], settings);
+          if (!r.ok) return "Ошибка git: " + r.err + " (возможен конфликт — проверь gitStatus и разбери изменения вручную).";
+          return "OK — изменения возвращены из stash:\n" + r.out;
+        }
+        const msg = String(args.message || "").trim() || "Авто-stash агента";
+        const r = await runGit(cwd, ["stash", "push", "-m", msg], settings);
+        if (!r.ok) return "Ошибка git: " + r.err;
+        return "OK — изменения спрятаны в stash («" + msg + "»). Вернуть: gitStash(action: pop). Рабочее дерево теперь чистое.";
+      }
+      case "gitCherryPick": {
+        const cwd = agentWorkDir(settings);
+        const commit = String(args.commit || "").trim();
+        if (!commit) return "Ошибка: укажи commit — хэш или ссылку (например HEAD~1 или abc123).";
+        const r = await runGit(cwd, ["cherry-pick", commit], settings);
+        if (!r.ok) return "Ошибка git: " + r.err + " (возможен конфликт — разбери его, затем gitCherryPick не нужен, просто gitCommit после разрешения).";
+        return "OK — коммит " + commit + " перенесён на текущую ветку:\n" + r.out;
+      }
+      case "gitBlame": {
+        const cwd = agentWorkDir(settings);
+        const p = resolvePath(args.path, settings);
+        if (!fs.existsSync(p)) return "Ошибка: файл не найден: " + p;
+        const rel = path.relative(cwd, p) || path.basename(p);
+        const lines = parseInt(args.lines, 10);
+        const gitArgs = ["blame"];
+        if (Number.isInteger(lines) && lines >= 1) gitArgs.push("-L", "1," + Math.min(lines, 500));
+        gitArgs.push("--", rel);
+        const r = await runGit(cwd, gitArgs, settings);
+        if (!r.ok) return "Ошибка git: " + r.err;
+        return "История строк файла " + rel + " (git blame):\n" + truncateText(r.out, 9000);
+      }
+      case "semanticSearch": {
+        const query = String(args.query || "").trim();
+        if (!query) return "Ошибка: укажи query — что ищем по смыслу (например «валидация входа», «db подключение»).";
+        const base = args.path ? resolvePath(args.path, settings) : agentWorkDir(settings);
+        if (!fs.existsSync(base) || !fs.statSync(base).isDirectory()) return "Ошибка: директория не найдена: " + base;
+        const maxResults = Math.min(parseInt(args.maxResults, 10) || 8, 20);
+        const index = codeIndex.getIndex(app.getPath("userData"), base);
+        if (!index.docsCount) return "Нечего искать в " + base + " — текстовых файлов не найдено.";
+        const hits = codeIndex.searchIndex(index, query, maxResults);
+        if (!hits.length) {
+          return "По запросу «" + query + "» ничего не найдено в " + index.docsCount + " файлах (индекс: " + base + ").\nПопробуй другие слова (поиск работает по смыслу: auth → authenticate) или searchFile для точного регулярного поиска.";
+        }
+        const rows = hits.map((h, i) => {
+          const sn = codeIndex.snippetForFile(base, h.rel, query, 3);
+          return "#" + (i + 1) + " " + h.rel + " (релевантность " + h.score.toFixed(2) + ")\n" + sn.text;
+        });
+        return (
+          "Семантический поиск «" + query + "» — индексировано файлов: " + index.docsCount + ", топ-" + hits.length + ":\n\n" +
+          rows.join("\n\n") +
+          "\n\nДальше: readFileLines(path, start, count) — читать найденное, searchFile — точный регулярный поиск."
+        );
+      }
       default:
         return "Ошибка: неизвестный инструмент " + name;
     }
@@ -3077,6 +3217,9 @@ async function runAi(settings, messages, win, opts) {
     }
     if (!res.ok) {
       const detail = await readApiError(res);
+      // Лимиты провайдера (Groq free ~7K токенов/мин): понятное объяснение вместо сырого JSON.
+      const friendly = friendlyRateLimitError(res.status, detail, settings);
+      if (friendly) throw new Error(friendly);
       // Переполнение контекста (частая беда локальных моделей Ollama с малым окном):
       // один раз повторяем запрос с резко урезанной историей, чтобы не падать.
       if (
