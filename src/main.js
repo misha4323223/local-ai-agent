@@ -59,6 +59,7 @@ ipcMain.handle = (channel, fn) => {
 };
 const mobileBridge = new MobileBridge({ handlerMap: ipcHandlerMap });
 const ota = require("./ota.js"); // локальный self-update (OTA)
+const selfDev = require("./self-dev.js"); // защита критичной инфраструктуры самообновления
 
 // ─────────────────────────── Настройки ───────────────────────────
 // Клонирование репозиториев: явная кнопка «⬇ Выгрузить» в списке GitHub-репозиториев
@@ -581,6 +582,16 @@ function screenshotUrl(url) {
     win.webContents.once("did-fail-load", (_e, code, desc) => fail(code + " " + String(desc || "").slice(0, 300)));
     win.loadURL(url).catch((e) => fail(e.message));
   });
+}
+
+// Сохранение скриншота на диск: скриншоты хранятся в userData/screenshots, чтобы
+// агент мог проанализировать их vision-моделью через analyzeImage(path).
+function saveScreenshotPng(buf, baseName) {
+  const dir = path.join(app.getPath("userData"), "screenshots");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, String(baseName || "shot").replace(/[^\w.-]+/g, "_") + "-" + Date.now() + ".png");
+  fs.writeFileSync(file, buf);
+  return file;
 }
 
 // ─────────────────────────── Фоновые процессы и постоянные shell-сессии ───────────────────────────
@@ -1494,6 +1505,9 @@ async function executeTool(name, args, settings) {
       case "editFile": {
         const p = resolvePath(args.path, settings);
         if (!fs.existsSync(p)) return "Ошибка: файл не найден: " + p;
+        if (selfDev.protectedSelfPath(p, { appSrcDir: __dirname, otaRoot: ota.resolveCurrent() })) {
+          return selfDev.protectedSelfPathMessage(p);
+        }
         const newText = String(args.newText ?? "");
         const content = fs.readFileSync(p, "utf8");
         // Режим 2: замена диапазона строк по номерам (startLine..endLine) — для больших файлов
@@ -1813,7 +1827,14 @@ async function executeTool(name, args, settings) {
         const shot = await screenshotUrl(url);
         if (!shot.ok) return "Ошибка скриншота: " + shot.err;
         if (activeEmit) activeEmit({ type: "image", path: url, dataUrl: shot.dataUrl });
-        return "OK — скриншот " + url + " снят (1280×800) и показан пользователю во встроенном просмотрщике.";
+        let saved = null;
+        try {
+          const buf = Buffer.from(String(shot.dataUrl).split(",")[1] || "", "base64");
+          if (buf.length) saved = saveScreenshotPng(buf, "page");
+        } catch {}
+        return "OK — скриншот " + url + " снят (1280×800), показан пользователю во встроенном просмотрщике" +
+          (saved ? " и сохранён: " + saved : "") +
+          ". Чтобы понять, что на экране, вызови analyzeImage(path: '" + (saved || "") + "') — вернёт описание вспомогательной vision-моделью.";
       }
       case "envSet": {
         const key = String(args.key || "").trim();
@@ -1849,6 +1870,9 @@ async function executeTool(name, args, settings) {
       case "writeFile": {
         if (!args.path) return "Ошибка: укажи path";
         const p = resolvePath(args.path, settings);
+        if (selfDev.protectedSelfPath(p, { appSrcDir: __dirname, otaRoot: ota.resolveCurrent() })) {
+          return selfDev.protectedSelfPathMessage(p);
+        }
         const content = String(args.content ?? "");
         fs.mkdirSync(path.dirname(p), { recursive: true });
         const existed = fs.existsSync(p);
@@ -2756,7 +2780,13 @@ async function executeTool(name, args, settings) {
         const sz = src.thumbnail.getSize();
         const dataUrl = "data:image/png;base64," + png.toString("base64");
         if (activeEmit) activeEmit({ type: "image", path: "desktop:" + src.name, dataUrl });
-        return "OK — скриншот «" + src.name + "» (" + sz.width + "×" + sz.height + ") снят и показан пользователю во встроенном просмотрщике. При необходимости проанализируй детали через analyzeImage.";
+        let saved = null;
+        try {
+          if (png.length) saved = saveScreenshotPng(png, "screen");
+        } catch {}
+        return "OK — скриншот «" + src.name + "» (" + sz.width + "×" + sz.height + ") снят, показан пользователю во встроенном просмотрщике" +
+          (saved ? " и сохранён: " + saved : "") +
+          ". Чтобы понять, что на экране, вызови analyzeImage(path: '" + (saved || "") + "') — вернёт описание вспомогательной vision-моделью.";
       }
       case "registryRead": {
         if (process.platform !== "win32") return "Ошибка: реестр Windows доступен только на Windows.";
@@ -2906,6 +2936,29 @@ async function executeTool(name, args, settings) {
         if (!crR.ok) return "Ошибка: " + crR.error;
         return "OK — " + crR.message + (crR.errors && crR.errors.length ? "\nОшибки: " + crR.errors.join("; ") : "");
       }
+      case "otaStatus": {
+        const os = ota.status(loadSettings());
+        return (
+          "OTA-статус:\n" +
+          "• Включено: " + (os.enabled ? "да" : "нет — включи в настройках «🔄 Самосовершенствование (OTA)»\n") +
+          "• Установленная версия кода: " + os.installed + "\n" +
+          "• Папка OTA: " + os.dir + "\n" +
+          "• Источники бандлов: " + (os.sources && os.sources.length ? "\n  " + os.sources.join("\n  ") : "—")
+        );
+      }
+      case "otaCheck": {
+        const oc = await ota.check(loadSettings());
+        if (oc.status === "disabled") return "OTA отключено в настройках (галочка «Разрешить локальные обновления на ходу»).";
+        if (oc.status === "busy") return "Сейчас идёт работа агента — применять обновление нельзя. Бандл применится автоматически в течение минуты после завершения задачи.";
+        if (oc.status === "applied") return "✅ Обновление применено до версии " + oc.version + " — приложение перезапускается с новым кодом.";
+        if (oc.status === "error") return "Ошибка применения OTA: " + (oc.message || "неизвестная") + "\nПроверь синтаксис изменённых файлов (node --check) и пересобери бандл (node scripts/make-ota.js).";
+        return "Обновлений нет — код актуален.";
+      }
+      case "otaRollback": {
+        if (global.__agentRunning) return "Нельзя откатываться во время работы агента — дождись завершения текущей задачи.";
+        const or = ota.rollback();
+        return or.ok ? "↩ Откат выполнен — приложение перезапускается с предыдущей версией кода." : "Ошибка отката: " + (or.message || "предыдущей версии нет");
+      }
       case "applyPatch": {
         const patch = String(args.patch ?? "");
         if (!patch.trim()) return "Ошибка: укажи patch — unified diff (формат git diff) с изменениями файлов.";
@@ -2916,6 +2969,9 @@ async function executeTool(name, args, settings) {
           const rel = unifiedPatch.safeRel(base, f.b || f.a);
           if (!rel) continue;
           const abs = path.join(base, rel);
+          if (selfDev.protectedSelfPath(abs, { appSrcDir: __dirname, otaRoot: ota.resolveCurrent() })) {
+            return "⛔ Патч затрагивает защищённый файл самообновления: " + abs + "\nПравка src/bootstrap.js, src/ota.js или папки применённого OTA-бандла заблокирована — убери этот файл из патча.";
+          }
           if (fs.existsSync(abs) && fs.statSync(abs).isFile()) snapshotFileForUndo(abs);
         }
         const r = unifiedPatch.applyUnifiedPatch(base, patch);
@@ -3178,6 +3234,11 @@ async function runAi(settings, messages, win, opts) {
     return { ok: true, text: finalText };
   };
 
+  // Авто-повтор после сбоя: при любой ошибке (сеть/API/провайдер/инструмент) делаем ещё
+  // попытку с продолжением контекста (история canonical сохраняется) — до AUTO_RETRY_LIMIT повторов.
+  const AUTO_RETRY_LIMIT = 2;
+  for (let attemptNum = 1; ; attemptNum++) {
+  try {
   for (let round = 0; round < maxRounds; round++) {
     // Пользователь остановил агента (Esc/Стоп) — не начинаем новый раунд.
     if (global.__agentStopRequested) return stopGraceful();
@@ -3417,8 +3478,31 @@ async function runAi(settings, messages, win, opts) {
     // Остановка во время выполнения инструментов — завершаем без нового раунда.
     if (global.__agentStopRequested) return stopGraceful();
   }
-
-  throw new Error("Превышено максимальное число раундов вызова инструментов (" + maxRounds + ").");
+  throw Object.assign(new Error("Превышено максимальное число раундов вызова инструментов (" + maxRounds + ")."), { fatal: true });
+  } catch (e) {
+    const fatal = (e && e.name === "AbortError") || (e && e.fatal) || global.__agentStopRequested || (e && e.message && /Не выбрана модель/.test(e.message));
+    if (fatal || attemptNum > AUTO_RETRY_LIMIT) throw e;
+    const errText = String((e && e.message) || e).slice(0, 800);
+    emit({ type: "text_override", text: "" }); // стираем частичный текст упавшей попытки в UI
+    emit({ type: "retry", attempt: attemptNum + 1, total: AUTO_RETRY_LIMIT + 1, error: errText });
+    finalText = "";
+    await new Promise((r) => setTimeout(r, 3000)); // пауза: провайдеры сбрасывают лимиты за секунды
+    canonical.push({
+      role: "system",
+      content:
+        "⚠️ ПРЕДЫДУЩАЯ ПОПЫТКА УПАЛА — авто-повтор " + (attemptNum + 1) + " из " + (AUTO_RETRY_LIMIT + 1) + ".\n" +
+        "Ошибка: " + errText + "\n" +
+        "Продолжай с того места, где остановился, опираясь на уже сделанное (инструменты, файлы, результаты выше). " +
+        "Не начинай заново и не повторяй выполненные шаги: сначала быстро оцени текущее состояние (например git status или чтение ключевых файлов), затем продолжи. " +
+        "Если ошибка про лимиты/токены — работай компактнее: меньше файлов целиком, чаще searchFile/semanticSearch, короче выводы.",
+    });
+    if (canonical.length > 1) {
+      const sys = canonical[0];
+      canonical = [sys, ...sanitizeToolPairs(canonical.slice(1))];
+    }
+    continue;
+  }
+  }
 }
 
 // ─────────────────────────── Окно ───────────────────────────

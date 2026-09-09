@@ -44,8 +44,9 @@
 25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
 26. Семантический поиск: semanticSearch(query) ищет по коду проекта по смыслу (стебли слов, camelCase/snake_case, BM25-ранжирование) и показывает сниппеты с номерами строк. Используй его для поиска «где находится X» и «как устроен Y» — быстрее и точнее, чем читать файлы подряд. Точный регулярный поиск — searchFile/searchProject.
 24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList).
+27. Самоизменения и OTA: перед любой правкой собственного кода (src/, assets/) сначала создай точку отката checkpointSave(label — «перед самоизменением …»). Файлы src/bootstrap.js и src/ota.js и папка применённого OTA-бандла физически заблокированы: writeFile/editFile/applyPatch вернут ошибку — не пытайся их обойти. После сборки бандла (node scripts/make-ota.js) вызови otaStatus (видно ли обновление) и otaCheck (применить); после применения — validateProject; если после обновления что-то сломалось — otaRollback.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -814,7 +815,7 @@
       type: "function",
       function: {
         name: "screenshotCapture",
-        description: "Сделать скриншот страницы по URL (невидимое окно, ждёт загрузки и отрисовки) и показать его пользователю во встроенном просмотрщике. Незаменимо для проверки вёрстки. url — полный адрес страницы.",
+        description: "Сделать скриншот страницы по URL (невидимое окно, ждёт загрузки и отрисовки), показать пользователю во встроенном просмотрщике и сохранить PNG на диск — в ответе вернётся путь к файлу. Чтобы понять, что на экране, сразу вызови analyzeImage(path: <этот путь>) — вспомогательная vision-модель вернёт текстовое описание UI. Незаменимо для проверки вёрстки. url — полный адрес страницы.",
         parameters: {
           type: "object",
           properties: { url: { type: "string", description: "URL страницы для скриншота" } },
@@ -1315,7 +1316,7 @@
       type: "function",
       function: {
         name: "screenshotDesktop",
-        description: "Скриншот ЭКРАНА или окна Windows (не страницы — для страниц есть screenshotCapture). window — необязательная подстрока заголовка окна (например «Блокнот», «chrome»); без неё снимается весь экран. Скриншот показывается пользователю во встроенном просмотрщике.",
+        description: "Скриншот ЭКРАНА или окна Windows (не страницы — для страниц есть screenshotCapture). window — необязательная подстрока заголовка окна (например «Блокнот», «chrome»); без неё снимается весь экран. Скриншот показывается пользователю и сохраняется PNG на диск — в ответе вернётся путь. Чтобы понять, что на экране, сразу вызови analyzeImage(path: <этот путь>) — вспомогательная vision-модель вернёт описание.",
         parameters: {
           type: "object",
           properties: { window: { type: "string", description: "Необязательно: подстрока заголовка окна" } },
@@ -1544,6 +1545,30 @@
           },
           required: ["query"],
         },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "otaStatus",
+        description: "Показать статус локального самообновления (OTA): включено ли, какая версия кода приложения установлена, какие папки-источники бандлов настроены. Вызывай после сборки бандла (node scripts/make-ota.js), чтобы убедиться, что приложение видит обновление.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "otaCheck",
+        description: "Проверить и применить локальное OTA-обновление (бандл из папки обновлений). Если обновление найдено — приложение перезапустится с новым кодом. Во время работы агента вернётся busy (применение заблокировано): бандл применится автоматически в течение минуты после завершения задачи.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "otaRollback",
+        description: "Откатить код приложения на предыдущую версию (если после обновления что-то сломалось). Приложение перезапустится. Нельзя вызывать во время работы агента.",
+        parameters: { type: "object", properties: {} },
       },
     },
   ];

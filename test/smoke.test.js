@@ -98,6 +98,16 @@ async function testAgentCore() {
     assert.ok(core.SYSTEM_PROMPT.includes("validateProject"), "нет validateProject в правиле 25");
   });
 
+  await test("TOOL_DEFINITIONS + SYSTEM_PROMPT: OTA-инструменты самообновления и правило 27", () => {
+    const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name).filter(Boolean);
+    for (const n of ["otaStatus", "otaCheck", "otaRollback"]) {
+      assert.ok(names.includes(n), "нет инструмента " + n);
+    }
+    assert.ok(core.SYSTEM_PROMPT.includes("27. Самоизменения и OTA"), "нет правила 27");
+    assert.ok(core.SYSTEM_PROMPT.includes("otaStatus, otaCheck, otaRollback"), "нет OTA-имён в списке инструментов");
+    assert.ok(core.SYSTEM_PROMPT.includes("src/bootstrap.js и src/ota.js"), "нет упоминания защиты критичных файлов");
+  });
+
   await test("normalizeToolName: snake_case алиасы (в т.ч. browser-*)", () => {
     assert.strictEqual(core.normalizeToolName("browserOpen"), "browserOpen");
     assert.strictEqual(core.normalizeToolName("browser_open"), "browserOpen");
@@ -831,6 +841,42 @@ async function testServer() {
   child.kill();
 }
 
+// ── 10. self-dev: защита критичной инфраструктуры самообновления ────────────
+async function testSelfDev() {
+  const selfDev = require(path.join(ROOT, "src", "self-dev.js"));
+  const appSrc = path.join(ROOT, "src");
+  const otaRoot = path.join(os.tmpdir(), "ota-protect-test", "current");
+
+  await test("self-dev: защищает bootstrap.js и ota.js приложения", () => {
+    assert.ok(selfDev.protectedSelfPath(path.join(appSrc, "bootstrap.js"), { appSrcDir: appSrc }), "bootstrap.js не защищён");
+    assert.ok(selfDev.protectedSelfPath(path.join(appSrc, "ota.js"), { appSrcDir: appSrc }), "ota.js не защищён");
+  });
+
+  await test("self-dev: защищает применённый OTA-бандл и его содержимое", () => {
+    assert.ok(selfDev.protectedSelfPath(otaRoot, { appSrcDir: appSrc, otaRoot }), "корень OTA не защищён");
+    assert.ok(selfDev.protectedSelfPath(path.join(otaRoot, "src", "main.js"), { appSrcDir: appSrc, otaRoot }), "файл внутри OTA не защищён");
+  });
+
+  await test("self-dev: обычные файлы проекта не блокируются", () => {
+    const allowed = [
+      path.join(appSrc, "main.js"),
+      path.join(appSrc, "renderer", "app.js"),
+      path.join(ROOT, "README.md"),
+      // одноимённые файлы в ЧУЖОМ проекте не под защитой
+      path.join(os.tmpdir(), "some-project", "src", "ota.js"),
+    ];
+    for (const p of allowed) {
+      assert.ok(!selfDev.protectedSelfPath(p, { appSrcDir: appSrc, otaRoot }), "неожиданно заблокирован: " + p);
+    }
+  });
+
+  await test("self-dev: сообщение об отказе содержит путь и подсказку", () => {
+    const msg = selfDev.protectedSelfPathMessage(path.join(appSrc, "ota.js"), { appSrcDir: appSrc });
+    assert.ok(msg.includes("заблокировано"), "нет слова «заблокировано»");
+    assert.ok(msg.includes("make-ota.js"), "нет подсказки про make-ota.js");
+  });
+}
+
 // ── Запуск ──────────────────────────────────────────────────────────────────
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
@@ -844,6 +890,7 @@ async function testServer() {
   await testBrowserTools();
   await testMobileBridge();
   await testServer();
+  await testSelfDev();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");
   process.exit(failed ? 1 : 0);
 })();

@@ -1288,6 +1288,12 @@
         if (ev.message) toast(ev.message);
         break;
       }
+      case "retry": {
+        // Авто-повтор после сбоя: агент упал и продолжает с сохранённым контекстом
+        const rErr = String(ev.error || "").slice(0, 200);
+        toast("🔄 Попытка " + (ev.attempt || 2) + " из " + (ev.total || 3) + " после сбоя" + (rErr ? ": " + rErr : ""));
+        break;
+      }
       case "done":
         // После завершения запуска обновляем панель git: авто-коммит мог очистить «Изменения»
         setTimeout(() => {
@@ -2315,6 +2321,9 @@
         } else if (c.name === "semanticSearch") {
           result =
             "⚠️ Семантический поиск (semanticSearch) доступен только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
+        } else if (c.name === "otaStatus" || c.name === "otaCheck" || c.name === "otaRollback") {
+          result =
+            "⚠️ Инструменты самообновления (otaStatus/otaCheck/otaRollback) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
         } else if (c.name === "applyPatch" || c.name === "gitStash" || c.name === "gitCherryPick" || c.name === "gitBlame") {
           result =
             "⚠️ Инструменты applyPatch и gitStash/gitCherryPick/gitBlame доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
@@ -2656,7 +2665,7 @@
     const box = $("vision-model-hints");
     box.innerHTML = "";
     const url = $("s-vision-url").value.trim() || settings.visionUrl || "https://openrouter.ai/api/v1";
-    const key = $("s-vision-key").value.trim() || settings.visionKey || "";
+    const key = $("s-vision-key").value.trim() || settings.visionKey || settings.openaiApiKey || "";
     box.classList.remove("hidden");
     if (!key) {
       box.innerHTML = '<span class="hint-label">Сначала укажи API-ключ вспомогательной модели.</span>';
