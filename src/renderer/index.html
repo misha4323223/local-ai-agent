@@ -142,13 +142,16 @@
         <div class="composer">
           <div id="attach-bar" class="attach-bar hidden">
             <img id="attach-thumb" alt="" />
-            <span class="attach-name">Скриншот — отправится с сообщением</span>
-            <button id="btn-attach-remove" type="button" class="btn btn-ghost btn-small" title="Убрать изображение">✕</button>
+            <span id="attach-name" class="attach-name">Скриншот — отправится с сообщением</span>
+            <button id="btn-attach-remove" type="button" class="btn btn-ghost btn-small" title="Убрать вложение">✕</button>
           </div>
           <textarea id="input" rows="1" placeholder="Напиши, что сделать..."></textarea>
+          <div id="ctx-indicator" class="ctx-indicator" title="Заполняемость контекста модели"><span id="ctx-text"></span><div id="ctx-bar" class="ctx-bar"><div id="ctx-fill" class="ctx-fill"></div></div></div>
           <div class="composer-row">
-            <span class="input-hint">Enter — отправить · Shift+Enter — новая строка</span>
+            <span class="input-hint">Enter — отправить · Shift+Enter — новая строка · Ctrl+V — вставить картинку · перетащи файл</span>
             <div class="composer-btns">
+              <input type="file" id="file-input" class="hidden" multiple accept="image/*,.txt,.js,.ts,.py,.json,.md,.html,.css,.csv,.log,.yaml,.yml,.xml,.sql,.sh,.dart,.go,.rs,.java,.cpp,.c,.rb,.php" />
+              <button id="btn-attach-file" class="btn btn-ghost btn-small" title="Прикрепить файл или изображение">📎</button>
               <button id="btn-plan" class="btn btn-ghost btn-small plan-toggle" title="Режим плана: сначала агент составит план и спросит разрешение, потом выполнит">📋 План-режим</button>
               <button id="btn-stop" class="btn btn-danger icon-btn hidden" title="Остановить">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5" /></svg>

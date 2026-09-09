@@ -457,6 +457,7 @@
     chatsData.activeId = id;
     renderSidebar();
     renderMessages();
+    setTimeout(updateCtxIndicator, 100);
     persistChats();
   }
 
@@ -3021,6 +3022,7 @@
     toast("Проект: " + (r.project && r.project.name));
     refreshProject();
     refreshProjects();
+    refreshRepo();
     refreshDevControls();
   }
 
