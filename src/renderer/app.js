@@ -33,9 +33,12 @@
   const PRESETS = {
     deepseek: { url: "https://api.deepseek.com/v1" },
     openai: { url: "https://api.openai.com/v1" },
-    groq: { url: "https://api.groq.com/openai/v1" },
+    groq: { url: "https://api.groq.com/openai/v1", model: "openai/gpt-oss-120b" },
+    cerebras: { url: "https://api.cerebras.ai/v1", model: "qwen-3-235b-a22b-instruct-2507" },
+    ollamacloud: { url: "https://ollama.com/v1", model: "gpt-oss:120b" },
     openrouter: { url: "https://openrouter.ai/api/v1" },
     nvidia: { url: "https://integrate.api.nvidia.com/v1" },
+    mistral: { url: "https://api.mistral.ai/v1", model: "devstral-2-2512" },
     yandex: { url: "https://ai.api.cloud.yandex.net/v1" },
     g4f: { url: "http://localhost:1337/v1" },
     custom: null,
@@ -44,8 +47,11 @@
     deepseek: "DeepSeek",
     openai: "OpenAI",
     groq: "Groq",
+    cerebras: "Cerebras",
+    ollamacloud: "Ollama Cloud",
     openrouter: "OpenRouter",
     nvidia: "NVIDIA NIM",
+    mistral: "Mistral Devstral",
     yandex: "Yandex AI Studio",
     g4f: "G4F",
     custom: "Свой",
@@ -2240,6 +2246,9 @@
           id: tc.id || AgentCore.genCallId(),
           name: AgentCore.normalizeToolName(tc.name),
           args: tc.args && typeof tc.args === "object" ? tc.args : {},
+          // Gemini 3.x: extra_content с thought signature нужно вернуть дословно,
+          // иначе следующий раунд упадёт с 400 (missing thought_signature).
+          ...(tc.extraContent ? { extraContent: tc.extraContent } : {}),
         };
         const sig = norm.name + "|" + JSON.stringify(norm.args);
         if (seenCalls.has(sig)) continue;
@@ -2249,11 +2258,15 @@
       apiMessages.push({
         role: "assistant",
         content: finalText || null,
-        tool_calls: calls.map((c) => ({
-          id: c.id,
-          type: "function",
-          function: { name: c.name, arguments: JSON.stringify(c.args || {}) },
-        })),
+        tool_calls: calls.map((c) => {
+          const call = {
+            id: c.id,
+            type: "function",
+            function: { name: c.name, arguments: JSON.stringify(c.args || {}) },
+          };
+          if (c.extraContent) call.extra_content = c.extraContent;
+          return call;
+        }),
       });
       for (const c of calls) {
         onEvent({ type: "tool_start", name: c.name, args: c.args });
@@ -2333,6 +2346,7 @@
     // приветственного экрана и переключил бы их «активный» вид.
     document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.toggle("active", c.dataset.preset === p));
     if (PRESETS[p] && PRESETS[p].url) $("s-openai-url").value = PRESETS[p].url;
+    if (PRESETS[p] && PRESETS[p].model) $("s-openai-model").value = PRESETS[p].model;
     // Поле «Yandex folder ID» — только для Yandex AI Studio
     const yandexField = $("yandex-project-field");
     if (yandexField) yandexField.classList.toggle("hidden", p !== "yandex");

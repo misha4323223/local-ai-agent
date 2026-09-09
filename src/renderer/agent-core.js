@@ -1426,6 +1426,28 @@
   // не превышала budget, сохраняя самые свежие сообщения (диалог идёт от старых к новым).
   // Гарантирует: никогда не выкидываем последнее user-сообщение и не разрываем
   // tool-цепочки в хвосте (assistant tool_calls + его результаты остаются целиком).
+  // Убирает «осиротевшие» tool-сообщения: role:"tool" допустим только сразу после
+  // assistant с tool_calls. После обрезки контекста хвост может начинаться с tool
+  // (или содержать tool без своего assistant) — такие сообщения ломают
+  // OpenAI-совместимые API (400 wrong_api_format «tool must be a response to tool_calls»).
+  function sanitizeToolPairs(messages) {
+    const out = [];
+    let expectTool = false;
+    for (const m of messages) {
+      if (m && m.role === "tool") {
+        if (!expectTool) continue; // сирота — выбрасываем
+        out.push(m);
+        continue;
+      }
+      expectTool = false;
+      if (m && m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+        expectTool = true;
+      }
+      out.push(m);
+    }
+    return out;
+  }
+
   function trimConversation(messages, budget) {
     if (!Array.isArray(messages) || !messages.length) return messages || [];
     const limit = Math.max(1500, budget || contextBudget("openai"));
@@ -1438,7 +1460,7 @@
         break;
       }
     }
-    if (cutFrom === 0) return messages;
+    if (cutFrom === 0) return sanitizeToolPairs(messages);
     // Хвост не трогаем: срез не заходит за последнее user-сообщение, чтобы текущий
     // виток диалога (включая результаты инструментов) остался целым.
     let lastUser = -1;
@@ -1453,7 +1475,13 @@
     let kept = messages.slice(start);
     // Не оставляем «висящий» assistant/token в начале среза без его вопроса
     while (kept.length > 1 && kept[0] && kept[0].role !== "user") kept = kept.slice(1);
-    if (!kept.length) kept = messages.slice(-2);
+    // Санитайзер пар assistant(tool_calls)→tool: выкидывает осиротевшие tool-сообщения
+    // (в т.ч. одиночный tool, оставшийся после среза цепочки инструментов).
+    kept = sanitizeToolPairs(kept);
+    if (!kept.length) {
+      kept = sanitizeToolPairs(messages.slice(-2));
+    }
+    if (!kept.length && lastUser >= 0) kept = [messages[lastUser]];
     return kept;
   }
 
@@ -2129,11 +2157,17 @@
   // Веб-предпросмотр: Yandex AI Studio не отдаёт CORS-заголовки — браузер блокирует
   // прямые запросы («Failed to fetch»). В браузерном режиме база переписывается на
   // локальный прокси preview-сервера (/api/llm/...), который ходит в Яндекс сам.
+  // Веб-предпросмотр: Yandex AI Studio и Ollama Cloud не отдают CORS-заголовки —
+  // браузер блокирует прямые запросы («Failed to fetch»). В браузерном режиме база
+  // переписывается на локальный прокси preview-сервера (/api/llm/...), который ходит
+  // к провайдеру сам (server.js разрешает внешние https, внутренние сети — 403).
   function proxiedBase(base) {
     const b = String(base || "");
+    const local =
+      /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i;
     if (
       typeof location !== "undefined" && location && location.origin &&
-      /ai\.api\.cloud\.yandex\.net/i.test(b)
+      /^https:\/\//i.test(b) && !local.test(b)
     ) {
       return location.origin + "/api/llm/" + encodeURIComponent(b);
     }
@@ -2381,12 +2415,20 @@
     // Аккумуляция по индексу блока (OpenAI: tool_calls по index; Anthropic: content_block по index)
     const accum = new Map();
     const seenOllamaCalls = new Set();
+    // Gemini 3.x: шифрованная подпись мысли (thought signature) приходит в
+    // extra_content.google.thought_signature — на самом tool-call или отдельной дельтой.
+    // Её нужно вернуть модели дословно в следующем запросе, иначе API отвечает 400
+    // «Function call is missing a thought_signature in functionCall parts».
+    let pendingExtra = null;
     const finalizeAccum = () => {
       for (const item of accum.values()) {
         if (!item.name) continue;
-        if (onToolCall) onToolCall({ id: item.id || genCallId(), name: item.name, args: jsonArgs(item.args) });
+        const call = { id: item.id || genCallId(), name: item.name, args: jsonArgs(item.args) };
+        if (item.extra) call.extraContent = item.extra;
+        if (onToolCall) onToolCall(call);
       }
       accum.clear();
+      pendingExtra = null;
     };
     const firstMs = firstByteTimeoutMs || 90000;
     const idleMs = idleTimeoutMs || 60000;
@@ -2478,16 +2520,27 @@
             if (delta.content && onText) onText(delta.content);
             // DeepSeek и другие OpenAI-совместимые шлют рассуждения отдельным полем
             if (delta.reasoning_content && onThinking) onThinking(delta.reasoning_content);
+            // Gemini может прислать подпись мысли отдельным полем delta.extra_content
+            // (до или вместо поля на самом tool-call) — запоминаем и подставляем вызовам без своей.
+            if (delta.extra_content && delta.extra_content.google && delta.extra_content.google.thought_signature) {
+              pendingExtra = delta.extra_content;
+            }
             if (Array.isArray(delta.tool_calls)) {
               for (const tc of delta.tool_calls) {
                 const i = tc.index || 0;
-                const cur = accum.get(i) || { id: "", name: "", args: "" };
+                const cur = accum.get(i) || { id: "", name: "", args: "", extra: null };
                 if (tc.id) cur.id = tc.id;
                 const fn = tc.function || {};
                 if (fn.name) cur.name = fn.name;
                 if (fn.arguments) cur.args += fn.arguments;
+                if (tc.extra_content && tc.extra_content.google && tc.extra_content.google.thought_signature) {
+                  cur.extra = tc.extra_content;
+                } else if (pendingExtra && !cur.extra) {
+                  cur.extra = pendingExtra;
+                }
                 accum.set(i, cur);
               }
+              pendingExtra = null;
             }
           } else if (provider === "anthropic") {
             const type = obj.type;

@@ -3184,6 +3184,9 @@ async function runAi(settings, messages, win, opts) {
         id: tc.id || genCallId(),
         name: normalizeToolName(tc.name),
         args: tc.args && typeof tc.args === "object" ? tc.args : {},
+        // Gemini 3.x: extra_content с thought signature нужно вернуть дословно,
+        // иначе следующий раунд упадёт с 400 (missing thought_signature).
+        ...(tc.extraContent ? { extraContent: tc.extraContent } : {}),
       };
       const sig = norm.name + "|" + JSON.stringify(norm.args);
       if (seenCalls.has(sig)) continue;
@@ -3194,11 +3197,15 @@ async function runAi(settings, messages, win, opts) {
     canonical.push({
       role: "assistant",
       content: finalText || null,
-      tool_calls: calls.map((c) => ({
-        id: c.id,
-        type: "function",
-        function: { name: c.name, arguments: JSON.stringify(c.args || {}) },
-      })),
+      tool_calls: calls.map((c) => {
+        const call = {
+          id: c.id,
+          type: "function",
+          function: { name: c.name, arguments: JSON.stringify(c.args || {}) },
+        };
+        if (c.extraContent) call.extra_content = c.extraContent;
+        return call;
+      }),
     });
 
     for (const c of calls) {

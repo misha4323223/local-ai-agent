@@ -34,10 +34,24 @@ function handleApi(url, res, req) {
     AgentCore.webFetchPage(u).then((t) => jsonOk(res, t)).catch((e) => jsonOk(res, "Ошибка загрузки: " + e.message));
     return true;
   }
-  // Прокси для LLM-провайдеров без CORS (Yandex AI Studio и др.): браузер не может
-  // ходить на них напрямую — запрос идёт через preview-сервер. Формат пути:
+  // Прокси для LLM-провайдеров без CORS (Yandex AI Studio, Ollama Cloud и др.): браузер не
+  // может ходить на них напрямую — запрос идёт через preview-сервер. Формат пути:
   //   /api/llm/<encodeURIComponent(базовый URL)>/<остальной путь>?<query>
   // Заголовки Authorization / OpenAI-Project / Content-Type пробрасываются как есть.
+  // Разрешены только внешние https-адреса; внутренние сети блокируются (защита от SSRF).
+  function proxyTargetAllowed(target) {
+    if (!/^https:\/\//i.test(target)) return false;
+    try {
+      const u = new URL(target);
+      const h = (u.hostname || "").toLowerCase().replace(/^\[(.*)\]$/, "$1");
+      if (!h || h === "localhost" || h.endsWith(".localhost") || h === "0.0.0.0" || h === "::1") return false;
+      if (/^(127\.|10\.|192\.168\.|169\.254\.)/.test(h)) return false;
+      if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
   if (url.pathname.startsWith("/api/llm/")) {
     if (req.method === "OPTIONS") {
       res.writeHead(204, {
@@ -64,7 +78,7 @@ function handleApi(url, res, req) {
       return true;
     }
     const target = base + rest.slice(slash) + (url.search || "");
-    if (!/^https:\/\/ai\.api\.cloud\.yandex\.net\//i.test(target)) {
+    if (!proxyTargetAllowed(target)) {
       res.writeHead(403);
       res.end("Forbidden proxy target");
       return true;

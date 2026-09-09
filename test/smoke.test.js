@@ -96,6 +96,160 @@ async function testAgentCore() {
     const trimmed = core.trimConversation(msgs, 1000);
     assert.ok(Array.isArray(trimmed), "trimConversation вернул не массив");
   });
+
+  await test("trimConversation: осиротевшие tool-сообщения выбрасываются", () => {
+    // Цепочка инструментов без нового user-сообщения: после обрезки хвост может
+    // остаться без assistant(tool_calls) — такие tool-сообщения валидны только сразу
+    // после assistant с tool_calls, иначе провайдер отвечает 400 wrong_api_format.
+    const msgs = [
+      { role: "user", content: "сделай" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "runCommand", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "c1", content: "ok" },
+      { role: "assistant", content: null, tool_calls: [{ id: "c2", type: "function", function: { name: "readFile", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "c2", content: "file" },
+      { role: "assistant", content: "готово", tool_calls: null },
+    ];
+    // Маленький бюджет — срез придётся на середину цепочки инструментов
+    const trimmed = core.trimConversation(msgs, 1500);
+    const roles = trimmed.map((m) => m.role);
+    // Никакое tool-сообщение не должно идти первым или без предшествующего assistant с tool_calls
+    assert.notStrictEqual(roles[0], "tool", "история начинается с tool: " + JSON.stringify(roles));
+    for (let i = 0; i < roles.length; i++) {
+      if (roles[i] === "tool") {
+        const prev = trimmed[i - 1];
+        assert.ok(
+          prev && prev.role === "assistant" && Array.isArray(prev.tool_calls) && prev.tool_calls.length > 0,
+          "tool без предшествующего assistant(tool_calls) на позиции " + i + ": " + JSON.stringify(roles)
+        );
+      }
+    }
+  });
+
+  await test("trimConversation: длинная цепочка инструментов без нового user валидна", () => {
+    // Многораундовый агентный цикл: после исходного user идут только пары
+    // assistant(tool_calls) → tool без новых user-сообщений. Срез падает на середину
+    // цепочки — санитайзер не должен оставить tool без предшествующего assistant.
+    const msgs = [{ role: "user", content: "сделай всё" }];
+    for (let i = 1; i <= 12; i++) {
+      msgs.push({
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "c" + i, type: "function", function: { name: "runCommand", arguments: "{}" } }],
+      });
+      msgs.push({ role: "tool", tool_call_id: "c" + i, content: "result ".repeat(60) });
+    }
+    const trimmed = core.trimConversation(msgs, 1500);
+    const roles = trimmed.map((m) => m.role);
+    assert.ok(roles.length >= 1, "история пуста после обрезки");
+    assert.notStrictEqual(roles[0], "tool", "история начинается с tool: " + JSON.stringify(roles));
+    for (let i = 0; i < roles.length; i++) {
+      if (roles[i] === "tool") {
+        const prev = trimmed[i - 1];
+        assert.ok(
+          prev && prev.role === "assistant" && Array.isArray(prev.tool_calls) && prev.tool_calls.length > 0,
+          "tool без предшествующего assistant(tool_calls) на позиции " + i + ": " + JSON.stringify(roles)
+        );
+      }
+    }
+  });
+
+  await test("Gemini: thought signature захватывается из стрима (extra_content)", async () => {
+    // SSE-чанк как его шлёт OpenAI-совместимый эндпоинт Gemini 3.x:
+    // tool-call несёт extra_content.google.thought_signature.
+    const sse =
+      "data: " +
+      JSON.stringify({
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call-1",
+                  type: "function",
+                  extra_content: { google: { thought_signature: "SIG123==" } },
+                  function: { name: "runCommand", arguments: '{"command":"pwd"}' },
+                },
+              ],
+            },
+          },
+        ],
+      }) +
+      "\n" +
+      "data: [DONE]\n";
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sse));
+        controller.close();
+      },
+    });
+    const calls = [];
+    await core.consumeProviderStream({
+      response: { body: stream },
+      provider: "openai",
+      onToolCall: (tc) => calls.push(tc),
+    });
+    assert.strictEqual(calls.length, 1, "не получен вызов инструмента");
+    assert.strictEqual(calls[0].name, "runCommand");
+    assert.ok(calls[0].extraContent, "нет extraContent у вызова");
+    assert.strictEqual(calls[0].extraContent.google.thought_signature, "SIG123==");
+  });
+
+  await test("Gemini: assistant tool_calls эхуют extra_content в запрос", () => {
+    const req = core.buildChatRequest(
+      { provider: "openai", openaiUrl: "https://api.openai.com/v1", openaiApiKey: "k" },
+      {
+        model: "gemini-3.8-flash",
+        messages: [
+          { role: "user", content: "hi" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "call-1", type: "function", function: { name: "runCommand", arguments: "{}" }, extra_content: { google: { thought_signature: "SIG123==" } } },
+            ],
+          },
+          { role: "tool", tool_call_id: "call-1", content: "ok" },
+        ],
+      }
+    );
+    const body = JSON.parse(req.body);
+    const asst = body.messages[1];
+    assert.ok(asst.tool_calls && asst.tool_calls[0], "нет tool_calls у ассистента");
+    assert.ok(asst.tool_calls[0].extra_content, "extra_content потерян при эхе");
+    assert.strictEqual(asst.tool_calls[0].extra_content.google.thought_signature, "SIG123==");
+  });
+
+  await test("Gemini: signature отдельной дельтой достаётся tool-call'у", async () => {
+    // Google может прислать подпись отдельным delta.extra_content до tool_calls.
+    const sse =
+      "data: " +
+      JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", extra_content: { google: { thought_signature: "SIG456==" } } } }] }) +
+      "\n" +
+      "data: " +
+      JSON.stringify({
+        choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call-2", type: "function", function: { name: "listFiles", arguments: "{}" } }] } }],
+      }) +
+      "\n" +
+      "data: [DONE]\n";
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sse));
+        controller.close();
+      },
+    });
+    const calls = [];
+    await core.consumeProviderStream({
+      response: { body: stream },
+      provider: "openai",
+      onToolCall: (tc) => calls.push(tc),
+    });
+    assert.strictEqual(calls.length, 1);
+    assert.ok(calls[0].extraContent, "нет extraContent (отдельная дельта)");
+    assert.strictEqual(calls[0].extraContent.google.thought_signature, "SIG456==");
+  });
 }
 
 // ── 1b. app-ui-tools ─────────────────────────────────────────────────────────
@@ -337,8 +491,14 @@ async function testServer() {
     assert.ok(ok, "сервер не поднялся");
   });
 
-  await test("server.js: /api/llm с чужим хостом → 403", async () => {
-    const enc = encodeURIComponent("https://evil.example.com");
+  await test("server.js: /api/llm с внутренним хостом → 403", async () => {
+    const enc = encodeURIComponent("https://127.0.0.1:1234");
+    const r = await get(port, "/api/llm/" + enc + "/v1/chat/completions");
+    assert.strictEqual(r.status, 403, "статус " + r.status + ": " + r.body.slice(0, 80));
+  });
+
+  await test("server.js: /api/llm с http → 403", async () => {
+    const enc = encodeURIComponent("http://ollama.com");
     const r = await get(port, "/api/llm/" + enc + "/v1/chat/completions");
     assert.strictEqual(r.status, 403, "статус " + r.status + ": " + r.body.slice(0, 80));
   });
