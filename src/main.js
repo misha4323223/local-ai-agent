@@ -2128,6 +2128,27 @@ async function executeTool(name, args, settings) {
           ? "✅ " + resP.message
           : "Ошибка публикации: " + resP.error;
       }
+      case "gitInit": {
+        const dir = args.directory ? resolvePath(args.directory, settings) : agentWorkDir(settings);
+        if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return "Ошибка: папка не найдена: " + dir;
+        const s = loadSettings();
+        const check = await runGit(dir, ["rev-parse", "--is-inside-work-tree"], s);
+        if (check.ok && String(check.out || "").trim() === "true") {
+          return "Эта папка уже git-репозиторий: " + dir + "\nСостояние смотри через gitStatus.";
+        }
+        let initR = await runGit(dir, ["init", "-b", "main"], s);
+        if (!initR.ok) initR = await runGit(dir, ["init"], s); // старые git без -b
+        if (!initR.ok) return "Ошибка git init: " + initR.err;
+        const msg = String(args.message || "").trim();
+        if (msg) {
+          const addR = await runGit(dir, ["add", "-A"], s);
+          if (!addR.ok) return "Репозиторий создан, но первый коммит не удался: " + addR.err;
+          const commitR = await runGit(dir, ["-c", "user.name=AI Agent", "-c", "user.email=ai-agent@local", "commit", "-m", msg], s);
+          if (!commitR.ok) return "Репозиторий создан, но первый коммит не удался: " + commitR.err;
+          return "✅ Создан локальный git-репозиторий: " + dir + " (ветка main), первый коммит «" + msg + "» сделан.\nGitHub НЕ задействован — это чисто локальный репозиторий.\nДальше можно: gitCommit — новые коммиты, gitBranch — ветки, gitPush — отправить в удалённый репозиторий (когда пользователь разрешит).";
+        }
+        return "✅ Создан локальный git-репозиторий: " + dir + " (ветка main).\nGitHub НЕ задействован — это чисто локальный репозиторий.\nДальше можно: gitCommit(message) — сделать первый коммит, gitBranch — ветки, gitPush — отправить в удалённый репозиторий (когда пользователь разрешит).";
+      }
       case "gitPull": {
         const r = await runGit(agentWorkDir(settings), ["pull"], settings);
         return r.ok ? (r.out || "Готово (без вывода).") : "Ошибка git: " + r.err;
@@ -3161,7 +3182,7 @@ async function runAi(settings, messages, win, opts) {
   // скриншот → описание → кодер работает с текстом (его модель может не видеть картинки).
   let runHistory = trimmedHistory;
   const vcfg = auxConfig(settings);
-  if (vcfg.enabled && vcfg.auto && vcfg.visionModel && vcfg.key && vcfg.url && !planMode) {
+  if (vcfg.enabled && vcfg.auto && vcfg.visionModel && vcfg.url && !planMode) {
     let target = -1;
     for (let i = runHistory.length - 1; i >= 0; i--) {
       const m = runHistory[i];
@@ -5069,6 +5090,21 @@ ipcMain.handle("git:restore", async (_e, dir) => {
   if (!d) return { ok: false, error: "Папка не найдена" };
   const r = await runGit(d, ["restore", "."], loadSettings());
   return r.ok ? { ok: true, out: "Изменения отменены." } : { ok: false, error: r.err };
+});
+
+// Мягкая отмена последнего коммита: reset --soft HEAD~1 — изменения коммита
+// возвращаются в рабочее дерево как незакоммиченные, ничего не теряется.
+ipcMain.handle("git:undoLastCommit", async (_e, dir) => {
+  const d = sanitizeDir(dir);
+  if (!d) return { ok: false, error: "Папка не найдена" };
+  const s = loadSettings();
+  const log = await runGit(d, ["log", "-1", "--pretty=%h"], s);
+  if (!log.ok || !String(log.out || "").trim()) {
+    return { ok: false, error: "В истории нет коммитов для отмены" };
+  }
+  const r = await runGit(d, ["reset", "--soft", "HEAD~1"], s);
+  if (!r.ok) return { ok: false, error: r.err || "Не удалось отменить коммит" };
+  return { ok: true, out: "Последний коммит " + String(log.out).trim() + " отменён (reset --soft): его изменения вернулись как незакоммиченные, ничего не потеряно." };
 });
 
 // Дифф файла (или пометка, что файл новый и не отслеживается)

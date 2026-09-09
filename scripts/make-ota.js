@@ -71,6 +71,18 @@ function bumpPatch(v) {
   return m[1] + "." + m[2] + "." + (parseInt(m[3], 10) + 1);
 }
 
+function versionGt(a, b) {
+  const A = String(a || "0.0.0").match(/^(\d+)\.(\d+)\.(\d+)/);
+  const B = String(b || "0.0.0").match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!A || !B) return false;
+  for (let i = 1; i <= 3; i++) {
+    const x = parseInt(A[i], 10);
+    const y = parseInt(B[i], 10);
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
 function main() {
   let pkg;
   try {
@@ -89,7 +101,13 @@ function main() {
 
   const prev = readManifest(OUT);
   let version = VER_ARG || pkg.version || "1.0.0";
-  if (!VER_ARG && prev && prev.version === version) version = bumpPatch(version);
+  if (!VER_ARG && prev) {
+    // Гарантия: без --version новая версия ВСЕГДА строго выше предыдущего манифеста.
+    // Раньше при pkg.version (1.0.0) ≠ prev.version (например 1.0.21) бандл собирался
+    // с версией 1.0.0 — приложение видело версию ниже установленной и молча
+    // игнорировало обновление (findCandidate требует versionGt).
+    version = bumpPatch(versionGt(prev.version, version) ? prev.version : version);
+  }
 
   const filesB64 = {};
   let bytes = 0;

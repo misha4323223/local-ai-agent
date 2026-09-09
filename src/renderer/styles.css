@@ -1177,6 +1177,15 @@ body.resizing-x { cursor: col-resize; user-select: none; }
 .change-name { flex: 1; min-width: 0; font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .change-item:hover .change-name { color: var(--text); }
 
+/* Строка нового файла в списке изменений — заметнее */
+.change-item.untracked-row { background: rgba(34, 211, 238, 0.08); border-color: rgba(34, 211, 238, 0.35); }
+.change-item.untracked-row:hover { background: rgba(34, 211, 238, 0.14); }
+
+/* Подсветка git-статуса в дереве файлов: 🆕 новый, ✏️ изменённый */
+.tree-row.file.tree-new .tree-name { color: #6ee7a8; }
+.tree-row.file.tree-mod .tree-name { color: #e3b341; }
+.tree-mark { margin-left: 6px; font-size: 11px; flex-shrink: 0; }
+
 /* ─── Дифф в просмотре ─── */
 .diff-file-head { color: var(--accent-2); font-size: 12px; padding: 6px 16px; font-weight: 600; }
 .diff-line {

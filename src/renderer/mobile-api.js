@@ -121,6 +121,7 @@
     gitRevert: invoke("git:revert"),
     gitResetHard: invoke("git:resetHard"),
     gitRestore: invoke("git:restore"),
+    gitUndoLastCommit: invoke("git:undoLastCommit"),
     gitClone: invoke("git:clone"),
     gitDiff: invoke("git:diff"),
     gitCommit: invoke("git:commit"),

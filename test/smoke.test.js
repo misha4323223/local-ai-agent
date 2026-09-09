@@ -83,6 +83,15 @@ async function testAgentCore() {
     assert.ok(names.includes("semanticSearch"), "нет инструмента semanticSearch");
   });
 
+  await test("TOOL_DEFINITIONS + алиасы: gitInit (репозиторий без GitHub)", () => {
+    const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name).filter(Boolean);
+    assert.ok(names.includes("gitInit"), "нет инструмента gitInit");
+    assert.strictEqual(core.normalizeToolName("git_init"), "gitInit");
+    assert.strictEqual(core.normalizeToolName("gitinit"), "gitInit");
+    assert.strictEqual(core.normalizeToolName("init_repo"), "gitInit");
+    assert.strictEqual(core.normalizeToolName("create_repo"), "gitInit");
+  });
+
   await test("SYSTEM_PROMPT: правила 21-23 (браузер, своё окно, остановка)", () => {
     assert.ok(core.SYSTEM_PROMPT.includes("21. Браузер (видимое окно Chromium)"), "нет правила 21");
     assert.ok(core.SYSTEM_PROMPT.includes("22. СВОЁ окно приложения (app-инструменты)"), "нет правила 22");

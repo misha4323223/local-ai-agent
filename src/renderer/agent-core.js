@@ -46,7 +46,7 @@
 24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList).
 27. Самоизменения и OTA: перед любой правкой собственного кода (src/, assets/) сначала создай точку отката checkpointSave(label — «перед самоизменением …»). Файлы src/bootstrap.js и src/ota.js и папка применённого OTA-бандла физически заблокированы: writeFile/editFile/applyPatch вернут ошибку — не пытайся их обойти. После сборки бандла (node scripts/make-ota.js) вызови otaStatus (видно ли обновление) и otaCheck (применить); после применения — validateProject; если после обновления что-то сломалось — otaRollback.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -163,6 +163,21 @@
     {
       type: "function",
       function: {
+        name: "gitInit",
+        description: "Создать НОВЫЙ ЛОКАЛЬНЫЙ git-репозиторий в папке (git init, ветка main) — БЕЗ GitHub и без сети. Удобно для нового проекта: файлы уже созданы, теперь зафиксировать их в git локально. directory — (необязательно) папка проекта, по умолчанию рабочая директория; message — (необязательно) текст первого коммита: если задан, сразу делается первый коммит всех файлов. Для публикации позже есть gitPublish/gitPush.",
+        parameters: {
+          type: "object",
+          properties: {
+            directory: { type: "string", description: "Папка, где создать репозиторий (по умолчанию — рабочая директория)" },
+            message: { type: "string", description: "Необязательно: сообщение первого коммита" },
+          },
+          required: [],
+        },
+        },
+      },
+      {
+        type: "function",
+        function: {
         name: "gitPull",
         description: "Забрать изменения из удалённого репозитория (git pull).",
         parameters: { type: "object", properties: {} },
@@ -2121,6 +2136,15 @@
     compare_branches: "gitDiff",
     branch_diff: "gitDiff",
     git_undo_last_commit: "gitUndoLastCommit",
+    git_init: "gitInit",
+    gitinit: "gitInit",
+    init_repo: "gitInit",
+    initrepo: "gitInit",
+    create_repo: "gitInit",
+    createrepo: "gitInit",
+    new_repo: "gitInit",
+    local_repo: "gitInit",
+    init_git: "gitInit",
     gitundolastcommit: "gitUndoLastCommit",
     undo_commit: "gitUndoLastCommit",
     soft_reset: "gitUndoLastCommit",
@@ -2860,7 +2884,7 @@
           },
         ],
       }),
-      signal: AbortSignal.timeout(180000),
+      signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(180000) : undefined,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error("Vision: " + readApiError(res, data));
@@ -2879,7 +2903,7 @@
       method: "POST",
       headers: apiHeaders("openai", cfg.key, false, cfg.project ? { "OpenAI-Project": cfg.project } : null),
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(300000),
+      signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(300000) : undefined,
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error("Генерация изображения: " + readApiError(res, data));

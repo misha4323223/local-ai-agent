@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld("api", {
   gitRevert: (dir, hash) => ipcRenderer.invoke("git:revert", dir, hash),
   gitResetHard: (dir, hash) => ipcRenderer.invoke("git:resetHard", dir, hash),
   gitRestore: (dir) => ipcRenderer.invoke("git:restore", dir),
+  gitUndoLastCommit: (dir) => ipcRenderer.invoke("git:undoLastCommit", dir),
   gitClone: (base, url) => ipcRenderer.invoke("git:clone", base, url),
   gitDiff: (dir, file) => ipcRenderer.invoke("git:diff", dir, file),
   gitCommit: (dir, message) => ipcRenderer.invoke("git:commit", dir, message),

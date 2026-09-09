@@ -398,8 +398,10 @@
   function getActiveChat() {
     return chatsData.chats.find((c) => c.id === chatsData.activeId) || null;
   }
-  function createChat() {
-    const c = { id: uid(), title: "Новый чат", projectId: settings.activeProjectId || "", createdAt: Date.now(), messages: [] };
+  function createChat(opts) {
+    opts = opts || {};
+    const c = { id: uid(), title: opts.title || "Новый чат", projectId: settings.activeProjectId || "", createdAt: Date.now(), messages: [] };
+    if (opts.contextMsg) c.messages.push({ id: uid(), role: "system", content: opts.contextMsg, createdAt: Date.now() });
     chatsData.chats.unshift(c);
     chatsData.activeId = c.id;
     renderSidebar();
@@ -2772,6 +2774,24 @@
   $("btn-new-chat").onclick = () => {
     if (!streaming) createChat();
   };
+  $("btn-continue-chat").onclick = () => {
+    if (streaming) return;
+    const prev = getActiveChat();
+    if (!prev || !prev.messages.length) { createChat(); return; }
+    // Берём последний ответ агента как контекст
+    let lastAssistant = "";
+    for (let i = prev.messages.length - 1; i >= 0; i--) {
+      const m = prev.messages[i];
+      if (m && m.role === "assistant" && m.content) {
+        const t = typeof m.content === "string" ? m.content : (m.content || []).filter((p) => p && p.type === "text").map((p) => p.text || "").join("\n");
+        if (t.trim()) { lastAssistant = t.trim(); break; }
+      }
+    }
+    // Плюс заголовок/тему предыдущего чата
+    const title = prev.title || "";
+    const ctx = "ПРОДОЛЖЕНИЕ ПРЕДЫДУЩЕГО ЧАТА\n" + (title ? "Тема/задача: " + title + "\n" : "") + (lastAssistant ? "\nПоследний ответ агента:\n" + lastAssistant.slice(0, 3000) : "\n(Предыдущий чат был пуст)");
+    createChat({ contextMsg: ctx, title: title ? title + " (продолжение)" : "Новый чат" });
+  };
   $("btn-settings").onclick = openSettings;
   $("model-badge").onclick = toggleModelPopup;
   $("mp-close").onclick = closeModelPopup;
@@ -2891,6 +2911,7 @@
   // ─────────────── Панель проекта: файлы + коммиты ───────────────
   let panelTab = "files";
   let repoRoot = null;
+  let treeGitStatus = null; // rel-путь → "new" | "mod" для подсветки дерева
   const treeLoading = new Set();
   const pathSep = isElectron && navigator.platform && navigator.platform.includes("Win") ? "\\" : "/";
 
@@ -3022,6 +3043,19 @@
       tree.innerHTML = '<div class="tree-empty">Нажми 📁, чтобы выбрать рабочую папку, или клонируй репозиторий ниже.</div>';
       return;
     }
+    // Карта git-статусов (для подсветки новых/изменённых файлов в дереве):
+    // rel-путь → "new" (не отслеживается) | "mod" (изменён/в индексе).
+    treeGitStatus = {};
+    if (isElectron && repoRoot) {
+      try {
+        const st = await api.gitStatus(repoRoot);
+        if (st && st.ok) {
+          for (const f of st.untracked) treeGitStatus[f.replace(/\\/g, "/")] = "new";
+          for (const f of st.staged) treeGitStatus[f.replace(/\\/g, "/")] = "mod";
+          for (const f of st.unstaged) treeGitStatus[f.replace(/\\/g, "/")] = "mod";
+        }
+      } catch {}
+    }
     const node = document.createElement("div");
     node.className = "tree-node";
     const row = document.createElement("div");
@@ -3122,6 +3156,21 @@
       row.appendChild(caret);
       row.appendChild(icon);
       row.appendChild(name);
+      // Подсветка git-статуса: 🆕 новый файл, ✏️ изменённый
+      if (treeGitStatus) {
+        const rel = full.startsWith(repoRoot + "/") || full.startsWith(repoRoot + "\\")
+          ? full.slice(repoRoot.length + 1).replace(/\\/g, "/")
+          : null;
+        const kind = rel && treeGitStatus[rel];
+        if (kind) {
+          row.classList.add(kind === "new" ? "tree-new" : "tree-mod");
+          const mark = document.createElement("span");
+          mark.className = "tree-mark";
+          mark.textContent = kind === "new" ? "🆕" : "✏️";
+          mark.title = kind === "new" ? "Новый файл (ещё не в git)" : "Изменён относительно последнего коммита";
+          row.insertBefore(mark, name.nextSibling);
+        }
+      }
       const editBtn = document.createElement("button");
       editBtn.textContent = "✎";
       editBtn.title = "Открыть и редактировать";
@@ -3551,6 +3600,20 @@
     summaryEl.textContent = parts.join(" · ");
     summaryEl.title = "git status";
 
+    if (log && log.ok && log.commits.length) {
+      const bUndo = document.createElement("button");
+      bUndo.className = "btn btn-small";
+      bUndo.textContent = "↩ Отменить последний коммит";
+      bUndo.title = "Безопасно (git reset --soft HEAD~1): последний коммит убирается, а его изменения возвращаются как незакоммиченные — ничего не теряется.";
+      bUndo.onclick = () =>
+        confirmModal(
+          "Отменить последний коммит?",
+          "Коммит «" + log.commits[0].message.slice(0, 80) + "» будет убран из истории, а его изменения вернутся в рабочую папку как незакоммиченные.\nНичего не удаляется — можно закоммитить заново.",
+          doUndoLastCommit
+        );
+      actionsEl.appendChild(bUndo);
+    }
+
     if (st.staged.length || st.unstaged.length) {
       const b = document.createElement("button");
       b.className = "btn btn-danger btn-small";
@@ -3611,10 +3674,10 @@
       listEl.appendChild(gTitle);
       for (const f of g.items) {
         const row = document.createElement("div");
-        row.className = "change-item";
+        row.className = "change-item" + (g.cls === "untracked" ? " untracked-row" : "");
         const badge = document.createElement("span");
         badge.className = "change-status " + g.cls;
-        badge.textContent = g.cls === "staged" ? "staged" : g.cls === "untracked" ? "новый" : "изменён";
+        badge.textContent = g.cls === "staged" ? "staged" : g.cls === "untracked" ? "+ новый" : "изменён";
         const nm = document.createElement("span");
         nm.className = "change-name";
         nm.textContent = f;
@@ -3846,6 +3909,12 @@
   async function doRestore() {
     const r = await api.gitRestore(repoRoot);
     toastShort(r && r.ok ? "✅ " + (r.out || "Изменения отменены") : "❌ " + ((r && r.error) || "Ошибка"));
+    refreshRepo();
+  }
+
+  async function doUndoLastCommit() {
+    const r = await api.gitUndoLastCommit(repoRoot);
+    toastShort(r && r.ok ? "✅ " + (r.out || "Коммит отменён") : "❌ " + ((r && r.error) || "Ошибка"));
     refreshRepo();
   }
 
