@@ -24,6 +24,8 @@ const {
   sanitizeToolPairs,
   truncateText,
   webSearchDDG,
+  webSearch,
+  classifyKeyError,
   webFetchPage,
   // вспомогательная модель: зрение + генерация изображений
   auxConfig,
@@ -50,6 +52,7 @@ const secrets = require("./secrets.js"); // секреты: ключи, токе
 const agentStore = require("./agent-store.js"); // память проекта (заметки) и точки отката (чекпоинты)
 const unifiedPatch = require("./unified-patch.js"); // применение unified diff (applyPatch)
 const codeIndex = require("./code-index.js"); // семантический индекс кода (BM25 + стемминг)
+const yandexCloud = require("./yandex-cloud.js"); // Yandex Cloud REST API: авторизация, дашборд, создание ресурсов
 secrets.init(path.join(app.getPath("userData"), "secrets.json"));
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
 const ipcHandlerMap = new Map();
@@ -97,6 +100,7 @@ const DEFAULT_SETTINGS = {
   visionKey: "",
   visionModel: "",
   imageModel: "",
+  serperApiKey: "", // ключ Serper — усиленный Google-поиск для агента (webSearch)
   activeProjectId: "", // id активного проекта (его dir = workingDir)
   // Локальный self-update (OTA): агент собирает бандл (scripts/make-ota.js), приложение применяет на ходу
   otaEnabled: true,
@@ -105,6 +109,13 @@ const DEFAULT_SETTINGS = {
   openaiProfiles: [],
   openaiActiveProfile: "", // id активного подключения ("" — не выбрано)
   autoSwitchProfiles: false, // при ошибке ключа/баланса/лимита — авто-переключение на следующее подключение
+
+  // Yandex Cloud (REST API): авторизация (OAuth-токен — в secrets.json), каталог, разрешения агента
+  ycCloudId: "", // id облака
+  ycFolderId: "", // id каталога (folder), с которым работает дашборд и агент
+  ycFolderName: "", // имя каталога для отображения
+  ycAllowAgentCreate: false, // агенту ЗАПРЕЩЕНО создавать ресурсы, пока пользователь явно не включит
+  ycAllowAgentDelete: false, // удаление ресурсов агентом — только с явного разрешения
 };
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -201,35 +212,70 @@ function openaiProfilesList(s) {
   return arr.filter((p) => p && typeof p === "object" && p.id && String(p.apiKey || "").trim());
 }
 
+// Кулдаун подключений: после ошибки ключа/баланса/лимита не возвращаемся к этому
+// ключу раньше времени — защита от «долбления» ограниченного ключа и лишних ротаций.
+const profileCooldown = new Map(); // profileId → timestamp (мс), до которого не используем
+
+function markProfileCooldown(id, ms) {
+  if (!id) return;
+  profileCooldown.set(id, Date.now() + Math.max(0, Number(ms) || 0));
+}
+
 // Переключает активное OpenAI-подключение на следующее по кругу и зеркалит его
 // значения в основные поля настроек (их читает весь остальной код: чат, модели, тест).
-// Возвращает новый профиль или null (если переключать не на что).
-function switchOpenaiProfile(s) {
+// opts.penalizeCurrentMs — на сколько отложить текущий (провинившийся) ключ.
+// Подключения в кулдауне пропускаются. Возвращает новый профиль или null.
+function switchOpenaiProfile(s, opts) {
+  const o = opts || {};
   const profs = openaiProfilesList(s);
   if (profs.length < 2) return null;
+  const now = Date.now();
   const cur = s.openaiActiveProfile;
   const idx = Math.max(0, profs.findIndex((p) => p.id === cur));
-  const next = profs[(idx + 1) % profs.length];
-  if (!next) return null;
-  s.openaiActiveProfile = next.id;
-  s.openaiUrl = next.url || s.openaiUrl;
-  s.openaiApiKey = next.apiKey || "";
-  if (next.model) s.openaiModel = next.model;
-  if (next.project !== undefined) s.openaiProject = next.project || "";
-  return next;
+  if (o.penalizeCurrentMs) markProfileCooldown(cur, o.penalizeCurrentMs);
+  for (let step = 1; step <= profs.length; step++) {
+    const next = profs[(idx + step) % profs.length];
+    if (!next || next.id === cur) continue;
+    if ((profileCooldown.get(next.id) || 0) > now) continue; // ещё не отлежался
+    s.openaiActiveProfile = next.id;
+    s.openaiUrl = next.url || s.openaiUrl;
+    s.openaiApiKey = next.apiKey || "";
+    if (next.model) s.openaiModel = next.model;
+    if (next.project !== undefined) s.openaiProject = next.project || "";
+    return next;
+  }
+  return null; // все подключения в кулдауне — переключать некуда
 }
 
+// Чтение чатов: основной файл, при повреждении — резервная копия .bak.
 function loadChats() {
-  try {
-    const d = JSON.parse(fs.readFileSync(chatsFile(), "utf8"));
-    if (d && Array.isArray(d.chats)) return d;
-  } catch {}
-  return { chats: [], activeId: null };
+  const readOne = (file) => {
+    try {
+      const d = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (d && Array.isArray(d.chats)) return d;
+    } catch {}
+    return null;
+  };
+  return readOne(chatsFile()) || readOne(chatsFile() + ".bak") || { chats: [], activeId: null };
 }
 
+// Запись чатов атомарная: сначала во временный файл, потом подмена.
+// Внезапное закрытие/падение во время записи больше не оставит обрезанный
+// chats.json (из-за него вся история выглядела как «всё удалилось»).
 function saveChats(d) {
-  fs.mkdirSync(path.dirname(chatsFile()), { recursive: true });
-  fs.writeFileSync(chatsFile(), JSON.stringify(d, null, 2), "utf8");
+  const file = chatsFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(d, null, 2), "utf8");
+  try {
+    if (fs.existsSync(file)) fs.renameSync(file, file + ".bak");
+  } catch {}
+  try {
+    fs.renameSync(tmp, file);
+  } catch {
+    // Windows: подмена может не пройти, если файл залочен — тогда копируем.
+    try { fs.copyFileSync(tmp, file); fs.unlinkSync(tmp); } catch {}
+  }
 }
 
 // ─────────────────────────── Пути и файлы ───────────────────────────
@@ -1523,6 +1569,17 @@ async function executeTool(name, args, settings) {
         return "OK — папка создана: " + p;
       }
       case "readFile": {
+        // Специальный путь для встроенных справочников агента (не файлы проекта):
+        // readFile(path: "agent-guide:vk") → полный гайд по работе с ВКонтакте.
+        const guidePath = String(args.path || "").trim();
+        if (guidePath.startsWith("agent-guide:")) {
+          const guideName = guidePath.slice("agent-guide:".length).replace(/[^a-z0-9-_]/gi, "");
+          const guideFile = path.join(__dirname, "agent-guides", guideName + ".md");
+          if (fs.existsSync(guideFile)) {
+            return "СПРАВОЧНИК АГЕНТА: «" + guideName + "» (прочитай перед работой и следуй ему):\n\n" + fs.readFileSync(guideFile, "utf8");
+          }
+          return "Ошибка: справочник «" + guideName + "» не найден. Доступен: vk.";
+        }
         const p = resolvePath(args.path, settings);
         if (!fs.existsSync(p)) return "Ошибка: файл не найден: " + p;
         const st = fs.statSync(p);
@@ -1942,7 +1999,8 @@ async function executeTool(name, args, settings) {
       }
       case "webSearch": {
         const q = String(args.query || args.q || "").trim();
-        return await webSearchDDG(q);
+        // Serper (Google), если ключ задан в настройках; иначе — DuckDuckGo
+        return await webSearch(q, settings && settings.serperApiKey);
       }
       case "webFetch": {
         return await webFetchPage(args.url);
@@ -3131,6 +3189,187 @@ async function executeTool(name, args, settings) {
           "\n\nДальше: readFileLines(path, start, count) — читать найденное, searchFile — точный регулярный поиск."
         );
       }
+      // ── Yandex Cloud (REST API): инструменты агента ──
+      case "ycStatus": {
+        const cfg = ycConfig(settings);
+        if (!cfg.oauth) {
+          return "Yandex Cloud не подключён. Скажи пользователю: Настройки → «☁️ Yandex Cloud» → получить OAuth-токен и вставить его. После авторизации инструмент заработает.";
+        }
+        if (!cfg.folderId) return "Авторизация есть, но не выбран каталог. Открой Настройки → Yandex Cloud и выбери каталог (или дождись, пока приложение выберет первый автоматически).";
+        try {
+          const svcs = await yandexCloud.resourcesStatus(cfg.oauth, cfg.folderId);
+          const rows = svcs.map((s) => "• " + s.icon + " " + s.title + ": " + (s.ok ? s.count : "ошибка: " + String(s.error || "").slice(0, 120)));
+          return (
+            "Yandex Cloud · каталог «" + cfg.folderName + "» (" + cfg.folderId + ")\n" +
+            "Создание агентом: " + (cfg.allowCreate ? "разрешено" : "ЗАПРЕЩЕНО — включи в Настройках → Yandex Cloud") + "\n" +
+            "Удаление агентом: " + (cfg.allowDelete ? "разрешено" : "ЗАПРЕЩЕНО — включи в Настройках → Yandex Cloud") + "\n\nРесурсы:\n" +
+            rows.join("\n") +
+            "\n\nСоздание: ycCreate(service, name). Доступны: " + yandexCloud.creatableKeys().join(", ") + ". Удаление: ycDelete(service, id) — id виден в ycList."
+          );
+        } catch (e) {
+          return "Ошибка Yandex Cloud: " + ((e && e.message) || String(e));
+        }
+      }
+      case "ycList": {
+        const cfg = ycConfig(settings);
+        if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
+        if (!cfg.folderId) return "Не выбран каталог — Настройки → Yandex Cloud.";
+        const serviceKey = String(args.service || args.key || "").trim();
+        const svcDef = serviceKey ? yandexCloud.serviceByKey(serviceKey) : null;
+        if (serviceKey && !svcDef) return "Неизвестный сервис: " + serviceKey + ". Доступны: " + yandexCloud.SERVICES.map((s) => s.key).join(", ") + ".";
+        try {
+          if (svcDef) {
+            const r = await yandexCloud.listService(cfg.oauth, cfg.folderId, svcDef);
+            const items = r.items.slice(0, 30).map((it) => "• " + (it.name || it.id || "") + (it.id ? "  (" + it.id + ")" : ""));
+            return "«" + svcDef.title + "» в каталоге «" + cfg.folderName + "»: всего " + r.count + (r.count ? ":\n" + items.join("\n") : " — пусто.");
+          }
+          const all = await yandexCloud.resourcesStatus(cfg.oauth, cfg.folderId);
+          return all.map((s) => "• " + s.icon + " " + s.title + ": " + (s.ok ? s.count : "ошибка: " + String(s.error || "").slice(0, 100))).join("\n");
+        } catch (e) {
+          return "Ошибка Yandex Cloud: " + ((e && e.message) || String(e));
+        }
+      }
+      case "ycCreate": {
+        const cfg = ycConfig(settings);
+        if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
+        if (!cfg.folderId) return "Не выбран каталог — Настройки → Yandex Cloud.";
+        if (!cfg.allowCreate) {
+          return "⛔ Создание ресурсов в Yandex Cloud агентом ЗАПРЕЩЕНО. Скажи пользователю включить в Настройках → «☁️ Yandex Cloud» чекбокс «Разрешить агенту создавать ресурсы». (Удаление — отдельным чекбоксом.)";
+        }
+        const serviceKey = String(args.service || args.key || "").trim();
+        const name = String(args.name || "").trim();
+        if (!serviceKey || !name) return "Ошибка: укажи service (например ydb, serverlessContainers, storage, lockbox, containerRegistry, dns, vpc) и name. Создание платных ресурсов — только по явной просьбе пользователя.";
+        try {
+          const r = await yandexCloud.createResource(cfg.oauth, cfg.folderId, serviceKey, name);
+          return "OK — " + r.message + " (service=" + serviceKey + ", каталог «" + cfg.folderName + "»). Проверить список: ycList(service: \"" + serviceKey + "\").";
+        } catch (e) {
+          return "Ошибка создания: " + ((e && e.message) || String(e));
+        }
+      }
+      case "ycDelete": {
+        const cfg = ycConfig(settings);
+        if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
+        if (!cfg.allowDelete) {
+          return "⛔ Удаление ресурсов в Yandex Cloud агентом ЗАПРЕЩЕНО. Скажи пользователю включить в Настройках → «☁️ Yandex Cloud» чекбокс «Разрешить агенту удалять ресурсы».";
+        }
+        const serviceKey = String(args.service || args.key || "").trim();
+        const id = String(args.id || args.resourceId || "").trim();
+        if (!serviceKey || !id) return "Ошибка: укажи service и id (id ресурса виден в ycList). Удаление необратимо — только по явной просьбе пользователя.";
+        try {
+          const r = await yandexCloud.deleteResource(cfg.oauth, serviceKey, id);
+          return "OK — " + r.message + " (" + serviceKey + ").";
+        } catch (e) {
+          return "Ошибка удаления: " + ((e && e.message) || String(e));
+        }
+      }
+      case "ycDeploy": {
+        const cfg = ycConfig(settings);
+        if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
+        if (!cfg.folderId) return "Не выбран каталог — Настройки → Yandex Cloud.";
+        const dir = args.directory ? resolvePath(args.directory, settings) : agentWorkDir(settings);
+        if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return "Ошибка: папка проекта не найдена: " + dir;
+        const name = String(args.name || "").trim() || path.basename(dir);
+        if (!cfg.allowCreate) {
+          return "⛔ Деплой создаёт ресурсы в Yandex Cloud (реестр, контейнер, SA). Скажи пользователю включить в Настройках → «☁️ Yandex Cloud» чекбокс «Разрешить агенту создавать ресурсы». Деплой платный (Serverless Containers).";
+        }
+        // Прямой вызов общей логики деплоя (как кнопка «🚀 Задеплоить»)
+        const cfg2 = ycConfig(settings);
+        const steps = [];
+        const step = (t) => steps.push(t);
+        try {
+          const docker = findProgram("docker");
+          if (!docker.found) return "Ошибка: Docker не найден на этом ПК. Установи Docker Desktop и повтори.";
+          const df = path.join(dir, "Dockerfile");
+          let dockerfile = df;
+          if (!fs.existsSync(df)) {
+            dockerfile = path.join(dir, "Dockerfile.yandexcloud");
+            ycGenerateDockerfile(dir, dockerfile);
+            step("Dockerfile сгенерирован");
+          }
+          const slug = yandexCloud.slugify(name);
+          const reg = await yandexCloud.ensureRegistry(cfg2.oauth, cfg2.folderId, slug + "-registry");
+          const image = "cr.yandex/" + reg.id + "/" + slug + ":latest";
+          step("Реестр: " + reg.id);
+          const iamTok = await yandexCloud.getIamToken(cfg2.oauth);
+          const loginOut = await runTerminalCommand("docker login cr.yandex -u iam -p " + iamTok, dir, 90000);
+          const loginTxt = String(loginOut || "");
+          if (/error|denied|failed/i.test(loginTxt) && !/login succeeded/i.test(loginTxt)) {
+            return "docker login не прошёл: " + truncateText(loginTxt, 500);
+          }
+          const buildOut = await runTerminalCommand('docker build -f "' + dockerfile + '" -t ' + image + ' .', dir, 600000);
+          const buildTxt = String(buildOut || "");
+          if (/error|failed|cannot/i.test(buildTxt) && !/successfully built/i.test(buildTxt)) {
+            return "docker build упал:\n" + truncateText(buildTxt, 2500);
+          }
+          const pushOut = await runTerminalCommand("docker push " + image, dir, 600000);
+          const pushTxt = String(pushOut || "");
+          if (/error|denied|failed/i.test(pushTxt) && !/digest/i.test(pushTxt)) {
+            return "docker push упал:\n" + truncateText(pushTxt, 1500);
+          }
+          step("Образ загружен: " + image);
+          const cont = await yandexCloud.ensureContainer(cfg2.oauth, cfg2.folderId, slug);
+          let saId = "";
+          if (args.public !== false) {
+            try {
+              const sa = await yandexCloud.ensureServiceAccount(cfg2.oauth, cfg2.folderId, "sa-" + slug);
+              saId = sa.id;
+              await yandexCloud.addRoleOnFolder(cfg2.oauth, cfg2.folderId, sa.id, "serverless.containers.invoker");
+              step("Публичный доступ настроен");
+            } catch (e) {
+              return "Не удалось настроить публичный доступ: " + ((e && e.message) || String(e));
+            }
+          }
+          await yandexCloud.deployContainerRevision(cfg2.oauth, {
+            containerId: cont.id,
+            folderId: cfg2.folderId,
+            imageUrl: image,
+            serviceAccountId: saId || undefined,
+            memoryMb: args.memoryMb || 256,
+            cores: args.cores || 1,
+            timeoutSec: args.timeoutSec || 30,
+            env: args.env || {},
+          });
+          const info = await yandexCloud.containerInfo(cfg2.oauth, cont.id);
+          return "✅ Приложение «" + name + "» задеплоено в Serverless Containers (каталог «" + cfg2.folderName + "»).\n\n" +
+            "URL: " + (info.url || "—") + "\nКонтейнер: " + cont.id + "\nОбраз: " + image + "\n\nШаги:\n" +
+            steps.map((s) => "• " + s).join("\n") +
+            "\n\nПроверь доступ: открыть URL в браузере или curl. Логи: ycLogs(service: \"serverlessContainers\", id: \"" + cont.id + "\"). Повторный деплой той же папки обновит ревизию.";
+        } catch (e) {
+          return "Деплой не завершился: " + ((e && e.message) || String(e));
+        }
+      }
+      case "ycLogs": {
+        const cfg = ycConfig(settings);
+        if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
+        const id = String(args.id || args.resourceId || "").trim();
+        if (!id) return "Ошибка: укажи id ресурса (виден в ycList).";
+        const yc = findProgram("yc");
+        if (!yc.found) {
+          return "Чтение логов требует yc CLI: установи (winget install Yandex.Cloud) и авторизуйся (yc init). Либо смотри логи в консоли Yandex Cloud.";
+        }
+        try {
+          const cmd = "yc logging read --folder-id=" + cfg.folderId + " --resource-ids=" + id + " --since=3h --limit=100 --format=json";
+          const out = await runTerminalCommand(cmd, os.homedir(), 90000);
+          const txt = String(out || "").trim();
+          let logs = [];
+          try {
+            const j = JSON.parse(txt);
+            const arr = Array.isArray(j) ? j : (j.entries || []);
+            logs = arr.map((e) => {
+              const msg = e.message || (typeof e.jsonPayload === "string" ? e.jsonPayload : e.jsonPayload ? JSON.stringify(e.jsonPayload) : "");
+              const ts = e.timestamp ? String(e.timestamp).replace("T", " ").slice(0, 19) : "";
+              return (ts ? ts + "  " : "") + (e.level || "").toUpperCase().padEnd(5) + " " + String(msg || "").slice(0, 600);
+            });
+          } catch {}
+          if (!logs.length) {
+            if (/error|failed|permission|denied/i.test(txt)) return "yc logging read: " + truncateText(txt, 600);
+            return "Логов за последние 3 часа нет.";
+          }
+          return "Последние логи (" + logs.length + " записей, за 3 часа):\n" + logs.slice(-50).join("\n");
+        } catch (e) {
+          return "yc logging read: " + ((e && e.message) || String(e));
+        }
+      }
       default:
         return "Ошибка: неизвестный инструмент " + name;
     }
@@ -3568,7 +3807,10 @@ async function runAi(settings, messages, win, opts) {
     let switchedProfile = null;
     if (settings.provider === "openai" && settings.autoSwitchProfiles) {
       try {
-        switchedProfile = switchOpenaiProfile(settings);
+        // Меняем ключ только когда ошибка действительно про ключ/баланс/лимит,
+        // и откладываем провинившийся ключ на cooldown (не долбим провайдера).
+        const cls = classifyKeyError(errText);
+        if (cls.key) switchedProfile = switchOpenaiProfile(settings, { penalizeCurrentMs: cls.cooldownMs });
         if (switchedProfile) {
           saveSettings(settings); // активное подключение сохраняется (ключи — в secrets.json)
           emit({
@@ -4006,6 +4248,12 @@ ipcMain.handle("chats:load", () => loadChats());
 ipcMain.handle("chats:save", (_e, d) => {
   saveChats(d);
   return true;
+});
+
+// Синхронное сохранение при закрытии окна: renderer успевает записать данные на диск.
+ipcMain.on("chats:saveSync", (e, d) => {
+  try { saveChats(d); } catch {}
+  e.returnValue = true;
 });
 
 ipcMain.handle("ai:send", async (_e, messages, opts) => {
@@ -4853,6 +5101,381 @@ ipcMain.handle("github:deviceStart", async () => {
   githubPollTimer = setTimeout(poll, 1000);
   return { ok: true, user_code, verification_uri, expires_in: expires_in || 900 };
 });
+
+// ─────────────────────────── Yandex Cloud (REST API) ───────────────────────────
+// Ссылка для получения OAuth-токена (клиентское приложение Yandex Cloud — как у yc CLI):
+const YANDEX_OAUTH_URL =
+  "https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb";
+
+function ycConfig(s) {
+  s = s || loadSettings();
+  return {
+    oauth: String(s.yandexOauthToken || "").trim(),
+    cloudId: String(s.ycCloudId || "").trim(),
+    folderId: String(s.ycFolderId || "").trim(),
+    folderName: String(s.ycFolderName || "").trim(),
+    allowCreate: !!s.ycAllowAgentCreate,
+    allowDelete: !!s.ycAllowAgentDelete,
+  };
+}
+
+function ycRequireAuth(cfg) {
+  if (!cfg || !cfg.oauth) {
+    const e = new Error("Не выполнена авторизация Yandex Cloud. Открой Настройки → «☁️ Yandex Cloud», получи OAuth-токен и вставь его.");
+    e.status = 401;
+    throw e;
+  }
+}
+
+ipcMain.handle("yc:status", async () => {
+  const s = loadSettings();
+  const cfg = ycConfig(s);
+  const out = {
+    ok: true,
+    loggedIn: !!cfg.oauth,
+    cloudId: cfg.cloudId,
+    folderId: cfg.folderId,
+    folderName: cfg.folderName,
+    allowCreate: cfg.allowCreate,
+    allowDelete: cfg.allowDelete,
+    oauthUrl: YANDEX_OAUTH_URL,
+    clouds: [],
+    folders: [],
+    iamOk: false,
+    error: "",
+  };
+  if (!cfg.oauth) return out;
+  try {
+    const clouds = await yandexCloud.listClouds(cfg.oauth);
+    out.clouds = clouds;
+    out.iamOk = true;
+    const cloudId = cfg.cloudId || (clouds[0] && clouds[0].id) || "";
+    const folders = await yandexCloud.listFolders(cfg.oauth, cloudId);
+    out.folders = folders;
+    if (!cfg.folderId && folders[0]) {
+      // Первый запуск: автоматически выбираем первый каталог первого облака.
+      const merged = { ...s, ycCloudId: cloudId, ycFolderId: folders[0].id, ycFolderName: folders[0].name };
+      saveSettings(merged);
+      out.cloudId = cloudId;
+      out.folderId = folders[0].id;
+      out.folderName = folders[0].name;
+    }
+  } catch (e) {
+    out.iamOk = false;
+    out.error = (e && e.message) || String(e);
+  }
+  return out;
+});
+
+ipcMain.handle("yc:setToken", async (_e, token) => {
+  const t = String(token || "").trim();
+  if (!t) return { ok: false, error: "Вставь OAuth-токен со страницы авторизации Yandex." };
+  try {
+    yandexCloud.resetIamCache();
+    const clouds = await yandexCloud.listClouds(t);
+    const cloudId = (clouds[0] && clouds[0].id) || "";
+    const folders = await yandexCloud.listFolders(t, cloudId);
+    const folder = folders[0] || null;
+    const merged = {
+      ...loadSettings(),
+      yandexOauthToken: t,
+      ycCloudId: cloudId,
+      ycFolderId: folder ? folder.id : "",
+      ycFolderName: folder ? folder.name : "",
+    };
+    saveSettings(merged);
+    return {
+      ok: true,
+      account: clouds[0] ? clouds[0].name : "аккаунт Yandex",
+      cloudId,
+      folderId: folder ? folder.id : "",
+      folderName: folder ? folder.name : "",
+      clouds,
+      folders,
+    };
+  } catch (e) {
+    yandexCloud.resetIamCache();
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+ipcMain.handle("yc:folders", async () => {
+  const cfg = ycConfig();
+  try {
+    ycRequireAuth(cfg);
+    const clouds = await yandexCloud.listClouds(cfg.oauth);
+    const cloudId = cfg.cloudId || (clouds[0] && clouds[0].id) || "";
+    const folders = await yandexCloud.listFolders(cfg.oauth, cloudId);
+    return { ok: true, clouds, folders, cloudId };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+ipcMain.handle("yc:setFolder", (_e, folderId, folderName, cloudId) => {
+  const merged = {
+    ...loadSettings(),
+    ycFolderId: String(folderId || "").trim(),
+    ycFolderName: String(folderName || "").trim(),
+    ycCloudId: String(cloudId || "").trim(),
+  };
+  saveSettings(merged);
+  return { ok: true };
+});
+
+ipcMain.handle("yc:setPermissions", (_e, allowCreate, allowDelete) => {
+  const merged = {
+    ...loadSettings(),
+    ycAllowAgentCreate: !!allowCreate,
+    ycAllowAgentDelete: !!allowDelete,
+  };
+  saveSettings(merged);
+  return { ok: true };
+});
+
+ipcMain.handle("yc:logout", () => {
+  const s = loadSettings();
+  delete s.yandexOauthToken;
+  s.ycCloudId = "";
+  s.ycFolderId = "";
+  s.ycFolderName = "";
+  saveSettings(s);
+  yandexCloud.resetIamCache();
+  return { ok: true };
+});
+
+// Дашборд: счётчики ресурсов по всем сервисам выбранного каталога.
+ipcMain.handle("yc:resources", async () => {
+  const cfg = ycConfig();
+  try {
+    ycRequireAuth(cfg);
+    if (!cfg.folderId) {
+      return { ok: false, error: "Не выбран каталог (folder). Открой Настройки → «☁️ Yandex Cloud» и выбери каталог." };
+    }
+    const services = await yandexCloud.resourcesStatus(cfg.oauth, cfg.folderId);
+    const total = services.reduce((acc, s) => acc + (s.ok ? s.count : 0), 0);
+    const activeServices = services.filter((s) => s.ok && s.count > 0).length;
+    return { ok: true, folderId: cfg.folderId, folderName: cfg.folderName, services, total, activeServices };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+ipcMain.handle("yc:create", async (_e, serviceKey, name) => {
+  const cfg = ycConfig();
+  try {
+    ycRequireAuth(cfg);
+    if (!cfg.folderId) return { ok: false, error: "Не выбран каталог (folder)." };
+    const r = await yandexCloud.createResource(cfg.oauth, cfg.folderId, String(serviceKey || ""), String(name || ""));
+    return { ok: true, message: r.message, resourceId: r.resourceId, name: r.name };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+ipcMain.handle("yc:delete", async (_e, serviceKey, resourceId) => {
+  const cfg = ycConfig();
+  try {
+    ycRequireAuth(cfg);
+    const r = await yandexCloud.deleteResource(cfg.oauth, String(serviceKey || ""), String(resourceId || ""));
+    return { ok: true, message: r.message };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+});
+
+// Генерирует Dockerfile по типу проекта (node / python / статика), если своего нет.
+function ycGenerateDockerfile(dir, outPath) {
+  const has = (f) => fs.existsSync(path.join(dir, f));
+  let docker = "";
+  if (has("package.json")) {
+    docker = [
+      "FROM node:20-alpine",
+      "WORKDIR /app",
+      "COPY package*.json ./",
+      "RUN npm install --no-audit --no-fund 2>/dev/null || npm install",
+      "COPY . .",
+      "ENV PORT=8080",
+      "EXPOSE 8080",
+      'CMD ["sh", "-c", "PORT=8080 node server.js || PORT=8080 npm start || PORT=8080 npm run start || npm run dev -- --port 8080 --host 0.0.0.0"]',
+    ].join("\n");
+  } else if (has("requirements.txt") || has("pyproject.toml") || has("Pipfile")) {
+    const req = has("requirements.txt") ? "COPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt" : "";
+    docker = [
+      "FROM python:3.12-slim",
+      "WORKDIR /app",
+      req,
+      "COPY . .",
+      "ENV PORT=8080",
+      "EXPOSE 8080",
+      'CMD ["sh", "-c", "PORT=8080 python app.py || PORT=8080 python main.py || pip install gunicorn && gunicorn -b 0.0.0.0:8080 app:app || gunicorn -b 0.0.0.0:8080 main:app"]',
+    ].filter(Boolean).join("\n");
+  } else if (has("index.html")) {
+    docker = [
+      "FROM nginx:alpine",
+      "COPY . /usr/share/nginx/html",
+      "EXPOSE 80",
+    ].join("\n");
+  } else {
+    throw new Error("Не смог определить тип проекта для Dockerfile. Создай в папке проекта свой Dockerfile — деплой использует его.");
+  }
+  fs.writeFileSync(outPath, docker, "utf8");
+}
+
+// Деплой одной кнопкой: папка проекта → Container Registry → Serverless Containers → URL.
+ipcMain.handle("yc:deploy", async (_e, folderDir, appName, opts) => {
+  opts = opts || {};
+  const cfg = ycConfig();
+  try {
+    ycRequireAuth(cfg);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  if (!cfg.folderId) return { ok: false, error: "Не выбран каталог (folder). Открой Настройки → «☁️ Yandex Cloud» и выбери каталог." };
+  const dir = String(folderDir || "").trim() || agentWorkDir(loadSettings());
+  if (!dir || !fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+    return { ok: false, error: "Папка проекта не найдена: " + dir };
+  }
+  const name = String(appName || "").trim() || path.basename(dir);
+  const steps = [];
+  const step = (text) => {
+    steps.push(text);
+    if (activeEmit) activeEmit({ type: "yc_step", text });
+  };
+  try {
+    const docker = findProgram("docker");
+    if (!docker.found) {
+      return { ok: false, error: "Docker не найден на этом ПК. Установи Docker Desktop (https://www.docker.com/products/docker-desktop/) и перезапусти приложение.", steps };
+    }
+    step("1/6 ✓ Docker найден");
+
+    const df = path.join(dir, "Dockerfile");
+    let dockerfile = df;
+    if (!fs.existsSync(df)) {
+      dockerfile = path.join(dir, "Dockerfile.yandexcloud");
+      try {
+        ycGenerateDockerfile(dir, dockerfile);
+      } catch (e) {
+        return { ok: false, error: (e && e.message) || String(e), steps };
+      }
+      step("2/6 ✓ Dockerfile сгенерирован (" + path.basename(dockerfile) + ") — если приложению нужна особая сборка, поправь его и задеплой снова");
+    } else {
+      step("2/6 ✓ Использую Dockerfile проекта");
+    }
+
+    const slug = yandexCloud.slugify(name);
+    const reg = await yandexCloud.ensureRegistry(cfg.oauth, cfg.folderId, slug + "-registry");
+    const image = "cr.yandex/" + reg.id + "/" + slug + ":latest";
+    step("3/6 ✓ Реестр готов: " + reg.id);
+
+    const iamTok = await yandexCloud.getIamToken(cfg.oauth);
+    const loginOut = await runTerminalCommand("docker login cr.yandex -u iam -p " + iamTok, dir, 90000);
+    const loginTxt = String(loginOut || "");
+    if (/error|denied|failed|unauthorized/i.test(loginTxt) && !/login succeeded/i.test(loginTxt)) {
+      return { ok: false, error: "docker login к cr.yandex не прошёл:\n" + truncateText(loginTxt, 800), steps };
+    }
+    step("4/6 ✓ docker login к cr.yandex выполнен");
+
+    const buildOut = await runTerminalCommand('docker build -f "' + dockerfile + '" -t ' + image + ' .', dir, 600000);
+    const buildTxt = String(buildOut || "");
+    if (/error|failed|cannot|denied|no such file/i.test(buildTxt) && !/successfully built/i.test(buildTxt)) {
+      return { ok: false, error: "docker build упал:\n" + truncateText(buildTxt, 3000), steps };
+    }
+    step("5/6 ✓ Образ собран: " + image);
+
+    const pushOut = await runTerminalCommand("docker push " + image, dir, 600000);
+    const pushTxt = String(pushOut || "");
+    if (/error|denied|failed|unauthorized/i.test(pushTxt) && !/digest/i.test(pushTxt)) {
+      return { ok: false, error: "docker push упал:\n" + truncateText(pushTxt, 2000), steps };
+    }
+    step("6/6 ✓ Образ загружен в Container Registry");
+
+    const cont = await yandexCloud.ensureContainer(cfg.oauth, cfg.folderId, slug);
+    step("Контейнер готов: " + cont.id);
+
+    let saId = "";
+    if (opts.public !== false) {
+      try {
+        const sa = await yandexCloud.ensureServiceAccount(cfg.oauth, cfg.folderId, "sa-" + slug);
+        saId = sa.id;
+        await yandexCloud.addRoleOnFolder(cfg.oauth, cfg.folderId, sa.id, "serverless.containers.invoker");
+        step("Публичный доступ настроен (SA + роль invoker)");
+      } catch (e) {
+        return {
+          ok: false,
+          error:
+            "Не удалось настроить публичный доступ: " + ((e && e.message) || String(e)) +
+            ". Проверь, что у твоего аккаунта есть роль editor на каталог, или задеплой с public=false (URL будет требовать авторизацию).",
+          steps,
+        };
+      }
+    }
+
+    step("⏳ Деплой ревизии… это может занять 1–3 минуты");
+    await yandexCloud.deployContainerRevision(cfg.oauth, {
+      containerId: cont.id,
+      folderId: cfg.folderId,
+      imageUrl: image,
+      serviceAccountId: saId || undefined,
+      memoryMb: opts.memoryMb || 256,
+      cores: opts.cores || 1,
+      timeoutSec: opts.timeoutSec || 30,
+      env: opts.env || {},
+    });
+    const info = await yandexCloud.containerInfo(cfg.oauth, cont.id);
+    const fin = "✅ Готово! URL контейнера: " + (info.url || "—");
+    steps.push(fin);
+    if (activeEmit) activeEmit({ type: "yc_step", text: fin });
+    return { ok: true, url: info.url, containerId: cont.id, name: slug, image, steps };
+  } catch (e) {
+    return { ok: false, error: "Деплой не завершился: " + ((e && e.message) || String(e)), steps };
+  }
+});
+
+// Логи контейнера через yc CLI (Logging REST не существует — только gRPC/CLI).
+ipcMain.handle("yc:logs", async (_e, serviceKey, resourceId) => {
+  const cfg = ycConfig();
+  try {
+    ycRequireAuth(cfg);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  if (!cfg.folderId) return { ok: false, error: "Не выбран каталог (folder)." };
+  const id = String(resourceId || "").trim();
+  if (!id) return { ok: false, error: "Не указан id ресурса." };
+  const yc = findProgram("yc");
+  if (!yc.found) {
+    return {
+      ok: false,
+      error:
+        "Чтение логов требует yc CLI (Yandex Cloud): установи его (winget install Yandex.Cloud) и авторизуйся (yc init). " +
+        "Либо смотри логи ресурса в консоли Yandex Cloud.",
+    };
+  }
+  try {
+    const cmd =
+      "yc logging read --folder-id=" + cfg.folderId + " --resource-ids=" + id + " --since=3h --limit=100 --format=json";
+    const out = await runTerminalCommand(cmd, os.homedir(), 90000);
+    const txt = String(out || "").trim();
+    let logs = [];
+    try {
+      const j = JSON.parse(txt);
+      const arr = Array.isArray(j) ? j : (j.entries || []);
+      logs = arr.map((e) => {
+        const msg = e.message || (typeof e.jsonPayload === "string" ? e.jsonPayload : e.jsonPayload ? JSON.stringify(e.jsonPayload) : "");
+        const ts = e.timestamp ? String(e.timestamp).replace("T", " ").slice(0, 19) : "";
+        return (ts ? ts + "  " : "") + (e.level || "").toUpperCase().padEnd(5) + " " + String(msg || "").slice(0, 600);
+      });
+    } catch {}
+    if (!logs.length && /error|failed|permission|denied/i.test(txt)) {
+      return { ok: false, error: "yc logging read: " + truncateText(txt, 800) };
+    }
+    return { ok: true, logs: logs.slice(-100), raw: truncateText(txt, 4000) };
+  } catch (e) {
+    return { ok: false, error: "yc logging read: " + ((e && e.message) || String(e)) };
+  }
+});
+
 
 // ─────────────────────────── Файлы (панель проекта) ───────────────────────────
 const BINARY_EXT = new Set([

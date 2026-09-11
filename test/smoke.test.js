@@ -9,6 +9,8 @@
    - ota: сравнение версий, применение бандла, защита хеша, отказ без файлов;
    - browser-tools: корректное состояние «браузер не запущен»;
    - server.js: защита /api/llm (только Yandex), валидация /api/fetch.
+   - highlight: подсветка кода не теряет и не искажает исходный текст.
+   - chats: атомарная запись истории, .bak-восстановление, автосейв при закрытии.
 */
 
 const assert = require("assert");
@@ -886,6 +888,266 @@ async function testSelfDev() {
   });
 }
 
+async function testHighlight() {
+  // Модуль браузерный (window.Highlight) — подставляем минимальный шим.
+  const src = fs.readFileSync(path.join(ROOT, "src", "renderer", "highlight.js"), "utf8");
+  const win = {};
+  new Function("window", src + "\nreturn window.Highlight;")(win);
+  const H = win.Highlight;
+
+  const decode = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  const strip = (html) => decode(html.replace(/<span class="tok-[\w-]+">/g, "").replace(/<\/span>/g, ""));
+
+  const samples = [
+    ["a.js", "const x = 1; // комм\nfunction f(a) { return `t ${a} < b & c`; }\n/* multi\nline */\nlet s = \"строка <тег> & амп\";\n"],
+    ["a.ts", "export interface A<T> { x: T }\nclass B extends A<string> { async m() { await 1; } }\n"],
+    ["a.json", '{ "key": "v", "n": 12.5e3, "b": true, "arr": [1, 2] }\n'],
+    ["a.html", "<!DOCTYPE html>\n<div class=\"a\" data-x='1'>text & more</div>\n<!-- c <b> -->\n<br/>\n"],
+    ["a.css", "/* c */\n.a, #b:hover { color: #fff; margin: 10px 2.5em 50%; content: \"x\"; }\n"],
+    ["a.py", '#!/usr/bin/env python\n"""doc <html> & """\ndef f(x):\n    # c\n    return True if x is not None else False\n'],
+    ["a.sh", '#!/bin/bash\necho "hi $USER ${HOME} <x>"\nif [ -f x ]; then cd /tmp && rm -rf y; fi\n'],
+    ["a.sql", "-- c\nSELECT a, COUNT(*) FROM t WHERE x = 'a''b'; /* z */\n"],
+    ["a.yml", '# c\nkey: value\nlist:\n  - a: "b"\n'],
+    ["a.md", "# Заголовок\n\n```js\nconst a = 1;\n```\n\n- пункт\n> цитата [ссылка](https://x.y)\n"],
+    ["a.txt", 'просто текст <b> & "строка"\n// не комментарий # тоже\n'],
+    ["Dockerfile", 'FROM node:20\nRUN echo "hi" && npm i\n# c\n'],
+  ];
+
+  await test("highlight: текст после снятия тегов совпадает с исходным (12 файлов)", () => {
+    for (const [name, code] of samples) {
+      assert.strictEqual(strip(H.highlight(code, name)), code, "искажён текст: " + name);
+    }
+  });
+
+  await test("highlight: язык определяется по расширению и имени файла", () => {
+    assert.strictEqual(H.langOf("src/a/b.ts"), "js");
+    assert.strictEqual(H.langOf("x.YML"), "yaml");
+    assert.strictEqual(H.langOf("a.b.c.py"), "py");
+    assert.strictEqual(H.langOf("Dockerfile"), "sh");
+    assert.strictEqual(H.langOf(".env"), "sh");
+    assert.strictEqual(H.langOf("noext"), "generic");
+    assert.strictEqual(H.langOf(""), "generic");
+  });
+
+  await test("highlight: HTML в коде экранируется (живых тегов не появляется)", () => {
+    const out = H.highlight('<script>alert(1)</script> & "x"', "x.js");
+    assert.ok(out.indexOf("<script") === -1, "в выводе остался живой <script>");
+    assert.ok(out.indexOf("&lt;script") !== -1, "нет экранирования <");
+  });
+
+  await test("highlight: ключевые слова, строки и комментарии подсвечиваются", () => {
+    const js = H.highlight('const a = "s"; // c\n', "a.js");
+    assert.ok(js.indexOf("tok-kw") !== -1, "нет ключевого слова");
+    assert.ok(js.indexOf("tok-str") !== -1, "нет строки");
+    assert.ok(js.indexOf("tok-com") !== -1, "нет комментария");
+    assert.ok(H.highlight("def f():\n    return True\n", "a.py").indexOf("tok-kw") !== -1, "нет def в python");
+    assert.ok(H.highlight('{ "k": 1 }', "a.json").indexOf("tok-key") !== -1, "нет ключа в json");
+  });
+
+  await test("highlight: countLines считает строки", () => {
+    assert.strictEqual(H.countLines(""), 1);
+    assert.strictEqual(H.countLines("a"), 1);
+    assert.strictEqual(H.countLines("a\nb\n"), 3);
+  });
+
+  await test("highlight: очень большой текст не подсвечивается, но не теряется", () => {
+    const big = "a".repeat(400 * 1024 + 10);
+    assert.strictEqual(decode(H.highlight(big, "big.js")), big);
+  });
+}
+
+// ── 11. Хранение чатов: атомарная запись, .bak-восстановление, автосейв ──────
+async function testChatPersistence() {
+  // Функции хранения берём прямо из main.js (реальный код, не копия).
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const s0 = mainSrc.indexOf("// Чтение чатов:");
+  const s1 = mainSrc.indexOf("// ─────────────────────────── Пути и файлы");
+  assert.ok(s0 > 0 && s1 > s0, "не нашёл функции хранения чатов в main.js");
+  const chatCode = mainSrc.slice(s0, s1);
+
+  function makeStore(dir) {
+    const chatMod = new Function(
+      "fs",
+      "path",
+      "chatsFile",
+      chatCode + "\nreturn { loadChats, saveChats };"
+    );
+    return chatMod(fs, path, () => path.join(dir, "chats.json"));
+  }
+
+  await test("chats: атомарная запись — нет .tmp, есть .bak, основной файл валиден", () => {
+    const dir = tmpdir("chats-atomic-");
+    const { loadChats, saveChats } = makeStore(dir);
+    saveChats({ chats: [{ id: "a", messages: [{ role: "user", content: "1" }] }], activeId: "a" });
+    assert.ok(fs.existsSync(path.join(dir, "chats.json")), "нет chats.json");
+    assert.ok(!fs.existsSync(path.join(dir, "chats.json.tmp")), "остался chats.json.tmp");
+    saveChats({ chats: [{ id: "b", messages: [] }], activeId: "b" });
+    assert.ok(!fs.existsSync(path.join(dir, "chats.json.tmp")), "остался chats.json.tmp после 2-й записи");
+    assert.ok(fs.existsSync(path.join(dir, "chats.json.bak")), "нет резервной копии .bak");
+    assert.strictEqual(loadChats().activeId, "b");
+  });
+
+  await test("chats: обрезанный (битый) основной файл → история поднимается из .bak", () => {
+    const dir = tmpdir("chats-recover-");
+    const { loadChats, saveChats } = makeStore(dir);
+    saveChats({ chats: [{ id: "keep", messages: [] }], activeId: "keep" });
+    saveChats({ chats: [{ id: "new", messages: [] }], activeId: "new" });
+    // Имитируем внезапное закрытие во время записи: файл обрезан.
+    fs.writeFileSync(path.join(dir, "chats.json"), '{"chats": [{"id": "new"', "utf8");
+    const loaded = loadChats();
+    assert.strictEqual(loaded.activeId, "keep", "не восстановилось из .bak: " + JSON.stringify(loaded));
+    assert.strictEqual(loaded.chats[0].id, "keep");
+  });
+
+  await test("chats: битый JSON без .bak → пустая история, без исключения", () => {
+    const dir = tmpdir("chats-broken-");
+    fs.writeFileSync(path.join(dir, "chats.json"), "не json", "utf8");
+    const { loadChats } = makeStore(dir);
+    assert.deepStrictEqual(loadChats(), { chats: [], activeId: null });
+  });
+
+  // Логику автосохранения берём из renderer/app.js и подсовываем заглушки окружения.
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const a0 = appSrc.indexOf("  function persistChats() {");
+  const vis = appSrc.indexOf('  document.addEventListener("visibilitychange"');
+  const a1 = appSrc.indexOf("});", vis) + 3;
+  assert.ok(a0 > 0 && vis > a0 && a1 > vis, "не нашёл блок автосохранения чатов в app.js");
+
+  function makeAutosave(syncSupported) {
+    const block = appSrc.slice(a0, a1);
+    const syncSaves = [];
+    const asyncSaves = [];
+    const timers = [];
+    const handlers = { window: {}, document: {} };
+    const win = { addEventListener: (n, cb) => { handlers.window[n] = cb; } };
+    const doc = { addEventListener: (n, cb) => { handlers.document[n] = cb; }, visibilityState: "visible" };
+    const api = {
+      saveChats: (d) => asyncSaves.push(d),
+    };
+    if (syncSupported) api.saveChatsSync = (d) => syncSaves.push(d);
+    const mk = new Function(
+      "window",
+      "document",
+      "isElectron",
+      "api",
+      "chatsData",
+      "localStorage",
+      "setTimeout",
+      "clearTimeout",
+      block + "\nreturn { persistChats, persistChatsSoon, persistChatsNow, flushChats };"
+    );
+    const fns = mk(
+      win,
+      doc,
+      true,
+      api,
+      { chats: [{ id: "c1", messages: [] }], activeId: "c1" },
+      { setItem() {} },
+      (fn, ms) => { const t = { fn, ms }; timers.push(t); return t; },
+      (t) => { if (t) t.cancelled = true; }
+    );
+    return { ...fns, syncSaves, asyncSaves, timers, handlers, doc };
+  }
+
+  await test("чаты: throttle — пачка правок даёт одну запись, а не десять", () => {
+    const a = makeAutosave(true);
+    for (let i = 0; i < 10; i++) a.persistChatsSoon();
+    assert.strictEqual(a.timers.length, 1, "запланировано таймеров: " + a.timers.length);
+    assert.strictEqual(a.syncSaves.length + a.asyncSaves.length, 0, "запись произошла сразу, без задержки");
+    a.timers[0].fn();
+    assert.strictEqual(a.asyncSaves.length, 1, "после интервала должно быть ровно одно сохранение");
+  });
+
+  await test("чаты: закрытие окна (beforeunload) пишет синхронно — данные не теряются", () => {
+    const a = makeAutosave(true);
+    a.persistChatsSoon(); // правки во время ответа ещё не сброшены
+    assert.ok(typeof a.handlers.window.beforeunload === "function", "нет обработчика beforeunload");
+    a.handlers.window.beforeunload();
+    assert.strictEqual(a.syncSaves.length, 1, "синхронное сохранение не сработало");
+    assert.strictEqual(a.asyncSaves.length, 0, "при закрытии должен идти только синхронный путь");
+    // Свёрнутая страница (мобильный режим) — тоже сбрасываем.
+    a.persistChatsSoon();
+    a.doc.visibilityState = "hidden";
+    a.handlers.document.visibilitychange();
+    assert.strictEqual(a.syncSaves.length, 2, "скрытие страницы не сохранило данные");
+  });
+
+  await test("чаты: без новых правок закрытие окна ничего не пишет", () => {
+    const a = makeAutosave(true);
+    a.handlers.window.beforeunload();
+    assert.strictEqual(a.syncSaves.length + a.asyncSaves.length, 0, "лишняя запись на диск");
+  });
+
+  await test("чаты: завершение хода пишет сразу и отменяет отложенную запись", () => {
+    const a = makeAutosave(true);
+    a.persistChatsSoon();
+    a.persistChatsNow();
+    assert.strictEqual(a.asyncSaves.length, 1, "немедленной записи не было");
+    a.timers.forEach((t) => { if (!t.cancelled) t.fn(); });
+    assert.strictEqual(a.asyncSaves.length, 1, "отменённый таймер всё же записал файл");
+  });
+
+  await test("чаты: без синхронного канала (мобильный мост) сохранение всё равно происходит", () => {
+    const a = makeAutosave(false);
+    a.persistChatsSoon();
+    a.handlers.window.beforeunload();
+    assert.strictEqual(a.asyncSaves.length, 1, "асинхронный путь не сработал");
+  });
+
+  // Восстановление «подвисших» сообщений после аварийного закрытия.
+  const sIdx = appSrc.indexOf("  function sanitizeChats(d) {");
+  assert.ok(sIdx > 0, "не нашёл sanitizeChats в app.js");
+  const rawLines = appSrc.slice(sIdx).split("\n");
+  let endLine = -1;
+  for (let i = 1; i < rawLines.length; i++) {
+    if (rawLines[i] === "  }") { endLine = i; break; }
+  }
+  assert.ok(endLine > 0, "не нашёл конец функции sanitizeChats");
+  const sanitizeChats = new Function(rawLines.slice(0, endLine + 1).join("\n") + "\nreturn sanitizeChats;")();
+
+  await test("чаты: после аварийного закрытия не остаётся вечных «выполняется»", () => {
+    const out = sanitizeChats({
+      activeId: "c1",
+      chats: [
+        {
+          id: "c1",
+          messages: [
+            { id: "u", role: "user", content: "привет" },
+            { id: "a", role: "assistant", content: "частичный ответ", pending: true },
+            { id: "t", role: "tool", toolName: "runCommand", toolResult: null, pending: true },
+          ],
+        },
+        { id: "c2", messages: [{ id: "a2", role: "assistant", content: "", pending: true }] },
+      ],
+    });
+    const msgs = out.chats[0].messages;
+    assert.strictEqual(msgs[1].pending, false, "assistant остался незавершённым");
+    assert.strictEqual(msgs[1].content, "частичный ответ", "текст ответа потерян");
+    assert.strictEqual(msgs[2].pending, false, "tool остался незавершённым");
+    assert.strictEqual(msgs[2].toolOk, false);
+    assert.ok(msgs[2].toolResult.indexOf("закрыл") !== -1, "нет пояснения к прерванному действию");
+    assert.strictEqual(msgs[msgs.length - 1].role, "system", "нет пометки о прерывании");
+    assert.ok(msgs[msgs.length - 1].content.indexOf("прерван") !== -1, "пометка без пояснения");
+    // В неактивном чате флаг тоже снимается, но лишней пометки не появляется.
+    assert.strictEqual(out.chats[1].messages[0].pending, false);
+    assert.strictEqual(out.chats[1].messages[0].content, "…");
+    assert.strictEqual(out.chats[1].messages.length, 1, "лишняя пометка в неактивном чате");
+  });
+
+  await test("чаты: целая история при загрузке не меняется", () => {
+    const d = { activeId: "c1", chats: [{ id: "c1", messages: [{ id: "u", role: "user", content: "ок" }] }] };
+    const before = JSON.stringify(d);
+    assert.strictEqual(JSON.stringify(sanitizeChats(d)), before, "sanitizeChats испортил целую историю");
+  });
+
+  await test("чаты: битые данные не ломают загрузку", () => {
+    assert.deepStrictEqual(sanitizeChats(null), { chats: [], activeId: null });
+    assert.strictEqual(sanitizeChats({ chats: "нет" }).chats, "нет");
+    const fixed = sanitizeChats({ chats: [{ id: "x" }], activeId: "x" });
+    assert.deepStrictEqual(fixed.chats[0].messages, [], "messages не восстановлен в массив");
+  });
+}
+
 // ── Запуск ──────────────────────────────────────────────────────────────────
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
@@ -897,7 +1159,9 @@ async function testSelfDev() {
   await testSecrets();
   await testOta();
   await testBrowserTools();
+  await testHighlight();
   await testMobileBridge();
+  await testChatPersistence();
   await testServer();
   await testSelfDev();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");

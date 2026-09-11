@@ -68,6 +68,10 @@
           <button id="btn-toggle-preview" class="btn btn-ghost icon-btn" title="Превью — открыть сайт проекта, мобильный вид, новая вкладка">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>
           </button>
+          <button id="btn-toggle-cloud" class="btn btn-ghost icon-btn" title="Yandex Cloud — ресурсы каталога, деплой">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.34 8.5 4.5 4.5 0 0 0 7 17.5h10.5z" /></svg>
+            <span class="hd-dot" id="btn-toggle-cloud-dot"></span>
+          </button>
           <button id="btn-copy-chat" class="btn btn-ghost icon-btn" title="Скопировать весь чат в буфер обмена (markdown)">
             <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
           </button>
@@ -181,6 +185,10 @@
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6" /><path d="M12 19h8" /></svg>
             <span>Консоль</span>
           </button>
+          <button class="sp-btn" data-sp="cloud" role="tab" title="Yandex Cloud — дашборд ресурсов каталога">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.34 8.5 4.5 4.5 0 0 0 7 17.5h10.5z" /></svg>
+            <span>Cloud</span>
+          </button>
         </div>
         <button id="btn-sp-close" class="btn btn-ghost icon-btn" title="Скрыть панель">✕</button>
       </div>
@@ -220,6 +228,41 @@
             <iframe id="preview-frame" title="Предпросмотр сайта" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
           </div>
         </div>
+      </div>
+      <div id="sp-cloud" class="sp-body hidden">
+        <div class="yc-dash-top">
+          <div class="yc-dash-title">☁️ Yandex Cloud</div>
+          <span id="yc-dash-status" class="yc-dash-status">—</span>
+          <div class="yc-dash-btns">
+            <button id="btn-yc-deploy" class="btn btn-primary btn-small" title="Задеплоить рабочую директорию в Serverless Containers (Docker обязателен)">🚀 Задеплоить проект</button>
+            <button id="btn-yc-dash-refresh" class="btn btn-ghost btn-small" title="Обновить счётчики ресурсов">↻</button>
+            <button id="btn-yc-dash-settings" class="btn btn-ghost btn-small" title="Настройки Yandex Cloud (токен, каталог, разрешения)">⚙️</button>
+          </div>
+        </div>
+        <div id="yc-onboard" class="yc-onboard hidden">
+          <div class="yc-onboard-ic">☁️</div>
+          <div class="yc-onboard-title">Yandex Cloud не подключён</div>
+          <div class="yc-onboard-text"></div>
+          <div class="yc-onboard-steps">
+            <div><b>1</b> Получить OAuth-токен Yandex (кнопка ниже)</div>
+            <div><b>2</b> Настройки → «☁️ Yandex Cloud» → вставить токен → «Войти»</div>
+            <div><b>3</b> Выбрать каталог — дашборд заполнится ресурсами</div>
+          </div>
+          <div class="input-row">
+            <button id="btn-yc-onboard-settings" class="btn btn-primary btn-small">⚙️ Настройки Yandex Cloud</button>
+            <button id="btn-yc-onboard-token" class="btn btn-ghost btn-small">🔑 Получить токен</button>
+          </div>
+        </div>
+        <div id="yc-summary" class="yc-summary hidden"></div>
+        <div id="yc-deploy-box" class="yc-deploy-box hidden">
+          <div class="yc-deploy-title">🚀 Деплой на Yandex Cloud</div>
+          <div id="yc-deploy-steps" class="yc-deploy-steps"></div>
+          <div id="yc-deploy-result" class="yc-deploy-result hidden">
+            <span id="yc-deploy-url"></span>
+            <button id="btn-yc-deploy-open" class="btn btn-primary btn-small">Открыть</button>
+          </div>
+        </div>
+        <div id="yc-dash" class="yc-dash"></div>
       </div>
     </div>
 
@@ -295,13 +338,38 @@
     </aside>
   </div>
 
+  <!-- Статус-бар (низ окна): проект, ветка, изменения, dev-сервер, модель, версия -->
+  <footer id="status-bar">
+    <button id="sb-project" class="sb-item" title="Панель проекта — файлы">📁 <span id="sb-project-name">—</span></button>
+    <button id="sb-branch" class="sb-item" title="Ветка git — открыть «Изменения»">🌿 <span id="sb-branch-name">—</span></button>
+    <button id="sb-changes" class="sb-item" title="Изменённые файлы — открыть «Изменения»">✏️ <span id="sb-changes-num">0</span></button>
+    <button id="sb-run" class="sb-item" title="Dev-сервер — открыть превью"><span id="sb-run-dot" class="sb-dot"></span><span id="sb-run-text">не запущен</span></button>
+    <span class="sb-spacer"></span>
+    <button id="sb-model" class="sb-item" title="Провайдер и модель — изменить">🤖 <span id="sb-model-text">Модель не выбрана</span></button>
+    <button id="sb-version" class="sb-item" title="Версия кода — самосовершенствование">v<span id="sb-version-text">—</span></button>
+  </footer>
+
+  <!-- Палитра команд (Ctrl+K): действия и быстрый переход по файлам -->
+  <div id="palette-overlay" class="overlay hidden">
+    <div class="palette-panel">
+      <div class="palette-input-row">
+        <span class="palette-ic" id="palette-ic">⌘</span>
+        <input id="palette-input" placeholder="Действие или файл…" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+        <span class="palette-kbd">↑↓ · Enter · Esc</span>
+      </div>
+      <div id="palette-list" class="palette-list"></div>
+    </div>
+  </div>
+
   <!-- Просмотр файла -->
   <div id="file-overlay" class="overlay hidden">
     <div class="file-panel">
+      <div id="file-tabs" class="file-tabs"></div>
       <div class="file-head">
         <div id="file-path" title="Путь к файлу">—</div>
         <div class="file-head-btns">
           <button id="btn-file-edit" class="btn btn-ghost btn-small" title="Редактировать файл">✏️</button>
+          <button id="btn-file-hl" class="btn btn-ghost btn-small active" title="Подсветка синтаксиса в редакторе (выкл — обычный текст)">✨</button>
           <button id="btn-file-save" class="btn btn-primary btn-small hidden" title="Сохранить изменения">Сохранить</button>
           <button id="btn-file-delete" class="btn btn-ghost btn-small" title="Удалить файл">🗑</button>
           <button id="btn-file-copy" class="btn btn-ghost btn-small" title="Скопировать путь">📋</button>
@@ -417,6 +485,7 @@
           <button class="stab" data-tab="project" title="Рабочая директория, GitHub, git">📁 Проект и GitHub</button>
           <button class="stab" data-tab="mobile" title="Доступ с телефона по локальной сети">📱 Мобильный</button>
           <button class="stab" data-tab="secrets" title="Переменные окружения и секреты для команд">🔒 Секреты</button>
+          <button class="stab" data-tab="yandex" title="Yandex Cloud: авторизация, каталог, разрешения агента">☁️ Yandex Cloud</button>
           <button class="stab" data-tab="ota" title="Локальные обновления кода на ходу">🔄 Self-update</button>
         </div>
 
@@ -515,7 +584,7 @@
                   <input id="s-auto-switch" type="checkbox" />
                   <span class="check-row-text">
                     <b>Авто-переключение при ошибке</b>
-                    <small>Если запрос упал из-за ключа, баланса или лимитов — приложение само переключится на следующее сохранённое подключение и повторит запрос. Нужно минимум 2 подключения с ключами.</small>
+                    <small>Переключается только когда проблема в ключе: лимит (429), баланс (402) или неверный ключ (401/403). Ошибки запроса и сети ключ не меняют. Провинившийся ключ откладывается (cooldown 1–10 мин), чтобы не «долбить» провайдера. Нужно минимум 2 подключения с ключами. Используй свои аккаунты — обход лимитов бесплатного тарифа нарушает правила провайдера.</small>
                   </span>
                 </label>
               </div>
@@ -742,6 +811,66 @@
               </div>
             </div>
           </div>
+          <div class="settings-section">
+            <div class="settings-section-title">🔎 Поиск для агента</div>
+            <div class="field">
+              <label>Serper API-ключ <span class="hint">(усиленный Google-поиск вместо DuckDuckGo — больше и точнее результатов для поиска клиентов. Ключ с serper.dev, 2500 бесплатных запросов при регистрации. Хранится зашифрованно. Пусто — поиск остаётся на DuckDuckGo.)</span></label>
+              <div class="input-row">
+                <input id="s-serper-key" type="password" placeholder="Serper API-ключ" spellcheck="false" autocomplete="off" />
+                <button id="btn-toggle-serper-key" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Вкладка: Yandex Cloud ── -->
+        <div class="settings-tab-body hidden" data-tab-body="yandex">
+          <div class="settings-section">
+            <div class="settings-section-title">☁️ Yandex Cloud — хостинг и инфраструктура</div>
+            <div class="yc-open-dash-row">
+              <button id="btn-yc-open-dash" class="btn btn-primary btn-small" title="Открыть дашборд ресурсов в правой панели">☁️ Открыть дашборд</button>
+              <span class="hint">ресурсы, счётчики, создание и удаление — в правой панели (кнопка «☁️» в шапке)</span>
+            </div>
+            <div class="field">
+              <label>Подключение <span class="hint">(OAuth-токен Yandex — тот же, что у yc CLI; хранится зашифрованно)</span></label>
+              <div id="yc-conn" class="yc-conn">
+                <div id="yc-conn-status" class="yc-conn-status">Не подключено</div>
+                <div class="input-row" id="yc-token-row">
+                  <input id="s-yc-token" type="password" placeholder="Вставь OAuth-токен (y0_AgAAAAA...)" spellcheck="false" autocomplete="off" />
+                  <button id="btn-yc-paste-token" class="btn btn-ghost" title="Вставить токен из буфера обмена">📋 Вставить</button>
+                  <button id="btn-yc-get-token" class="btn btn-ghost" title="Открыть страницу получения токена">🔑 Получить токен</button>
+                  <button id="btn-yc-connect" class="btn btn-primary" title="Проверить токен и войти">Войти</button>
+                </div>
+                <div id="yc-conn-account" class="yc-conn-account hidden"></div>
+              </div>
+            </div>
+            <div class="field yc-folder-field hidden" id="yc-folder-field">
+              <label>Каталог (folder) <span class="hint">— куда создаются ресурсы и откуда считается дашборд</span></label>
+              <div class="input-row">
+                <select id="s-yc-folder" class="select" style="flex:1;min-width:0"></select>
+                <button id="btn-yc-refresh-folders" class="btn btn-ghost" title="Обновить список каталогов">↻</button>
+                <button id="btn-yc-logout" class="btn btn-ghost" title="Выйти из Yandex Cloud">Выйти</button>
+              </div>
+            </div>
+            <div class="field yc-perms hidden" id="yc-perms">
+              <label>Разрешения агента <span class="hint">(ИИ может управлять облаком прямо из чата)</span></label>
+              <label class="check-row" title="Агент сможет вызывать ycCreate — создание баз, бакетов, контейнеров и т.д. Платные ресурсы — только по твоей явной просьбе.">
+                <input id="s-yc-allow-create" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Разрешить агенту создавать ресурсы</b>
+                  <small>YDB, Lockbox, реестр, бакет, DNS-зона, Serverless-контейнер, VPC — через чат. Выключено по умолчанию.</small>
+                </span>
+              </label>
+              <label class="check-row" title="Агент сможет вызывать ycDelete. Удаление необратимо — включай, только если доверяешь.">
+                <input id="s-yc-allow-delete" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Разрешить агенту удалять ресурсы</b>
+                  <small>Необратимо, может стереть данные. Выключено по умолчанию.</small>
+                </span>
+              </label>
+            </div>
+            <div id="yc-settings-msg" class="hint-block"></div>
+          </div>
         </div>
 
         <!-- ── Вкладка: Self-update (OTA) ── -->
@@ -784,6 +913,7 @@
   <script src="markdown.js"></script>
   <script src="bootstrap.js"></script>
   <script src="mobile-api.js"></script>
+  <script src="highlight.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

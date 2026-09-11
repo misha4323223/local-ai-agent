@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("api", {
   setSettings: (s) => ipcRenderer.invoke("settings:set", s),
   loadChats: () => ipcRenderer.invoke("chats:load"),
   saveChats: (d) => ipcRenderer.invoke("chats:save", d),
+  saveChatsSync: (d) => ipcRenderer.sendSync("chats:saveSync", d),
   sendMessage: (messages, opts) => ipcRenderer.invoke("ai:send", messages, opts || {}),
   answerQuestion: (text) => ipcRenderer.invoke("ai:answer", text),
   undoStatus: () => ipcRenderer.invoke("undo:status"),
@@ -100,6 +101,19 @@ contextBridge.exposeInMainWorld("api", {
   // Мобильный доступ (LAN + PWA + PIN): статус моста и новый PIN
   mobileStatus: () => ipcRenderer.invoke("mobile:status"),
   mobilePinRegen: () => ipcRenderer.invoke("mobile:pinRegen"),
+
+  // Yandex Cloud (REST API): авторизация, каталог, дашборд, создание/удаление
+  ycStatus: () => ipcRenderer.invoke("yc:status"),
+  ycSetToken: (token) => ipcRenderer.invoke("yc:setToken", token),
+  ycFolders: () => ipcRenderer.invoke("yc:folders"),
+  ycSetFolder: (folderId, folderName, cloudId) => ipcRenderer.invoke("yc:setFolder", folderId, folderName, cloudId),
+  ycSetPermissions: (allowCreate, allowDelete) => ipcRenderer.invoke("yc:setPermissions", allowCreate, allowDelete),
+  ycLogout: () => ipcRenderer.invoke("yc:logout"),
+  ycResources: () => ipcRenderer.invoke("yc:resources"),
+  ycCreate: (serviceKey, name) => ipcRenderer.invoke("yc:create", serviceKey, name),
+  ycDelete: (serviceKey, resourceId) => ipcRenderer.invoke("yc:delete", serviceKey, resourceId),
+  ycDeploy: (folderDir, appName, opts) => ipcRenderer.invoke("yc:deploy", folderDir, appName, opts || {}),
+  ycLogs: (serviceKey, resourceId) => ipcRenderer.invoke("yc:logs", serviceKey, resourceId),
 
   // Локальный self-update (OTA): статус, проверка, откат, открыть папку
   otaStatus: () => ipcRenderer.invoke("ota:status"),

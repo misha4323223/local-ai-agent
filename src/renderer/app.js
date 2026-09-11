@@ -388,16 +388,51 @@
     if (isElectron) {
       return Promise.all([api.getSettings(), api.loadChats()]).then(([s, c]) => {
         settings = normalize(s);
-        chatsData = c || { chats: [], activeId: null };
+        chatsData = sanitizeChats(c || { chats: [], activeId: null });
+        persistChats();
       });
     }
     try {
       settings = normalize(JSON.parse(localStorage.getItem("settings") || "null"));
     } catch {}
     try {
-      chatsData = JSON.parse(localStorage.getItem("chats") || "null") || { chats: [], activeId: null };
+      chatsData = sanitizeChats(JSON.parse(localStorage.getItem("chats") || "null") || { chats: [], activeId: null });
     } catch {}
     return Promise.resolve();
+  }
+
+  // ─── Восстановление после аварийного закрытия ───
+  // В сохранённой истории могли остаться незавершённые сообщения (pending).
+  // Снимаем флаги, чтобы после перезапуска не висел вечный индикатор «выполняется»,
+  // и один раз поясняем, что ответ был прерван.
+  function sanitizeChats(d) {
+    if (!d || !Array.isArray(d.chats)) return d || { chats: [], activeId: null };
+    for (const c of d.chats) {
+      if (!Array.isArray(c.messages)) c.messages = [];
+      let interrupted = false;
+      for (const m of c.messages) {
+        if (!m.pending) continue;
+        m.pending = false;
+        interrupted = true;
+        if (m.role === "tool") {
+          if (!m.toolResult) {
+            m.toolResult = "Действие не завершилось: приложение закрылось раньше.";
+            m.toolOk = false;
+          }
+        } else if (!m.content) {
+          m.content = "…";
+        }
+      }
+      if (interrupted && c.id === d.activeId) {
+        c.messages.push({
+          id: "recovered-" + c.id + "-" + Date.now(),
+          role: "system",
+          content: "⚠️ Предыдущий ответ был прерван закрытием приложения. Сохранённая часть осталась в истории — можно продолжить с этого места.",
+          createdAt: Date.now(),
+        });
+      }
+    }
+    return d;
   }
   function persistSettings() {
     if (isElectron) api.setSettings(settings);
@@ -407,6 +442,48 @@
     if (isElectron) api.saveChats(chatsData);
     else localStorage.setItem("chats", JSON.stringify(chatsData));
   }
+  // ─── Автосохранение во время длинного ответа ───
+  // Раньше чат писался на диск только в начале и в конце хода. Если приложение
+  // закрыть посреди ответа, весь уже полученный текст и действия пропадали.
+  // Теперь пишем не чаще раза в 1.5 c и гарантированно сбрасываем данные
+  // при закрытии/сворачивании окна.
+  let chatsSaveTimer = null;
+  let chatsSavePending = false;
+  const CHATS_SAVE_INTERVAL = 1500;
+  function persistChatsSoon() {
+    chatsSavePending = true;
+    if (chatsSaveTimer) return;
+    chatsSaveTimer = setTimeout(() => {
+      chatsSaveTimer = null;
+      if (!chatsSavePending) return;
+      chatsSavePending = false;
+      persistChats();
+    }, CHATS_SAVE_INTERVAL);
+  }
+  function persistChatsNow() {
+    if (chatsSaveTimer) { clearTimeout(chatsSaveTimer); chatsSaveTimer = null; }
+    chatsSavePending = false;
+    persistChats();
+  }
+  function flushChats(sync) {
+    if (chatsSaveTimer) { clearTimeout(chatsSaveTimer); chatsSaveTimer = null; }
+    if (!chatsSavePending) return;
+    chatsSavePending = false;
+    if (isElectron) {
+      // Синхронный канал доступен в Electron: успевает записать файл при закрытии окна.
+      if (sync && typeof api.saveChatsSync === "function") {
+        try { api.saveChatsSync(chatsData); return; } catch {}
+      }
+      api.saveChats(chatsData);
+    } else {
+      localStorage.setItem("chats", JSON.stringify(chatsData));
+    }
+  }
+  window.addEventListener("beforeunload", () => flushChats(true));
+  window.addEventListener("pagehide", () => flushChats(true));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushChats(true);
+  });
 
   // ─────────────── Чат ───────────────
   function getActiveChat() {
@@ -471,7 +548,6 @@
     chatsData.activeId = id;
     renderSidebar();
     renderMessages();
-    setTimeout(updateCtxIndicator, 100);
     persistChats();
   }
 
@@ -1175,6 +1251,7 @@
       const i = session.segmentIds.indexOf(s.id);
       if (i >= 0) session.segmentIds.splice(i, 1);
     }
+    persistChatsSoon();
   }
 
   // Все assistant-сегменты текущего запуска (по порядку).
@@ -1193,6 +1270,7 @@
         const seg = ensureSegmentForText(chat, aMsg);
         if (seg) {
           seg.content += ev.text;
+          persistChatsSoon();
           const el = msgEls.get(seg.id);
           if (el) {
             const b = el.querySelector(".bubble");
@@ -1209,6 +1287,7 @@
         const seg = ensureSegmentForText(chat, aMsg);
         if (seg) {
           seg.thinking = (seg.thinking || "") + ev.text;
+          persistChatsSoon();
           const el = msgEls.get(seg.id);
           if (el) {
             ensureThinkBox(el, seg.thinking);
@@ -1226,6 +1305,7 @@
         work.body.appendChild(toolEl);
         planAdd(ev);
         scrollBottom();
+        persistChatsSoon();
         break;
       case "tool_result":
         if (!chat) break;
@@ -1242,6 +1322,7 @@
           }
         }
         planSet(ev, toolOk);
+        persistChatsSoon();
         // Агент изменил файлы или git — обновляем панель проекта
         if (["writeFile", "editFile", "runCommand", "createFolder", "gitClone", "gitCommit", "gitRevert", "gitPush", "gitPull"].includes(ev.name)) {
           if (!$("project-panel").classList.contains("hidden")) setTimeout(refreshProject, 400);
@@ -1251,6 +1332,7 @@
         const seg = ensureSegmentForText(chat, aMsg);
         if (seg) {
           seg.content = ev.text;
+          persistChatsSoon();
           const el = msgEls.get(seg.id);
           if (el) {
             const b = el.querySelector(".bubble");
@@ -1334,6 +1416,7 @@
           const w = ensureWorkGroup();
           w.body.appendChild(el);
           scrollBottom();
+          persistChatsSoon();
         }
         // Синхронизируем локальную копию настроек с main (активный профиль сменился)
         settings.openaiActiveProfile = ev.id || settings.openaiActiveProfile;
@@ -1355,6 +1438,21 @@
         if (lastSeg) {
           lastSeg.error = ev.message;
           refreshMessage(lastSeg);
+        }
+        break;
+      }
+      case "yc_step": {
+        const box = $("yc-deploy-box");
+        const stepsEl = $("yc-deploy-steps");
+        if (box && !box.classList.contains("hidden") && stepsEl) {
+          const loading = stepsEl.querySelector(".yc-loading");
+          if (loading) loading.remove();
+          const d = document.createElement("div");
+          d.className = "yc-step";
+          d.textContent = ev.text || "";
+          stepsEl.appendChild(d);
+          const sp = $("sp-cloud");
+          if (sp) sp.scrollTop = sp.scrollHeight;
         }
         break;
       }
@@ -1442,8 +1540,11 @@
     }
     $("sp-console").classList.toggle("hidden", sideTab !== "console");
     $("sp-preview").classList.toggle("hidden", sideTab !== "preview");
+    const spCloudEl = $("sp-cloud");
+    if (spCloudEl) spCloudEl.classList.toggle("hidden", sideTab !== "cloud");
     $("btn-toggle-console").classList.add("active");
     $("btn-toggle-preview").classList.add("active");
+    if ($("btn-toggle-cloud")) $("btn-toggle-cloud").classList.add("active");
     if (sideTab === "console") {
       ensureTerminal();
       setTimeout(() => $("term-input").focus(), 50);
@@ -1452,12 +1553,16 @@
       refreshDevControls();
       if (!previewLoaded && settings.previewUrl) previewOpen(settings.previewUrl);
     }
+    if (sideTab === "cloud") {
+      ycLoadDashboard(false);
+    }
   }
 
   function closeSidePanel() {
     $("side-panel").classList.add("hidden");
     $("btn-toggle-console").classList.remove("active");
     $("btn-toggle-preview").classList.remove("active");
+    if ($("btn-toggle-cloud")) $("btn-toggle-cloud").classList.remove("active");
   }
 
   function switchSideTab(tab) {
@@ -1581,6 +1686,7 @@
     const txt = st.querySelector("span");
     if (dot) dot.className = "ps-dot" + (running ? " on" : err ? " err" : " off");
     if (txt) txt.textContent = running ? "Запущен" : err ? "Ошибка" : "Остановлено";
+    updateStatusBar();
   }
 
   function refreshDevControls() {
@@ -2033,7 +2139,7 @@
     }
     const lastSeg = kept[kept.length - 1] || aMsg;
     setStreaming(false);
-    persistChats();
+    persistChatsNow();
     renderSidebar();
     const el = msgEls.get(lastSeg.id);
     if (el) {
@@ -2174,26 +2280,39 @@
   // Единый цикл на общем транспорте AgentCore (те же правила, что и в Electron main).
   // Инструменты (файлы/git) в браузере недоступны — только чат.
   let webAutoSwitches = 0; // счётчик авто-переключений за запуск (защита от бесконечного круга)
+  const webProfileCooldown = new Map(); // profileId → timestamp: провинившийся ключ откладываем
 
   // Авто-переключение между сохранёнными OpenAI-подключениями при ошибке (браузерный путь).
   // Возвращает true, если переключились (вызывающий должен повторить раунд).
   function tryWebAutoSwitch(errText) {
     if (!settings.autoSwitchProfiles || settings.provider !== "openai") return false;
+    // Меняем ключ только если ошибка про ключ/баланс/лимит (400, контент, сеть — не про ключ).
+    const cls = (typeof AgentCore !== "undefined" && AgentCore.classifyKeyError)
+      ? AgentCore.classifyKeyError(errText)
+      : { key: true, cooldownMs: 60 * 1000 };
+    if (!cls.key) return false;
     const profs = openaiProfilesArr().filter((p) => p && p.id && String(p.apiKey || "").trim());
     if (profs.length < 2) return false;
     if (webAutoSwitches >= profs.length) return false; // прошли полный круг — стоп
     const cur = settings.openaiActiveProfile;
     const idx = Math.max(0, profs.findIndex((p) => p.id === cur));
-    const next = profs[(idx + 1) % profs.length];
-    webAutoSwitches++;
-    settings.openaiActiveProfile = next.id;
-    settings.openaiUrl = next.url || settings.openaiUrl;
-    settings.openaiApiKey = next.apiKey || "";
-    if (next.model) settings.openaiModel = next.model;
-    if (next.project !== undefined) settings.openaiProject = next.project || "";
-    persistSettings();
-    onEvent({ type: "profile_switched", name: next.name || next.id, id: next.id, error: String(errText || "").slice(0, 160) });
-    return true;
+    const now = Date.now();
+    webProfileCooldown.set(cur, now + cls.cooldownMs); // провинившийся ключ отлеживается
+    for (let step = 1; step <= profs.length; step++) {
+      const next = profs[(idx + step) % profs.length];
+      if (!next || next.id === cur) continue;
+      if ((webProfileCooldown.get(next.id) || 0) > now) continue; // ещё в кулдауне
+      webAutoSwitches++;
+      settings.openaiActiveProfile = next.id;
+      settings.openaiUrl = next.url || settings.openaiUrl;
+      settings.openaiApiKey = next.apiKey || "";
+      if (next.model) settings.openaiModel = next.model;
+      if (next.project !== undefined) settings.openaiProject = next.project || "";
+      persistSettings();
+      onEvent({ type: "profile_switched", name: next.name || next.id, id: next.id, error: String(errText || "").slice(0, 160) });
+      return true;
+    }
+    return false; // все ключи в кулдауне — переключать некуда
   }
 
   async function webSend(messages, onEvent, signal, opts) {
@@ -2411,6 +2530,9 @@
           // Память проекта и точки отката работают только в desktop-приложении.
           result =
             "⚠️ Инструменты памяти проекта (noteSave/noteRead/noteList/noteDelete) и точек отката (checkpointSave/checkpointList/checkpointRollback) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
+        } else if (c.name === "ycStatus" || c.name === "ycList" || c.name === "ycCreate" || c.name === "ycDelete" || c.name === "ycDeploy" || c.name === "ycLogs") {
+          result =
+            "⚠️ Инструменты Yandex Cloud (ycStatus/ycList/ycCreate/ycDelete) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
         } else {
           result =
             "⚠️ Файловые операции и git недоступны в веб-версии. Запустите приложение на Windows (bun run dist:win).";
@@ -2434,6 +2556,7 @@
     $("model-badge").title = settings.model
       ? "Провайдер и модель — нажми, чтобы изменить"
       : "Модель не выбрана — нажми, чтобы настроить";
+    updateStatusBar();
   }
 
   function setSettingsMsg(text, isError) {
@@ -2509,6 +2632,7 @@
     $("s-vision-auto").checked = settings.visionAuto !== false;
     $("s-vision-url").value = settings.visionUrl || "";
     $("s-vision-key").value = settings.visionKey || "";
+    $("s-serper-key").value = settings.serperApiKey || "";
     $("s-vision-model").value = settings.visionModel || "";
     $("s-image-model").value = settings.imageModel || "";
     $("vision-fields").classList.toggle("hidden", !$("s-vision-enabled").checked);
@@ -2542,6 +2666,7 @@
     settings.visionAuto = !!$("s-vision-auto").checked;
     settings.visionUrl = $("s-vision-url").value.trim();
     settings.visionKey = $("s-vision-key").value.trim();
+    settings.serperApiKey = $("s-serper-key").value.trim();
     settings.visionModel = $("s-vision-model").value.trim();
     settings.imageModel = $("s-image-model").value.trim();
     settings.otaEnabled = !!$("s-ota-enabled").checked;
@@ -2658,6 +2783,8 @@
     }
     try {
       const st = await api.otaStatus();
+      sbVersion = (st && st.installed) || "базовая";
+      updateStatusBar();
       const parts = ["Версия кода: " + ((st && st.installed) || "базовая")];
       if (st && st.dir) parts.push("Папка: " + st.dir);
       if (st && st.sources && st.sources.length) parts.push("Обновлений найдено: " + st.sources.length);
@@ -2686,6 +2813,7 @@
     if (!found) setPreset(settings.openaiUrl ? "custom" : "deepseek");
     renderModelHints(null, null); // прячем подсказки моделей (провайдер мог смениться)
     renderGithubSection();
+    ycRefreshSettingsUI(); // Yandex Cloud: статус подключения, каталог, разрешения
     $("settings-overlay").classList.remove("hidden");
     setSettingsMsg("", false);
   }
@@ -2978,6 +3106,536 @@
     const ctx = "ПРОДОЛЖЕНИЕ ПРЕДЫДУЩЕГО ЧАТА\n" + (title ? "Тема/задача: " + title + "\n" : "") + (lastAssistant ? "\nПоследний ответ агента:\n" + lastAssistant.slice(0, 3000) : "\n(Предыдущий чат был пуст)");
     createChat({ contextMsg: ctx, title: title ? title + " (продолжение)" : "Новый чат" });
   };
+  // ── Yandex Cloud (дашборд + настройки) ──
+  const YC_CREATABLE = ["ydb", "lockbox", "containerRegistry", "storage", "dns", "serverlessContainers", "vpc"];
+  const YC_FORMS = {
+    apiGateway: ["шлюз", "шлюза", "шлюзов"],
+    certificateManager: ["сертификат", "сертификата", "сертификатов"],
+    cdn: ["ресурс", "ресурса", "ресурсов"],
+    dns: ["зона", "зоны", "зон"],
+    logging: ["группа", "группы", "групп"],
+    postbox: ["адрес", "адреса", "адресов"],
+    containerRegistry: ["реестр", "реестра", "реестров"],
+    iam: ["сервисный аккаунт", "сервисных аккаунта", "сервисных аккаунтов"],
+    lockbox: ["секрет", "секрета", "секретов"],
+    ydb: ["база", "базы", "баз"],
+    storage: ["бакет", "бакета", "бакетов"],
+    serverlessContainers: ["контейнер", "контейнера", "контейнеров"],
+    vpc: ["сеть", "сети", "сетей"],
+  };
+  let ycStatusCache = null;
+  let ycServicesCache = null;
+  let ycDashKey = ""; // ключ развёрнутой карточки дашборда
+  let ycTotal = null; // всего ресурсов в каталоге («Облако в цифрах»)
+  let ycActiveServices = null; // сервисов с ресурсами
+
+  function ycNounPlural(key, n) {
+    const forms = YC_FORMS[key] || ["ресурс", "ресурса", "ресурсов"];
+    const n10 = n % 10;
+    const n100 = n % 100;
+    if (n10 === 1 && n100 !== 11) return n + " " + forms[0];
+    if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return n + " " + forms[1];
+    return n + " " + forms[2];
+  }
+
+  async function ycRefreshSettingsUI() {
+    if (!isElectron) {
+      // веб-превью: управление облаком живёт в main-процессе Electron
+      const m = $("yc-settings-msg");
+      if (m) m.textContent = "⚠️ Управление Yandex Cloud работает в desktop-приложении (на ПК): здесь можно только посмотреть поля настроек.";
+      return;
+    }
+    const msg = $("yc-settings-msg");
+    try {
+      const st = await api.ycStatus();
+      ycStatusCache = st;
+      const acc = $("yc-conn-account");
+      if (st.loggedIn && st.iamOk) {
+        $("yc-conn-status").textContent = "✅ Подключено" + (st.folderName ? " · каталог «" + st.folderName + "»" : "");
+        $("yc-conn-status").classList.add("ok");
+        ycSetHeaderDot(st.folderId ? "ok" : "warn");
+        if (acc) {
+          acc.textContent = "Аккаунт: " + ((st.clouds && st.clouds[0] && st.clouds[0].name) || "Yandex") + " · облако: " + (st.cloudId || "—");
+          acc.classList.remove("hidden");
+        }
+        $("yc-token-row").classList.add("hidden");
+        $("yc-folder-field").classList.remove("hidden");
+        $("yc-perms").classList.remove("hidden");
+        const sel = $("s-yc-folder");
+        sel.innerHTML = "";
+        for (const f of st.folders || []) {
+          const o = document.createElement("option");
+          o.value = f.id;
+          o.textContent = f.name || f.id;
+          sel.appendChild(o);
+        }
+        if (st.folderId) sel.value = st.folderId;
+        $("s-yc-allow-create").checked = !!st.allowCreate;
+        $("s-yc-allow-delete").checked = !!st.allowDelete;
+      } else {
+        $("yc-conn-status").textContent = "Не подключено" + (st.error ? " — " + st.error : "");
+        $("yc-conn-status").classList.remove("ok");
+        ycSetHeaderDot("off");
+        if (acc) acc.classList.add("hidden");
+        $("yc-token-row").classList.remove("hidden");
+        $("yc-folder-field").classList.add("hidden");
+        $("yc-perms").classList.add("hidden");
+      }
+      if (msg) msg.textContent = "";
+    } catch (e) {
+      if (msg) msg.textContent = "Ошибка: " + ((e && e.message) || String(e));
+    }
+  }
+
+  // Экран-подсказка, когда дашборд не может показать ресурсы (нет токена / веб-версия)
+  function ycShowOnboard(icon, title, text) {
+    const box = $("yc-dash");
+    if (box) box.innerHTML = "";
+    const sum = $("yc-summary");
+    if (sum) sum.classList.add("hidden");
+    ycSetHeaderDot("off");
+    const onboard = $("yc-onboard");
+    if (!onboard) return;
+    const ic = onboard.querySelector(".yc-onboard-ic");
+    const t = onboard.querySelector(".yc-onboard-title");
+    const x = onboard.querySelector(".yc-onboard-text");
+    if (ic && icon) ic.textContent = icon;
+    if (t && title) t.textContent = title;
+    if (x && text) x.textContent = text;
+    onboard.classList.remove("hidden");
+  }
+
+  function ycHideOnboard() {
+    const onboard = $("yc-onboard");
+    if (onboard) onboard.classList.add("hidden");
+  }
+
+  async function ycLoadDashboard(force) {
+    const statusEl = $("yc-dash-status");
+    const box = $("yc-dash");
+    if (!statusEl || !box) return;
+    if (!isElectron) {
+      statusEl.textContent = "Только в desktop-приложении";
+      ycShowOnboard(
+        "🖥",
+        "Дашборд доступен в приложении на ПК",
+        "Ресурсы Yandex Cloud, деплой и управление из чата работают в desktop-приложении (Windows/macOS/Linux). В веб-превью доступны только настройки: токен, каталог и разрешения агента."
+      );
+      return;
+    }
+    if (!ycStatusCache) {
+      try {
+        ycStatusCache = await api.ycStatus();
+      } catch (e) {
+        ycStatusCache = { error: (e && e.message) || String(e) };
+      }
+    }
+    const st = ycStatusCache || {};
+    if (!st.loggedIn) {
+      statusEl.textContent = "🔑 Не подключено";
+      ycShowOnboard(
+        "☁️",
+        "Yandex Cloud не подключён",
+        "Подключи OAuth-токен Yandex — и здесь появится живой дашборд: базы YDB, бакеты Object Storage, реестр образов, Serverless-контейнеры, DNS-зоны, секреты Lockbox, API-шлюз и CDN. Агент сможет управлять ресурсами прямо из чата."
+      );
+      return;
+    }
+    ycHideOnboard();
+    ycSetHeaderDot(st.iamOk === false ? "warn" : "ok");
+    statusEl.textContent = "Каталог: " + (st.folderName || st.folderId || "—") + (st.iamOk === false ? " · ⚠️ " + (st.error || "") : "");
+    if (!force && ycServicesCache) {
+      ycRenderDash();
+      return;
+    }
+    box.innerHTML = '<div class="yc-loading">Загрузка ресурсов…</div>';
+    let r;
+    try {
+      r = await api.ycResources();
+    } catch (e) {
+      r = { ok: false, error: (e && e.message) || String(e) };
+    }
+    if (!r || !r.ok) {
+      statusEl.textContent = "⚠️ " + ((r && r.error) || "Ошибка загрузки");
+      box.innerHTML = "";
+      return;
+    }
+    ycServicesCache = r.services;
+    ycTotal = r.total != null ? r.total : null;
+    ycActiveServices = r.activeServices != null ? r.activeServices : null;
+    ycRenderDash();
+  }
+
+  function ycRenderSummary(total, active) {
+    const sum = $("yc-summary");
+    if (!sum) return;
+    sum.classList.remove("hidden");
+    sum.innerHTML = "";
+    const mk = (text) => {
+      const s = document.createElement("span");
+      s.className = "yc-summary-item";
+      s.textContent = text;
+      return s;
+    };
+    sum.appendChild(mk("🧮 Ресурсов: " + (total == null ? "—" : total)));
+    sum.appendChild(mk("Сервисов с ресурсами: " + (active == null ? "—" : active)));
+  }
+
+  function ycRenderDash() {
+    const box = $("yc-dash");
+    if (!box) return;
+    box.innerHTML = "";
+    ycRenderSummary(ycTotal, ycActiveServices);
+    const svcs = ycServicesCache || [];
+    const grid = document.createElement("div");
+    grid.className = "yc-grid";
+    for (const s of svcs) {
+      const card = document.createElement("div");
+      card.className = "yc-card" + (ycDashKey === s.key ? " open" : "");
+      card.title = s.ok ? "Клик — список ресурсов" : (s.error ? s.error : "API недоступно");
+      const head = document.createElement("div");
+      head.className = "yc-card-head";
+      const icon = document.createElement("span");
+      icon.className = "yc-card-icon";
+      icon.textContent = s.icon || "☁️";
+      const title = document.createElement("span");
+      title.className = "yc-card-title";
+      title.textContent = s.title;
+      head.appendChild(icon);
+      head.appendChild(title);
+      const body = document.createElement("div");
+      body.className = "yc-card-body";
+      const count = document.createElement("div");
+      count.className = "yc-card-count" + (s.ok ? "" : " err");
+      count.textContent = s.ok ? ycNounPlural(s.key, s.count) : "n/a";
+      body.appendChild(count);
+      if (s.ok && YC_CREATABLE.includes(s.key)) {
+        const add = document.createElement("button");
+        add.type = "button";
+        add.className = "btn btn-small yc-add";
+        add.textContent = "＋ Создать";
+        add.title = "Создать новый ресурс («" + s.title + "»). Может быть платным.";
+        add.onclick = (e) => {
+          e.stopPropagation();
+          ycCreateFlow(s.key, s.title);
+        };
+        body.appendChild(add);
+      }
+      card.appendChild(head);
+      card.appendChild(body);
+      if (ycDashKey === s.key) {
+        const list = document.createElement("div");
+        list.className = "yc-card-list";
+        if (!s.ok) {
+          list.textContent = "Ошибка API: " + (s.error || "недоступно");
+        } else if (!s.items || !s.items.length) {
+          list.textContent = "Ресурсов нет — нажми «＋ Создать».";
+        } else {
+          for (const it of s.items.slice(0, 50)) {
+            const row = document.createElement("div");
+            row.className = "yc-item";
+            const nm = document.createElement("span");
+            nm.className = "yc-item-name";
+            nm.textContent = it.name || it.id || "—";
+            nm.title = it.id || "";
+            row.appendChild(nm);
+            const actions = document.createElement("div");
+            actions.className = "yc-item-actions";
+            if (s.key === "serverlessContainers" && it.status) {
+              const st = document.createElement("span");
+              st.className = "yc-status " + String(it.status).toLowerCase();
+              st.textContent = it.status;
+              actions.appendChild(st);
+            }
+            if (s.key === "serverlessContainers" && it.url) {
+              const go = document.createElement("button");
+              go.type = "button";
+              go.className = "btn btn-ghost btn-small";
+              go.textContent = "↗";
+              go.title = "Открыть URL контейнера: " + it.url;
+              go.onclick = (e) => {
+                e.stopPropagation();
+                if (isElectron) api.openExternal(it.url);
+              };
+              actions.appendChild(go);
+            }
+            if (s.key === "serverlessContainers") {
+              const lg = document.createElement("button");
+              lg.type = "button";
+              lg.className = "btn btn-ghost btn-small";
+              lg.textContent = "📜";
+              lg.title = "Логи контейнера (нужен yc CLI)";
+              lg.onclick = async (e) => {
+                e.stopPropagation();
+                let r;
+                try {
+                  r = await api.ycLogs(s.key, it.id);
+                } catch (err) {
+                  r = { ok: false, error: (err && err.message) || String(err) };
+                }
+                if (r && r.ok && r.logs && r.logs.length) {
+                  toast("📜 Логи: " + r.logs.length + " записей — открыты в консоли приложения");
+                  termAppend("📜 Логи контейнера:\n" + r.logs.slice(-30).join("\n"));
+                } else {
+                  toast("❌ " + ((r && r.error) || "Логов нет за последние 3 часа"));
+                }
+              };
+              actions.appendChild(lg);
+            }
+            const del = document.createElement("button");
+            del.type = "button";
+            del.className = "btn btn-danger btn-small";
+            del.textContent = "🗑";
+            del.title = "Удалить «" + (it.name || it.id) + "» (необратимо)";
+            del.onclick = (e) => {
+              e.stopPropagation();
+              ycDeleteFlow(s.key, s.title, it);
+            };
+            actions.appendChild(del);
+            row.appendChild(actions);
+            list.appendChild(row);
+          }
+          if (s.items.length > 50) {
+            const more = document.createElement("div");
+            more.className = "yc-item-more";
+            more.textContent = "… и ещё " + (s.items.length - 50);
+            list.appendChild(more);
+          }
+        }
+        card.appendChild(list);
+      }
+      card.onclick = () => {
+        ycDashKey = ycDashKey === s.key ? "" : s.key;
+        ycRenderDash();
+      };
+      grid.appendChild(card);
+    }
+    box.appendChild(grid);
+  }
+
+  function ycCreateFlow(serviceKey, title) {
+    inputDialog("＋ Создать: " + title, "Имя: латиница, цифры, дефис (2–63 символа). Создание может быть платным.", "Создать").then(async (name) => {
+      if (!name) return;
+      let r;
+      try {
+        r = await api.ycCreate(serviceKey, name);
+      } catch (e) {
+        r = { ok: false, error: (e && e.message) || String(e) };
+      }
+      if (r && r.ok) {
+        toast("✅ " + r.message);
+        ycServicesCache = null;
+        ycLoadDashboard(true);
+      } else {
+        toast("❌ " + ((r && r.error) || "Ошибка создания"));
+      }
+    });
+  }
+
+  function ycDeleteFlow(serviceKey, title, item) {
+    confirmModal("🗑 Удалить «" + (item.name || item.id) + "»?", title + ": удаление необратимо и может стереть данные. Продолжить?", async () => {
+      let r;
+      try {
+        r = await api.ycDelete(serviceKey, item.id);
+      } catch (e) {
+        r = { ok: false, error: (e && e.message) || String(e) };
+      }
+      if (r && r.ok) {
+        toast("✅ " + r.message);
+        ycServicesCache = null;
+        ycLoadDashboard(true);
+      } else {
+        toast("❌ " + ((r && r.error) || "Ошибка удаления"));
+      }
+    }, true);
+  }
+
+  // Обработчики Yandex Cloud
+  $("btn-yc-connect").onclick = async () => {
+    const t = $("s-yc-token").value.trim();
+    if (!t) {
+      toast("Вставь OAuth-токен (кнопка «🔑 Получить токен»)");
+      return;
+    }
+    $("btn-yc-connect").disabled = true;
+    let r;
+    try {
+      r = await api.ycSetToken(t);
+    } catch (e) {
+      r = { ok: false, error: (e && e.message) || String(e) };
+    }
+    $("btn-yc-connect").disabled = false;
+    if (r && r.ok) {
+      toast("✅ Подключено к Yandex Cloud" + (r.folderName ? " · каталог «" + r.folderName + "»" : ""));
+      ycStatusCache = null;
+      ycServicesCache = null;
+      ycRefreshSettingsUI();
+      ycLoadDashboard(true);
+    } else {
+      toast("❌ " + ((r && r.error) || "Не удалось войти"));
+    }
+  };
+  function ycTokenUrl() {
+    return (ycStatusCache && ycStatusCache.oauthUrl) || "https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb";
+  }
+  function ycOpenTokenPage() {
+    const url = ycTokenUrl();
+    if (isElectron) api.openExternal(url);
+    else window.open(url, "_blank");
+  }
+  // Точка у кнопки «☁️» в шапке: зелёная — подключено, жёлтая — нужен каталог/IAM
+  function ycSetHeaderDot(state) {
+    const d = $("btn-toggle-cloud-dot");
+    if (d) d.className = "hd-dot" + (state === "ok" ? " ok" : state === "warn" ? " warn" : "");
+    const b = $("btn-toggle-cloud");
+    if (b) {
+      b.title =
+        state === "ok"
+          ? "Yandex Cloud подключён — ресурсы каталога и деплой"
+          : state === "warn"
+            ? "Yandex Cloud: проверь каталог или токен"
+            : "Yandex Cloud — ресурсы каталога и деплой";
+    }
+  }
+  $("btn-yc-get-token").onclick = ycOpenTokenPage;
+  $("btn-yc-logout").onclick = () => {
+    confirmModal("Выйти из Yandex Cloud?", "OAuth-токен будет удалён из приложения. Ресурсы в облаке не пострадают.", async () => {
+      await api.ycLogout();
+      ycStatusCache = null;
+      ycServicesCache = null;
+      ycRefreshSettingsUI();
+      ycLoadDashboard(true);
+      toast("Выход выполнен");
+    });
+  };
+  $("btn-yc-refresh-folders").onclick = async () => {
+    const r = await api.ycFolders();
+    if (!r || !r.ok) {
+      toast("❌ " + ((r && r.error) || "Не удалось загрузить каталоги"));
+      return;
+    }
+    const sel = $("s-yc-folder");
+    sel.innerHTML = "";
+    for (const f of r.folders || []) {
+      const o = document.createElement("option");
+      o.value = f.id;
+      o.textContent = f.name || f.id;
+      sel.appendChild(o);
+    }
+    if (ycStatusCache && ycStatusCache.folderId) sel.value = ycStatusCache.folderId;
+    toast("Каталогов: " + ((r.folders || []).length));
+  };
+  $("s-yc-folder").onchange = () => {
+    const sel = $("s-yc-folder");
+    const f = (ycStatusCache && ycStatusCache.folders || []).find((x) => x.id === sel.value);
+    api.ycSetFolder(sel.value, (f && f.name) || sel.value, (f && f.cloudId) || (ycStatusCache && ycStatusCache.cloudId) || "");
+    ycStatusCache = null;
+    ycServicesCache = null;
+    toast("Каталог: " + (f && f.name ? f.name : sel.value));
+    ycLoadDashboard(true);
+  };
+  $("s-yc-allow-create").onchange = () => {
+    api.ycSetPermissions($("s-yc-allow-create").checked, $("s-yc-allow-delete").checked);
+    toast($("s-yc-allow-create").checked ? "Агенту разрешено создавать ресурсы" : "Создание агентом выключено");
+  };
+  $("s-yc-allow-delete").onchange = () => {
+    api.ycSetPermissions($("s-yc-allow-create").checked, $("s-yc-allow-delete").checked);
+    toast($("s-yc-allow-delete").checked ? "Агенту разрешено удалять ресурсы" : "Удаление агентом выключено");
+  };
+  $("btn-yc-dash-refresh").onclick = () => {
+    ycServicesCache = null;
+    ycLoadDashboard(true);
+  };
+  $("btn-yc-dash-settings").onclick = () => {
+    openSettings();
+    showSettingsTab("yandex");
+  };
+  // Кнопка «☁️» в шапке — дашборд Yandex Cloud в правой панели
+  if ($("btn-toggle-cloud")) {
+    $("btn-toggle-cloud").onclick = () => {
+      if (sidePanelVisible() && sideTab === "cloud") closeSidePanel();
+      else openSidePanel("cloud");
+    };
+  }
+  // Из настроек — сразу открыть дашборд
+  if ($("btn-yc-open-dash")) {
+    $("btn-yc-open-dash").onclick = () => {
+      $("settings-overlay").classList.add("hidden");
+      openSidePanel("cloud");
+    };
+  }
+  if ($("btn-yc-onboard-settings")) {
+    $("btn-yc-onboard-settings").onclick = () => {
+      openSettings();
+      showSettingsTab("yandex");
+    };
+  }
+  if ($("btn-yc-onboard-token")) $("btn-yc-onboard-token").onclick = ycOpenTokenPage;
+  $("btn-yc-paste-token").onclick = async () => {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t && t.trim()) {
+        $("s-yc-token").value = t.trim();
+        toast("Токен вставлен из буфера — нажми «Войти»");
+      } else {
+        toast("Буфер обмена пуст");
+      }
+    } catch (e) {
+      toast("Не удалось прочитать буфер: " + ((e && e.message) || String(e)));
+    }
+  };
+  $("btn-yc-deploy").onclick = () => {
+    if (!isElectron) {
+      toast("Деплой доступен в desktop-приложении");
+      return;
+    }
+    const dir = settings.workingDir || "";
+    if (!dir) {
+      toast("Сначала выбери рабочую директорию (Настройки → 📁 Проект и GitHub)");
+      return;
+    }
+    inputDialog("🚀 Деплой на Yandex Cloud", "Папка: " + dir + "\nИмя приложения (латиница, 2–63 символа). Docker должен быть установлен и запущен.", "Задеплоить").then(async (name) => {
+      if (!name) return;
+      const box = $("yc-deploy-box");
+      const stepsEl = $("yc-deploy-steps");
+      const resultEl = $("yc-deploy-result");
+      box.classList.remove("hidden");
+      stepsEl.innerHTML = "";
+      resultEl.classList.add("hidden");
+      stepsEl.innerHTML = '<div class="yc-loading">⏳ Деплой… (docker build может занять несколько минут)</div>';
+      let r;
+      try {
+        r = await api.ycDeploy(dir, name, {});
+      } catch (e) {
+        r = { ok: false, error: (e && e.message) || String(e) };
+      }
+      stepsEl.innerHTML = "";
+      for (const s of (r && r.steps) || []) {
+        const d = document.createElement("div");
+        d.className = "yc-step";
+        d.textContent = s;
+        stepsEl.appendChild(d);
+      }
+      if (r && r.ok) {
+        if (r.url) {
+          $("yc-deploy-url").textContent = r.url;
+          resultEl.classList.remove("hidden");
+        }
+        toast("✅ Деплой завершён");
+        ycServicesCache = null;
+        ycLoadDashboard(true);
+      } else {
+        const d = document.createElement("div");
+        d.className = "yc-step err";
+        d.textContent = "❌ " + ((r && r.error) || "Ошибка деплоя");
+        stepsEl.appendChild(d);
+      }
+    });
+  };
+  $("btn-yc-deploy-open").onclick = () => {
+    const u = $("yc-deploy-url").textContent.trim();
+    if (u && isElectron) api.openExternal(u);
+  };
+
   $("btn-settings").onclick = openSettings;
   $("model-badge").onclick = toggleModelPopup;
   $("mp-close").onclick = closeModelPopup;
@@ -3185,7 +3843,9 @@
 
   function refreshProject() {
     refreshTree();
-    refreshRepo();
+    Promise.resolve(refreshRepo())
+      .then(updateStatusBar)
+      .catch(() => {});
   }
 
   // ── Проекты (переключатель в панели) ──
@@ -3219,6 +3879,7 @@
       });
       $("btn-project-add").disabled = r.projects.length >= 10;
       $("btn-project-remove").disabled = !r.activeId;
+      updateStatusBar();
     });
   }
 
@@ -3410,126 +4071,351 @@
     return node;
   }
 
-  let fileViewPath = ""; // файл, открытый в просмотрщике
-  let fileCanEdit = false; // текстовый файл, доступный для редактирования
+  // ═══ Файлы: вкладки, нумерация строк, подсветка синтаксиса ═══
+  let fileViewPath = "";   // путь активного файла (для кнопок панели)
+  let fileCanEdit = false; // текстовый ли активный файл
+  let openFiles = [];      // [{ path, content, orig, loaded, dirty, truncated, binary, image }]
+  let editMode = false;    // активная вкладка открыта в редакторе
+  let hlInEditor = true;   // подсветка в редакторе (кнопка ✨)
+  let editorRepaint = null; // перерисовать слой подсветки в открытом редакторе
+  const MAX_VIEW_LINES = 8000;
 
+  function hl(code, name) {
+    return window.Highlight && window.Highlight.highlight ? window.Highlight.highlight(code, name) : escHtml(code);
+  }
+
+  function activeFile() {
+    for (let i = 0; i < openFiles.length; i++) if (openFiles[i].path === fileViewPath) return openFiles[i];
+    return null;
+  }
+
+  function isImagePath(p) {
+    return /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/i.test(String(p || ""));
+  }
+
+  function fileErrorEl(text) {
+    const d = document.createElement("div");
+    d.className = "file-error";
+    d.textContent = text;
+    return d;
+  }
+
+  function updateFileToolbar() {
+    const f = activeFile();
+    const img = !!(f && f.image);
+    const editBtn = $("btn-file-edit");
+    const saveBtn = $("btn-file-save");
+    const hlBtn = $("btn-file-hl");
+    const delBtn = $("btn-file-delete");
+    if (editBtn) editBtn.classList.toggle("hidden", editMode || img || !fileCanEdit);
+    if (saveBtn) saveBtn.classList.toggle("hidden", !editMode);
+    if (hlBtn) {
+      hlBtn.classList.toggle("hidden", !editMode);
+      hlBtn.classList.toggle("active", hlInEditor);
+    }
+    if (delBtn) delBtn.classList.toggle("hidden", !fileViewPath);
+  }
+
+  // Открыть файл: новая вкладка или активация уже открытой (opts.edit — сразу редактор)
   async function viewFile(p, opts) {
     opts = opts || {};
-    if (!isElectron) return;
-    const overlay = $("file-overlay");
+    if (!isElectron || !p) return;
+    let f = null;
+    for (let i = 0; i < openFiles.length; i++) if (openFiles[i].path === p) f = openFiles[i];
+    if (!f) {
+      f = { path: p, content: "", orig: "", loaded: false, dirty: false, truncated: false, binary: false, image: isImagePath(p) };
+      openFiles.push(f);
+    }
     fileViewPath = p;
-    fileCanEdit = false;
-    $("file-path").textContent = p;
-    $("file-path").title = p;
-    $("btn-file-save").classList.add("hidden");
-    $("btn-file-edit").classList.remove("hidden");
-    $("btn-file-delete").classList.remove("hidden");
+    editMode = !!opts.edit && !f.image;
+    $("file-overlay").classList.remove("hidden");
+    renderFileTabs();
+    await loadActiveFile();
+  }
+
+  async function loadActiveFile() {
+    const f = activeFile();
     const content = $("file-content");
-    content.innerHTML = '<div class="file-error">Загружаю...</div>';
-    overlay.classList.remove("hidden");
-    // Изображения показываем как картинку, а не как текст (правка недоступна)
-    if (/\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/i.test(p)) {
-      $("btn-file-edit").classList.add("hidden");
-      const imgRes = await api.fsReadImage(p);
+    if (!f) {
+      content.innerHTML = "";
+      updateFileToolbar();
+      return;
+    }
+    $("file-path").textContent = f.path;
+    $("file-path").title = f.path;
+    if (f.image) {
+      fileCanEdit = false;
+      updateFileToolbar();
+      const imgRes = await api.fsReadImage(f.path);
       content.innerHTML = "";
       if (!imgRes || !imgRes.ok) {
-        const d = document.createElement("div");
-        d.className = "file-error";
-        d.textContent = (imgRes && imgRes.error) || "Не удалось прочитать изображение";
-        content.appendChild(d);
+        content.appendChild(fileErrorEl((imgRes && imgRes.error) || "Не удалось прочитать изображение"));
         return;
       }
       const img = document.createElement("img");
       img.className = "image-view";
       img.src = imgRes.dataUrl;
-      img.alt = p;
+      img.alt = f.path;
       content.appendChild(img);
       return;
     }
-    const res = await api.fsReadFile(p);
-    if (!res || !res.ok) {
-      content.innerHTML = "";
-      const d = document.createElement("div");
-      d.className = "file-error";
-      d.textContent = (res && res.error) || "Не удалось прочитать файл";
-      content.appendChild(d);
-      return;
+    // Несохранённые правки не перечитываем с диска — иначе потеряем их
+    if (!f.loaded || !f.dirty) {
+      const res = await api.fsReadFile(f.path);
+      if (!res || !res.ok) {
+        f.loaded = true;
+        f.content = "";
+        f.binary = true;
+        f.truncated = false;
+        fileCanEdit = false;
+        content.innerHTML = "";
+        content.appendChild(fileErrorEl((res && res.error) || "Не удалось прочитать файл"));
+        updateFileToolbar();
+        return;
+      }
+      f.content = res.content || "";
+      f.truncated = !!res.truncated;
+      f.binary = !!res.binary;
+      f.loaded = true;
+      f.orig = f.content;
     }
-    fileCanEdit = !res.truncated && !res.binary;
-    if (!fileCanEdit) $("btn-file-edit").classList.add("hidden");
-    if (opts.edit && fileCanEdit) {
-      renderFileEditor(res.content);
-      return;
-    }
-    renderFileView(res);
+    fileCanEdit = !f.truncated && !f.binary;
+    updateFileToolbar();
+    if (editMode && fileCanEdit) renderFileEditor(f.content);
+    else renderFileView(f);
   }
 
-  function renderFileView(res) {
+  // ── Чтение: нумерация строк + подсветка ──
+  function renderFileView(f) {
+    editorRepaint = null;
     const content = $("file-content");
     content.innerHTML = "";
-    const pre = document.createElement("pre");
-    pre.className = "code-view";
-    const lines = res.content.split("\n");
-    const shown = lines.slice(0, 8000);
+    const lines = String(f.content || "").split("\n");
+    const shown = lines.slice(0, MAX_VIEW_LINES);
+    const wrap = document.createElement("div");
+    wrap.className = "code-wrap";
+    const gutter = document.createElement("div");
+    gutter.className = "code-gutter";
     for (let i = 0; i < shown.length; i++) {
-      const line = document.createElement("div");
-      line.className = "code-line";
-      const num = document.createElement("span");
-      num.className = "code-ln";
-      num.textContent = String(i + 1);
-      const txt = document.createElement("span");
-      txt.className = "code-txt";
-      txt.textContent = shown[i] || " ";
-      line.appendChild(num);
-      line.appendChild(txt);
-      pre.appendChild(line);
-    }
-    if (res.truncated) {
       const d = document.createElement("div");
-      d.className = "file-error";
-      d.textContent = "Файл обрезан — показаны первые 300 КБ.";
-      pre.appendChild(d);
+      d.className = "code-gn";
+      d.textContent = String(i + 1);
+      gutter.appendChild(d);
     }
-    content.appendChild(pre);
+    const pre = document.createElement("pre");
+    pre.className = "code-pre";
+    pre.innerHTML = hl(shown.join("\n"), f.path);
+    wrap.appendChild(gutter);
+    wrap.appendChild(pre);
+    content.appendChild(wrap);
+    if (f.truncated) content.appendChild(fileErrorEl("Файл обрезан — показаны первые 300 КБ."));
   }
 
+  // ── Правка: textarea поверх подсвеченного слоя + нумерация ──
   function renderFileEditor(text) {
     const content = $("file-content");
     content.innerHTML = "";
-    $("btn-file-edit").classList.add("hidden");
-    $("btn-file-save").classList.remove("hidden");
+    const f = activeFile();
+    const name = f ? f.path : "";
     const hint = document.createElement("div");
     hint.className = "file-edit-hint";
-    hint.textContent = "Редактирование: " + fileViewPath + " — Ctrl+S для сохранения.";
+    hint.textContent = "Редактирование: " + name + " — Ctrl+S сохранить, Tab — отступ, ✨ — подсветка.";
+    const wrap = document.createElement("div");
+    wrap.className = "code-edit-wrap" + (hlInEditor ? "" : " no-hl");
+    const gutter = document.createElement("div");
+    gutter.className = "code-edit-gutter";
+    const gin = document.createElement("div");
+    gutter.appendChild(gin);
+    const box = document.createElement("div");
+    box.className = "code-edit-box";
+    const pre = document.createElement("pre");
+    pre.className = "code-hl";
     const ta = document.createElement("textarea");
-    ta.className = "code-edit";
+    ta.className = "code-input";
     ta.id = "file-editor";
     ta.spellcheck = false;
     ta.value = text;
+    ta.setAttribute("wrap", "off");
+    box.appendChild(pre);
+    box.appendChild(ta);
+    wrap.appendChild(gutter);
+    wrap.appendChild(box);
     content.appendChild(hint);
-    content.appendChild(ta);
-    ta.focus();
+    content.appendChild(wrap);
+
+    function paintGutter() {
+      const n = window.Highlight && window.Highlight.countLines ? window.Highlight.countLines(ta.value) : ta.value.split("\n").length;
+      if (gin.childElementCount === n) return;
+      gin.innerHTML = "";
+      for (let i = 0; i < n; i++) {
+        const d = document.createElement("div");
+        d.className = "code-egn";
+        d.textContent = String(i + 1);
+        gin.appendChild(d);
+      }
+    }
+    const LIVE_HL_MAX = 150 * 1024; // живая подсветка — до 150 КБ текста
+    let hlWarned = false;
+    function paintCode() {
+      const tooBig = ta.value.length > LIVE_HL_MAX;
+      if (!hlInEditor || tooBig) {
+        wrap.classList.add("no-hl"); // текст в textarea прозрачный — показываем его явно
+        pre.innerHTML = "";
+        if (tooBig && hlInEditor && !hlWarned) {
+          hlWarned = true;
+          toast("Файл большой — подсветка в редакторе отключена, текст обычный");
+        }
+        return;
+      }
+      wrap.classList.remove("no-hl");
+      pre.innerHTML = hl(ta.value, name) + "\n";
+    }
+    function syncScroll() {
+      pre.scrollTop = ta.scrollTop;
+      pre.scrollLeft = ta.scrollLeft;
+      gin.style.transform = "translateY(" + -ta.scrollTop + "px)";
+    }
+    // Кнопка ✨ в шапке панели дёргает этот хук
+    editorRepaint = function () {
+      wrap.classList.toggle("no-hl", !hlInEditor);
+      paintCode();
+      syncScroll();
+    };
+    ta.addEventListener("input", () => {
+      const cur = activeFile();
+      if (cur) {
+        cur.content = ta.value;
+        cur.dirty = cur.content !== (cur.orig || "");
+      }
+      renderFileTabs();
+      paintGutter();
+      paintCode();
+      syncScroll();
+    });
+    ta.addEventListener("scroll", syncScroll);
     ta.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         saveEditedFile();
+        return;
+      }
+      if (e.key === "Tab" && !e.shiftKey) {
+        e.preventDefault();
+        const s0 = ta.selectionStart;
+        const s1 = ta.selectionEnd;
+        ta.value = ta.value.slice(0, s0) + "  " + ta.value.slice(s1);
+        ta.selectionStart = ta.selectionEnd = s0 + 2;
+        ta.dispatchEvent(new Event("input"));
       }
     });
+    paintGutter();
+    paintCode();
+    syncScroll();
+    ta.focus();
+    try {
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    } catch {}
   }
 
   async function saveEditedFile() {
     const ta = $("file-editor");
-    if (!ta || !fileViewPath) return;
+    const f = activeFile();
+    if (!ta || !f) return;
     const text = ta.value;
     if (text.length > 2 * 1024 * 1024) {
       toast("Файл слишком большой для сохранения из панели (максимум 2 МБ)");
       return;
     }
-    const r = await api.fsWriteFile(fileViewPath, text);
-    toastShort(r && r.ok ? "✅ Сохранено: " + fileViewPath : "❌ " + ((r && r.error) || "Ошибка сохранения"));
+    const r = await api.fsWriteFile(f.path, text);
+    toastShort(r && r.ok ? "✅ Сохранено: " + f.path : "❌ " + ((r && r.error) || "Ошибка сохранения"));
     if (r && r.ok) {
+      f.content = text;
+      f.orig = text;
+      f.dirty = false;
+      f.loaded = true;
+      f.truncated = false;
+      f.binary = false;
       refreshTree();
-      viewFile(fileViewPath);
+      renderFileTabs();
+      editMode = false;
+      renderFileView(f);
+      updateFileToolbar();
+    }
+  }
+
+  // ── Вкладки открытых файлов ──
+  function renderFileTabs() {
+    const box = $("file-tabs");
+    if (!box) return;
+    box.innerHTML = "";
+    for (let i = 0; i < openFiles.length; i++) {
+      const f = openFiles[i];
+      const tab = document.createElement("div");
+      tab.className = "file-tab" + (f.path === fileViewPath ? " active" : "");
+      tab.title = f.path;
+      const icon = document.createElement("span");
+      icon.textContent = fileIcon(f.path);
+      const nm = document.createElement("span");
+      nm.className = "file-tab-name";
+      nm.textContent = pathBase(f.path);
+      tab.appendChild(icon);
+      tab.appendChild(nm);
+      if (f.dirty) {
+        const d = document.createElement("span");
+        d.className = "file-tab-dot";
+        d.title = "Есть несохранённые правки";
+        tab.appendChild(d);
+      }
+      const x = document.createElement("button");
+      x.className = "file-tab-x";
+      x.textContent = "✕";
+      x.title = "Закрыть вкладку";
+      x.onclick = (ev) => {
+        ev.stopPropagation();
+        closeFileTab(f.path);
+      };
+      tab.appendChild(x);
+      tab.onclick = () => activateFileTab(f.path);
+      box.appendChild(tab);
+    }
+  }
+
+  async function activateFileTab(p) {
+    if (p === fileViewPath) return;
+    fileViewPath = p;
+    editMode = false;
+    renderFileTabs();
+    await loadActiveFile();
+  }
+
+  function closeFileTab(p) {
+    const i = openFiles.findIndex((f) => f.path === p);
+    if (i < 0) return;
+    openFiles.splice(i, 1);
+    if (fileViewPath === p) {
+      const next = openFiles[i] || openFiles[i - 1] || null;
+      fileViewPath = next ? next.path : "";
+      editMode = false;
+    }
+    renderFileTabs();
+    if (!fileViewPath) {
+      $("file-overlay").classList.add("hidden");
+      return;
+    }
+    loadActiveFile();
+  }
+
+  // Закрыть вкладки удалённого файла или папки
+  function closeTabsUnder(p) {
+    const pref = String(p || "").replace(/[\\/]+$/, "") + "/";
+    const rest = openFiles.filter((f) => f.path !== p && f.path.replace(/\\/g, "/").indexOf(pref.replace(/\\/g, "/")) !== 0);
+    if (rest.length === openFiles.length) return;
+    openFiles = rest;
+    if (!activeFile()) fileViewPath = "";
+    renderFileTabs();
+    if (!fileViewPath) {
+      editMode = false;
+      $("file-overlay").classList.add("hidden");
     }
   }
 
@@ -3617,7 +4503,7 @@
         const r = await api.fsDelete(p);
         toastShort(r && r.ok ? "✅ Удалено: " + nm : "❌ " + ((r && r.error) || "Ошибка удаления"));
         if (r && r.ok) {
-          $("file-overlay").classList.add("hidden");
+          closeTabsUnder(p);
           refreshTree();
         }
       },
@@ -3758,6 +4644,96 @@
     });
   }
 
+  // ═══ Статус-бар (полоса внизу окна) ═══
+  let sbChanges = 0; // изменённых файлов (последний git status)
+  let sbVersion = ""; // версия кода из OTA-статуса
+
+  function switchPanelTab(name) {
+    const b = document.querySelector('.panel-tab[data-tab="' + name + '"]');
+    if (b) b.click();
+  }
+
+  function showPanelTab(name) {
+    const panel = $("project-panel");
+    if (panel && panel.classList.contains("hidden")) togglePanel();
+    switchPanelTab(name);
+  }
+
+  function sbProjectLabel() {
+    const sel = $("project-select");
+    if (sel && sel.selectedIndex >= 0) {
+      const opt = sel.options[sel.selectedIndex];
+      if (opt && opt.value) return String(opt.textContent || "").replace(/\s*⚠$/, "");
+    }
+    const dir = projectDir();
+    return dir ? pathBase(dir) : "";
+  }
+
+  function updateStatusBar() {
+    const repoEl = $("panel-repo");
+    const hasRepo = !!repoRoot && !!repoEl && !repoEl.classList.contains("hidden");
+    const proj = $("sb-project-name");
+    if (proj) {
+      proj.textContent = sbProjectLabel() || "проект не выбран";
+      const btn = $("sb-project");
+      if (btn) btn.title = (projectDir() || "Проект не выбран") + " — открыть файлы проекта";
+    }
+    const branchEl = $("sb-branch-name");
+    const branchBtn = $("sb-branch");
+    if (branchEl && branchBtn) {
+      if (hasRepo) {
+        branchEl.textContent = ($("panel-branch") && $("panel-branch").textContent) || "HEAD";
+        branchBtn.classList.remove("hidden");
+      } else {
+        branchBtn.classList.add("hidden");
+      }
+    }
+    const chBtn = $("sb-changes");
+    const chNum = $("sb-changes-num");
+    if (chBtn && chNum) {
+      if (hasRepo) {
+        chBtn.classList.remove("hidden");
+        chNum.textContent = String(sbChanges);
+        chBtn.classList.toggle("has-changes", sbChanges > 0);
+        chBtn.classList.toggle("clean", sbChanges === 0);
+        chBtn.title = sbChanges ? sbChanges + " изменённых файлов — открыть «Изменения»" : "Изменений нет — всё закоммичено";
+      } else {
+        chBtn.classList.add("hidden");
+      }
+    }
+    const dot = $("sb-run-dot");
+    const rtxt = $("sb-run-text");
+    const runBtn = $("sb-run");
+    if (dot && rtxt) {
+      dot.className = "sb-dot" + (previewRunning ? " on" : "");
+      let port = "";
+      try {
+        const u = new URL(settings.previewUrl || "http://localhost:5000");
+        port = u.port || (u.protocol === "https:" ? "443" : "80");
+      } catch {
+        port = "";
+      }
+      rtxt.textContent = previewRunning ? "dev-сервер" + (port ? " :" + port : "") : "не запущен";
+      if (runBtn) runBtn.title = previewRunning ? "Dev-сервер запущен — открыть превью" : "Dev-сервер остановлен — открыть превью";
+    }
+    const mtxt = $("sb-model-text");
+    if (mtxt) mtxt.textContent = settings.model ? providerLabel() + " · " + settings.model : "Модель не выбрана";
+    const vtxt = $("sb-version-text");
+    if (vtxt) vtxt.textContent = sbVersion || "—";
+  }
+
+  // Клики по статус-бару
+  if ($("sb-project")) $("sb-project").onclick = () => showPanelTab("files");
+  if ($("sb-branch")) $("sb-branch").onclick = () => showPanelTab("changes");
+  if ($("sb-changes")) $("sb-changes").onclick = () => showPanelTab("changes");
+  if ($("sb-run")) $("sb-run").onclick = () => openSidePanel("preview");
+  if ($("sb-model")) $("sb-model").onclick = () => toggleModelPopup();
+  if ($("sb-version"))
+    $("sb-version").onclick = () => {
+      openSettings();
+      showSettingsTab("ota");
+    };
+
   // ── Коммиты ──
   async function refreshRepo() {
     const el = $("panel-repo");
@@ -3817,6 +4793,9 @@
     if (st.untracked.length) parts.push("🆕 новых: " + st.untracked.length);
     summaryEl.textContent = parts.join(" · ");
     summaryEl.title = "git status";
+    // Счётчик изменений в статус-баре обновляем сразу при загрузке репозитория
+    sbChanges = st.staged.length + st.unstaged.length + st.untracked.length;
+    updateStatusBar();
 
     if (log && log.ok && log.commits.length) {
       const bUndo = document.createElement("button");
@@ -3866,6 +4845,8 @@
     listEl.innerHTML = "";
     if (!repoRoot) {
       summaryEl.textContent = "Открой git-репозиторий — здесь появятся изменения, которые можно закоммитить и запушить.";
+      sbChanges = 0;
+      updateStatusBar();
       return;
     }
     const st = await api.gitStatus(repoRoot);
@@ -3874,6 +4855,8 @@
       return;
     }
     const total = st.staged.length + st.unstaged.length + st.untracked.length;
+    sbChanges = total;
+    updateStatusBar();
     if (!total) {
       summaryEl.textContent = "✨ Изменений нет — всё закоммичено. Чтобы запушить на GitHub, жми «Push».";
       return;
@@ -4756,8 +5739,18 @@
     const inField = tag === "INPUT" || tag === "TEXTAREA";
     if (mod && e.key.toLowerCase() === "k") {
       e.preventDefault();
-      $("chat-search").focus();
-      $("chat-search").select();
+      if (e.shiftKey) {
+        $("chat-search").focus();
+        $("chat-search").select();
+      } else {
+        openPalette("actions");
+      }
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "p") {
+      e.preventDefault();
+      if (e.shiftKey) openPalette("actions");
+      else enterFileMode();
       return;
     }
     if (mod && e.key.toLowerCase() === "enter") {
@@ -4768,6 +5761,8 @@
       return;
     }
     if (e.key === "Escape") {
+      // В редакторе файла Esc не закрывает панель (им же закрывают подсказки редактора)
+      if (t && t.id === "file-editor") return;
       // закрыть любой открытый оверлей
       for (const ov of document.querySelectorAll(".overlay")) {
         if (!ov.classList.contains("hidden")) {
@@ -4903,8 +5898,278 @@
     };
   });
 
+  // ═══ Палитра команд (Ctrl+K): действия и файлы ═══
+  let paletteItems = [];
+  let paletteIndex = 0;
+  let paletteMode = "actions";
+  let paletteFiles = null;
+
+  function paletteActions() {
+    const acts = [];
+    const A = (icon, title, hint, group, run, when) =>
+      acts.push({ icon: icon, title: title, hint: hint || "", group: group, run: run, when: when || null });
+
+    A("💬", "Новый чат", "Ctrl+N", "Чат", () => createChat());
+    A("🔄", "Продолжить контекст предыдущего чата", "", "Чат", () => $("btn-continue-chat").click());
+    A("🔍", "Поиск по чатам", "Ctrl+Shift+K", "Чат", () => {
+      closePalette();
+      $("chat-search").focus();
+      $("chat-search").select();
+    });
+    A("📋", "Скопировать чат в буфер", "markdown", "Чат", () => copyChat());
+    A("⏹", "Остановить агента", "", "Чат", () => stop(), () => streaming);
+
+    A("📄", "Открыть файл…", "Ctrl+P", "Файлы и проект", () => enterFileMode(), () => isElectron);
+    A("📂", "Панель проекта: файлы", "", "Файлы и проект", () => showPanelTab("files"), () => isElectron);
+    A("✏️", "Панель проекта: изменения", "", "Файлы и проект", () => showPanelTab("changes"), () => isElectron);
+    A("🕘", "Панель проекта: коммиты", "", "Файлы и проект", () => showPanelTab("commits"), () => isElectron);
+    A("➕", "Новый файл", "", "Файлы и проект", () => newProjectFile(), () => isElectron);
+    A("🗂", "Новая папка", "", "Файлы и проект", () => newProjectFolder(), () => isElectron);
+    A("🔎", "Поиск по коду (семантический)", "агент", "Файлы и проект", () => {
+      $("input").value = "найди в проекте: ";
+      $("input").focus();
+    }, () => isElectron);
+
+    A("💾", "Закоммитить изменения", "", "Git и GitHub", () => showPanelTab("changes"), () => isElectron);
+    A("📤", "Push на GitHub", "", "Git и GitHub", () => doPush(), () => isElectron);
+    A("📥", "Pull из GitHub", "", "Git и GitHub", () => doPull(), () => isElectron);
+    A("⬆", "Опубликовать проект на GitHub", "новый репозиторий", "Git и GitHub", () => openPublishDialog(), () => isElectron);
+
+    A("🖥", "Превью и консоль", "", "Запуск и хостинг", () => openSidePanel("preview"), () => isElectron);
+    A("⌨️", "Консоль", "логи и команды", "Запуск и хостинг", () => openSidePanel("console"), () => isElectron);
+    A("🧹", "Очистить консоль", "", "Запуск и хостинг", () => {
+      openSidePanel("console");
+      termReset();
+    }, () => isElectron);
+    A("☁️", "Yandex Cloud — ресурсы", "", "Запуск и хостинг", () => openSidePanel("cloud"), () => isElectron);
+    A("🚀", "Задеплоить на Yandex Cloud", "контейнер", "Запуск и хостинг", () => {
+      openSidePanel("cloud");
+      $("btn-yc-deploy").click();
+    }, () => isElectron);
+
+    A("🤖", "Настройки: модель", "", "Настройки", () => openSettings());
+    A("🔒", "Настройки: секреты и переменные", "", "Настройки", () => {
+      openSettings();
+      showSettingsTab("secrets");
+    });
+    A("🐙", "Настройки: GitHub и проект", "", "Настройки", () => {
+      openSettings();
+      showSettingsTab("project");
+    });
+    A("👁", "Настройки: зрение и картинки", "", "Настройки", () => {
+      openSettings();
+      showSettingsTab("vision");
+    });
+    A("📱", "Настройки: мобильный доступ", "", "Настройки", () => {
+      openSettings();
+      showSettingsTab("mobile");
+    });
+    A("☁️", "Настройки: Yandex Cloud", "", "Настройки", () => {
+      openSettings();
+      showSettingsTab("yandex");
+    });
+    A("🔄", "Настройки: self-update (OTA)", "", "Настройки", () => {
+      openSettings();
+      showSettingsTab("ota");
+    });
+    A("🛠", "Проверить подключение к модели", "", "Настройки", () => {
+      openSettings();
+      testConnection();
+    });
+    return acts;
+  }
+
+  function paletteFilter(query) {
+    const all = paletteItems.filter((it) => !it.when || it.when());
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return all;
+    const scored = [];
+    for (let i = 0; i < all.length; i++) {
+      const it = all[i];
+      const title = String(it.title || "").toLowerCase();
+      const hay = title + " " + String(it.hint || "").toLowerCase() + " " + String(it.group || "").toLowerCase();
+      const pos = hay.indexOf(q);
+      if (pos === -1) continue;
+      scored.push({ it: it, score: title.indexOf(q) === 0 ? 0 : pos + 1 });
+    }
+    scored.sort((a, b) => a.score - b.score);
+    return scored.map((x) => x.it);
+  }
+
+  function paletteRows() {
+    return Array.prototype.slice.call($("palette-list").querySelectorAll(".palette-row"));
+  }
+
+  function paletteHighlight() {
+    const rows = paletteRows();
+    for (let i = 0; i < rows.length; i++) rows[i].classList.toggle("active", i === paletteIndex);
+    const cur = rows[paletteIndex];
+    if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: "nearest" });
+  }
+
+  function paletteRender() {
+    const list = $("palette-list");
+    const items = paletteFilter($("palette-input").value);
+    if (paletteIndex >= items.length) paletteIndex = Math.max(0, items.length - 1);
+    if (paletteIndex < 0) paletteIndex = 0;
+    list.innerHTML = "";
+    if (!items.length) {
+      const d = document.createElement("div");
+      d.className = "palette-empty";
+      d.textContent = paletteMode === "files" ? "Файлы не найдены (проект не выбран?)" : "Ничего не найдено";
+      list.appendChild(d);
+      return;
+    }
+    let lastGroup = "";
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.group && it.group !== lastGroup) {
+        lastGroup = it.group;
+        const h = document.createElement("div");
+        h.className = "palette-sec";
+        h.textContent = it.group;
+        list.appendChild(h);
+      }
+      const row = document.createElement("div");
+      row.className = "palette-row" + (i === paletteIndex ? " active" : "");
+      const ic = document.createElement("span");
+      ic.className = "pr-ic";
+      ic.textContent = it.icon || "•";
+      const t = document.createElement("span");
+      t.className = "pr-title";
+      t.textContent = it.title;
+      row.appendChild(ic);
+      row.appendChild(t);
+      if (it.hint) {
+        const hh = document.createElement("span");
+        hh.className = "pr-hint";
+        hh.textContent = it.hint;
+        row.appendChild(hh);
+      }
+      row.onclick = () => paletteRun(it);
+      row.onmousemove = () => {
+        if (paletteIndex !== i) {
+          paletteIndex = i;
+          paletteHighlight();
+        }
+      };
+      list.appendChild(row);
+    }
+  }
+
+  function openPalette(mode) {
+    paletteMode = mode || "actions";
+    paletteItems = paletteMode === "files" ? paletteFiles || [] : paletteActions();
+    paletteIndex = 0;
+    const ic = $("palette-ic");
+    const inp = $("palette-input");
+    if (ic) ic.textContent = paletteMode === "files" ? "📄" : "⌘";
+    if (inp) {
+      inp.placeholder = paletteMode === "files" ? "Имя файла…" : "Действие или файл…";
+      inp.value = "";
+    }
+    $("palette-overlay").classList.remove("hidden");
+    paletteRender();
+    if (inp) inp.focus();
+  }
+
+  function closePalette() {
+    $("palette-overlay").classList.add("hidden");
+  }
+
+  function paletteRun(item) {
+    closePalette();
+    try {
+      item.run();
+    } catch (e) {
+      toast("Не удалось выполнить: " + ((e && e.message) || e));
+    }
+  }
+
+  // Список файлов проекта для быстрого перехода (Ctrl+P)
+  async function collectProjectFiles(dir, limit) {
+    const out = [];
+    const skip = { node_modules: 1, ".git": 1, dist: 1, build: 1, out: 1, ".next": 1, ".nuxt": 1, __pycache__: 1, venv: 1, ".venv": 1, ".idea": 1, ".vscode": 1, coverage: 1 };
+    const clean = String(dir || "").replace(/[\\/]+$/, "");
+    async function walk(d, prefix) {
+      if (out.length >= limit) return;
+      const r = await api.fsListTree(d);
+      if (!r || !r.ok) return;
+      for (let i = 0; i < r.entries.length; i++) {
+        if (out.length >= limit) return;
+        const e = r.entries[i];
+        if (e.isDir) {
+          if (skip[e.name]) continue;
+          await walk(d + "/" + e.name, prefix + e.name + "/");
+        } else {
+          const full = d + "/" + e.name;
+          out.push({
+            icon: fileIcon(e.name),
+            title: e.name,
+            hint: prefix ? prefix.replace(/\/$/, "") : "корень",
+            group: prefix ? "📁 " + prefix.replace(/\/$/, "") : "📄 корень проекта",
+            run: () => viewFile(full),
+          });
+        }
+      }
+    }
+    if (clean) await walk(clean, "");
+    return out;
+  }
+
+  async function enterFileMode() {
+    if (!isElectron) {
+      toast("Доступно в приложении на ПК");
+      return;
+    }
+    if (!projectDir()) {
+      toast("Сначала выбери рабочую папку проекта");
+      return;
+    }
+    if (!paletteFiles) {
+      toast("Собираю список файлов…");
+      paletteFiles = await collectProjectFiles(projectDir(), 1200);
+    }
+    openPalette("files");
+  }
+
+  if ($("palette-input")) {
+    $("palette-input").addEventListener("input", () => {
+      paletteIndex = 0;
+      paletteRender();
+    });
+    $("palette-input").addEventListener("keydown", (e) => {
+      const items = paletteFilter($("palette-input").value);
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        paletteIndex = Math.min(paletteIndex + 1, items.length - 1);
+        paletteHighlight();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        paletteIndex = Math.max(paletteIndex - 1, 0);
+        paletteHighlight();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const it = items[paletteIndex];
+        if (it) paletteRun(it);
+      } else if (e.key === "Escape" && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        closePalette();
+      }
+    });
+  }
+  if ($("palette-overlay")) {
+    $("palette-overlay").addEventListener("click", (e) => {
+      if (e.target === $("palette-overlay")) closePalette();
+    });
+  }
+
   // ── События модалок ──
-  $("btn-file-close").onclick = () => $("file-overlay").classList.add("hidden");
+  $("btn-file-close").onclick = () => {
+    editMode = false;
+    updateFileToolbar();
+    $("file-overlay").classList.add("hidden");
+  };
   $("file-overlay").addEventListener("click", (e) => {
     if (e.target === $("file-overlay")) $("file-overlay").classList.add("hidden");
   });
@@ -4915,9 +6180,22 @@
     if (isElectron) api.fsOpenInExplorer($("file-path").textContent);
   };
   $("btn-file-edit").onclick = () => {
-    if (fileViewPath && fileCanEdit) viewFile(fileViewPath, { edit: true });
+    if (!fileViewPath || !fileCanEdit) return;
+    editMode = true;
+    renderFileTabs();
+    loadActiveFile();
   };
   $("btn-file-save").onclick = saveEditedFile;
+  $("btn-file-hl").onclick = () => {
+    hlInEditor = !hlInEditor;
+    if (editorRepaint) editorRepaint();
+    else {
+      const wrap = document.querySelector(".code-edit-wrap");
+      if (wrap) wrap.classList.toggle("no-hl", !hlInEditor);
+    }
+    $("btn-file-hl").classList.toggle("active", hlInEditor);
+    toast(hlInEditor ? "✨ Подсветка включена" : "Подсветка выключена — обычный текст");
+  };
   $("btn-file-delete").onclick = () => {
     if (fileViewPath) deleteFsItem(fileViewPath, false);
   };
@@ -5079,6 +6357,7 @@
     if (isElectron) api.otaOpenDir();
   };
   $("btn-toggle-vision-key").onclick = () => toggleKey("s-vision-key");
+  $("btn-toggle-serper-key").onclick = () => toggleKey("s-serper-key");
   $("btn-refresh-vision-models").onclick = () => loadAuxModels("vision");
   $("btn-refresh-image-models").onclick = () => loadAuxModels("image");
   $("btn-mobile-menu").onclick = () => $("sidebar").classList.toggle("open");
@@ -5157,6 +6436,7 @@
     }
     updateBadge();
     refreshProjects();
+    renderOtaStatus(); // версия кода — сразу в статус-бар
     if (isElectron) {
       api.onAiEvent(onAiEvent);
       wireGithubEvents();

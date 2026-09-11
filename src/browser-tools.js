@@ -253,6 +253,9 @@ async function open(args) {
 }
 
 // Заполнить текстовое поле. selector — CSS (#id, .class, input[name=...]), text=..., xpath=...
+// Поддержка contenteditable (ВК и другие SPA): если page.fill не сработал —
+// клик по полю → очистка (Ctrl+A) → вставка текста через keyboard.insertText,
+// которая корректно триггерит события ввода в кастомных редакторах.
 async function fill(args) {
   args = args || {};
   const t = needTab(args.tabId || args.tab);
@@ -260,12 +263,23 @@ async function fill(args) {
   const selector = String(args.selector || "").trim();
   const text = String(args.text == null ? "" : args.text);
   if (!selector) return "Ошибка: укажи selector поля";
+  let via = "fill";
+  let firstErr = "";
   try {
     await t.tab.page.fill(selector, text, { timeout: ACTION_TIMEOUT });
-    return "OK — поле «" + selector + "» заполнено (" + text.length + " символов).";
-  } catch (e) {
-    return "Ошибка browserFill: элемент не найден или недоступен («" + selector + "»). " + ((e && e.message || "").slice(0, 200));
+  } catch (e1) {
+    firstErr = (e1 && e1.message) || String(e1);
+    try {
+      const loc = t.tab.page.locator(selector).first();
+      await loc.click({ timeout: ACTION_TIMEOUT });
+      await t.tab.page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A", { timeout: ACTION_TIMEOUT });
+      await t.tab.page.keyboard.insertText(text, { timeout: ACTION_TIMEOUT });
+      via = "insertText";
+    } catch (e2) {
+      return "Ошибка browserFill: элемент не найден или недоступен («" + selector + "»). " + ((e2 && e2.message || firstErr || "").slice(0, 250));
+    }
   }
+  return "OK — поле «" + selector + "» заполнено (" + text.length + " символов, способ: " + via + ").";
 }
 
 // Кликнуть по элементу (кнопка, ссылка, чекбокс). При необходимости ждёт загрузки страницы.

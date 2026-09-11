@@ -45,8 +45,11 @@
 26. Семантический поиск: semanticSearch(query) ищет по коду проекта по смыслу (стебли слов, camelCase/snake_case, BM25-ранжирование) и показывает сниппеты с номерами строк. Используй его для поиска «где находится X» и «как устроен Y» — быстрее и точнее, чем читать файлы подряд. Точный регулярный поиск — searchFile/searchProject.
 24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList).
 27. Самоизменения и OTA: перед любой правкой собственного кода (src/, assets/) сначала создай точку отката checkpointSave(label — «перед самоизменением …»). Файлы src/bootstrap.js и src/ota.js и папка применённого OTA-бандла физически заблокированы: writeFile/editFile/applyPatch вернут ошибку — не пытайся их обойти. После сборки бандла (node scripts/make-ota.js) вызови otaStatus (видно ли обновление) и otaCheck (применить); после применения — validateProject; если после обновления что-то сломалось — otaRollback.
+28. Yandex Cloud: инструменты ycStatus / ycList / ycCreate / ycDelete / ycDeploy / ycLogs. Начни с ycStatus — авторизация (Настройки → «☁️ Yandex Cloud»), каталог, разрешения агента. Создание/удаление ресурсов — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Создать можно: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc. Деплой — ycDeploy (directory, name, public): Docker-образ → Container Registry → Serverless Container → URL (нужен Docker). Логи — ycLogs (service, id). Результат проверяй через ycList.
+29. ВКонтакте (vk.com/vk.ru — домены взаимозаменяемы): браузерные инструменты. Поле ввода — contenteditable, селектор [role=textbox]: browserClick по полю → browserFill(selector: [role=textbox], text: ...) → отправка browserPress(key: Enter) (Shift+Enter — перенос строки). Страницы грузятся лениво — после открытия жди 2–5 секунд и перечитывай browserText; проверка отправки — текст сообщения в конце переписки. Работай в СУЩЕСТВУЮЩЕЙ вкладке браузера (новые открываются без сессии); состояние читай через browserText, а не скриншоты (ВК их обрезает); текст приходит вместе с левым меню — фильтруй по именам/датам. Вход/сессия — только руками пользователя, не обходи. Маршруты, селекторы, сценарии и известные контакты — в гайде, прочитай перед работой: readFile(path: agent-guide:vk).
+30. Анализ переписок (ВК, чаты, письма, файлы): определи КТО человек по уликам в тексте (работа/задачи → коллега; семейное/личное → родственник/друг; услуги/цены/заказы → клиент/поставщик; «Вы» и официальный тон → деловой контакт), выдели СУТЬ (2–4 предложения: о чём разговор, что решено, что ждёт ответа, срочность) и оформи ТАБЛИЦЕЙ: «Человек (профиль) | Кто он | Суть переписки | Важность | Следующий шаг». Для КЛИЕНТОВ дополнительно: профиль (потребность его словами, что обсуждали, бюджет/сроки если видно, возражения, тон) + фундамент для КП (2–4 пункта, что включить в предложение, и следующий логичный шаг). Не выдумывай: чего нет в тексте — «не определено». Длинную историю читай частями (PageUp + browserText). Полная методология — readFile(path: agent-guide:chat-analysis).
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -1586,6 +1589,89 @@
         parameters: { type: "object", properties: {} },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "ycStatus",
+        description: "Yandex Cloud: показать статус подключения (авторизован ли пользователь, какой каталог выбран), разрешения агента на создание/удаление ресурсов и счётчики ресурсов по всем сервисам каталога (API Gateway, Certificates, CDN, DNS, Logging, Postbox, Container Registry, IAM, Lockbox, YDB, Storage, Serverless Containers, VPC).",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "ycList",
+        description: "Yandex Cloud: список ресурсов. service — ключ сервиса (apiGateway, certificateManager, cdn, dns, logging, postbox, containerRegistry, iam, lockbox, ydb, storage, serverlessContainers, vpc); без service — сводка по всем. Возвращает имена и id ресурсов.",
+        parameters: {
+          type: "object",
+          properties: {
+            service: { type: "string", description: "Ключ сервиса (необязательно): apiGateway | certificateManager | cdn | dns | logging | postbox | containerRegistry | iam | lockbox | ydb | storage | serverlessContainers | vpc" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "ycCreate",
+        description: "Yandex Cloud: создать ресурс в выбранном каталоге. service — ключ сервиса (создание доступно для: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc), name — имя ресурса (латиница, цифры, дефис). Создание может быть платным (YDB, Storage, Containers) — только по явной просьбе пользователя и при включённом разрешении «Разрешить агенту создавать ресурсы».",
+        parameters: {
+          type: "object",
+          properties: {
+            service: { type: "string", description: "Ключ сервиса: ydb | lockbox | containerRegistry | storage | dns | serverlessContainers | vpc" },
+            name: { type: "string", description: "Имя ресурса (2–63 символа, латиница/цифры/дефис)" },
+          },
+          required: ["service", "name"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "ycDelete",
+        description: "Yandex Cloud: удалить ресурс по id (id виден в ycList). service — ключ сервиса, id — идентификатор ресурса. Удаление необратимо и может удалить данные — только по явной просьбе пользователя и при включённом разрешении «Разрешить агенту удалять ресурсы».",
+        parameters: {
+          type: "object",
+          properties: {
+            service: { type: "string", description: "Ключ сервиса" },
+            id: { type: "string", description: "id ресурса (из ycList)" },
+          },
+          required: ["service", "id"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "ycDeploy",
+        description: "Yandex Cloud: задеплоить папку проекта в Serverless Containers (лёгкий хостинг). Собирает Docker-образ (или генерирует Dockerfile по типу проекта), загружает в Container Registry, создаёт/обновляет Serverless Container и при public=true настраивает публичный доступ. directory — папка проекта (по умолчанию рабочая директория), name — имя приложения, public — публичный URL (по умолчанию true). Требует Docker на ПК и разрешение «Разрешить агенту создавать ресурсы». Деплой платный — только по явной просьбе пользователя.",
+        parameters: {
+          type: "object",
+          properties: {
+            directory: { type: "string", description: "Папка проекта (по умолчанию рабочая директория)" },
+            name: { type: "string", description: "Имя приложения (станет именем контейнера и образа)" },
+            public: { type: "boolean", description: "Публичный URL без авторизации (по умолчанию true)" },
+            memoryMb: { type: "integer", description: "Память ревизии в МБ (по умолчанию 256)" },
+            cores: { type: "integer", description: "Число ядер (по умолчанию 1)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "ycLogs",
+        description: "Yandex Cloud: показать логи ресурса (контейнера) за последние 3 часа. Требует установленного и авторизованного yc CLI (иначе подскажет, как это сделать). service — ключ сервиса, id — id ресурса (из ycList).",
+        parameters: {
+          type: "object",
+          properties: {
+            service: { type: "string", description: "Ключ сервиса (serverlessContainers и др.)" },
+            id: { type: "string", description: "id ресурса (из ycList)" },
+          },
+          required: ["service", "id"],
+        },
+      },
+    },
   ];
 
   // ── Контекст-окно: грубая оценка токенов и обрезка истории ──
@@ -1816,6 +1902,71 @@
         .join("\n\n") +
       "\n\nЧтобы прочитать страницу целиком, используй инструмент webFetch с её URL."
     );
+  }
+
+  // Усиленный поиск: Google через Serper (нужен API-ключ из настроек).
+  // POST https://google.serper.dev/search с заголовком X-API-KEY → { organic: [...] }.
+  async function webSearchSerper(query, apiKey) {
+    const q = String(query || "").trim();
+    if (!q) return "Ошибка: пустой поисковый запрос";
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const res = await fetch("https://google.serper.dev/search", {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: {
+          "X-API-KEY": String(apiKey || "").trim(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ q: q, num: 10, gl: "ru", hl: "ru" }),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return "Ошибка поиска: Serper отклонил ключ (HTTP " + res.status + "). Проверь ключ в Настройках → 🔒 Секреты.";
+      }
+      if (!res.ok) return "Ошибка поиска: HTTP " + res.status;
+      const data = await res.json();
+      const organic = (data && data.organic) || [];
+      if (!organic.length) {
+        return "Поиск не дал результатов по запросу: " + query + ". Попробуй переформулировать запрос или используй webFetch по известному адресу.";
+      }
+      return (
+        "Результаты поиска по «" + query + "» (Google):\n\n" +
+        organic
+          .map((r, idx) => (idx + 1) + ". " + (r.title || "—") + "\n   " + (r.link || "") + (r.snippet ? "\n   " + String(r.snippet).slice(0, 300) : ""))
+          .join("\n\n") +
+        "\n\nЧтобы прочитать страницу целиком, используй инструмент webFetch с её URL."
+      );
+    } catch (e) {
+      return "Ошибка поиска: " + (e && e.name === "AbortError" ? "таймаут" : (e && e.message) || String(e));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Классифицирует ошибку провайдера: лечится ли она сменой ключа.
+  // key=true только для «ключ/баланс/лимит»: 401/403 (неверный ключ), 402/insufficient
+  // (нет баланса/квоты), 429/rate limit (лимит запросов). Ошибки запроса (400),
+  // фильтра контента и сети — НЕ про ключ, менять его бессмысленно.
+  // cooldownMs — на сколько «отложить» провинившийся ключ, чтобы не долбить провайдера.
+  function classifyKeyError(errText) {
+    const t = String(errText || "");
+    if (/API error 401|API error 403|unauthorized|invalid[_ ]?api[_ ]?key|authentication|неверн\w* ключ/i.test(t)) {
+      return { key: true, reason: "auth", cooldownMs: 10 * 60 * 1000 };
+    }
+    if (/API error 402|insufficient|quota|balance|баланс|недостаточно средств|кончил\w* деньг/i.test(t)) {
+      return { key: true, reason: "quota", cooldownMs: 5 * 60 * 1000 };
+    }
+    if (/API error 429|rate[_ ]?limit|too many requests|per minute|ITPM|TPM|лимит/i.test(t)) {
+      return { key: true, reason: "rate", cooldownMs: 60 * 1000 };
+    }
+    return { key: false, reason: null, cooldownMs: 0 };
+  }
+
+  // Веб-поиск: Serper (Google), если задан API-ключ, иначе — DuckDuckGo.
+  async function webSearch(query, apiKey) {
+    if (String(apiKey || "").trim()) return await webSearchSerper(query, apiKey);
+    return await webSearchDDG(query);
   }
 
   // Превращает HTML в читаемый текст (убирает скрипты, стили, разметку).
@@ -3174,6 +3325,8 @@
     // веб (общий для Electron main и preview-сервера)
     downloadHtml,
     webSearchDDG,
+    webSearch,
+    classifyKeyError,
     webFetchPage,
     htmlToText,
     // вспомогательная модель: зрение + генерация изображений

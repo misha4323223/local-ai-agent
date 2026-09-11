@@ -26,6 +26,8 @@ const SECRET_KEYS = [
   "visionKey",
   "agentEnv", // объект: пользователь кладёт сюда пароли/ключи для агента
   "openaiProfiles", // массив сохранённых OpenAI-подключений (внутри — apiKey)
+  "yandexOauthToken", // OAuth-токен Yandex (для Yandex Cloud REST API)
+  "serperApiKey", // API-ключ Serper (усиленный Google-поиск для агента)
 ];
 
 let secretsFile = null; // полный путь к secrets.json

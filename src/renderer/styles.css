@@ -2809,3 +2809,372 @@ body::after {
   border-radius: 12px;
 }
 .composer.drag-over .input-hint { color: #38bdf8; }
+
+
+/* ── Yandex Cloud: настройки + дашборд в side-panel ── */
+.yc-conn-status {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+  color: #f87171;
+  font-size: 13px;
+}
+.yc-conn-status.ok { color: #4ade80; }
+.yc-conn-account {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+}
+.yc-perms { margin-top: 8px; }
+
+.yc-dash-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.yc-dash-status {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yc-dash-btns { display: flex; gap: 6px; flex-shrink: 0; }
+.yc-dash { overflow-y: auto; padding: 12px; }
+.yc-loading {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
+  padding: 20px 0;
+  text-align: center;
+}
+.yc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+.yc-card {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.yc-card:hover { border-color: rgba(14, 165, 233, 0.45); }
+.yc-card.open { border-color: rgba(14, 165, 233, 0.6); background: rgba(14, 165, 233, 0.05); }
+.yc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.yc-card-icon { font-size: 16px; }
+.yc-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.25;
+}
+.yc-card-body {
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+}
+.yc-card-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+}
+.yc-card-count.err { color: #f87171; }
+.yc-add { flex-shrink: 0; }
+.yc-card-err {
+  font-size: 11px;
+  color: #f87171;
+  padding: 0 12px 10px;
+  word-break: break-word;
+}
+.yc-card-list {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.yc-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.yc-item:last-child { border-bottom: none; }
+.yc-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.yc-item-more { padding: 4px 2px; color: rgba(255, 255, 255, 0.45); }
+
+
+/* ── Yandex Cloud: сводка, деплой, статусы ── */
+.yc-dash-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.95);
+  flex-shrink: 0;
+}
+.yc-summary {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.yc-summary-item {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(14, 165, 233, 0.08);
+  border: 1px solid rgba(14, 165, 233, 0.25);
+  border-radius: 8px;
+  padding: 3px 10px;
+}
+.yc-deploy-box {
+  margin: 10px 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(14, 165, 233, 0.35);
+  border-radius: 12px;
+  background: rgba(14, 165, 233, 0.06);
+}
+.yc-deploy-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.92);
+  margin-bottom: 6px;
+}
+.yc-deploy-steps {
+  max-height: 200px;
+  overflow-y: auto;
+}
+.yc-step {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  padding: 3px 0;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+}
+.yc-step.err { color: #f87171; white-space: pre-wrap; word-break: break-word; }
+.yc-deploy-result {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #4ade80;
+  word-break: break-all;
+}
+.yc-deploy-result button { flex-shrink: 0; }
+.yc-item-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.yc-status {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.yc-status.active { color: #4ade80; background: rgba(74, 222, 128, 0.12); }
+.yc-status.creating { color: #facc15; background: rgba(250, 204, 21, 0.12); }
+.yc-status.error { color: #f87171; background: rgba(248, 113, 113, 0.12); }
+.yc-status.deleting { color: #94a3b8; background: rgba(148, 163, 184, 0.12); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Статус-бар, палитра команд (Ctrl+K), вкладки файлов и подсветка кода
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── Статус-бар: полоса внизу окна ─── */
+body { display: flex; flex-direction: column; }
+#app { flex: 1 1 auto; min-height: 0; height: auto; }
+#status-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 2px;
+  height: 28px; padding: 0 8px;
+  background: linear-gradient(180deg, rgba(10, 14, 30, 0.94), rgba(6, 8, 18, 0.99));
+  border-top: 1px solid var(--border-soft);
+  font-size: 11.5px; color: var(--text-dim);
+  -webkit-user-select: none; user-select: none;
+  overflow: hidden; position: relative; z-index: 5;
+}
+.sb-item {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 30vw; height: 21px; padding: 0 8px;
+  background: transparent; border: 1px solid transparent; border-radius: 7px;
+  color: inherit; font: inherit; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sb-item:hover { background: var(--bg-hover); border-color: var(--border-soft); color: var(--text); }
+.sb-item:active { transform: translateY(1px); }
+.sb-item.hidden { display: none; }
+.sb-item > span { overflow: hidden; text-overflow: ellipsis; }
+.sb-spacer { flex: 1 1 auto; }
+.sb-dot { width: 7px; height: 7px; border-radius: 50%; background: #4b5568; flex-shrink: 0; }
+.sb-dot.on { background: var(--ok); box-shadow: 0 0 8px rgba(46, 230, 168, 0.75); }
+.sb-dot.err { background: var(--danger); box-shadow: 0 0 8px rgba(255, 92, 122, 0.7); }
+#sb-version { color: var(--text-faint); }
+#sb-changes.has-changes #sb-changes-num { color: var(--warn); font-weight: 700; }
+#sb-changes.clean #sb-changes-num { color: var(--ok); }
+@media (max-width: 640px) { #status-bar { display: none; } }
+
+/* ─── Палитра команд (Ctrl+K) ─── */
+#palette-overlay { z-index: 300; align-items: flex-start; padding-top: 11vh; }
+.palette-panel {
+  width: 660px; max-width: 92vw; max-height: 72vh;
+  display: flex; flex-direction: column;
+  background: linear-gradient(170deg, rgba(18, 24, 48, 0.97), rgba(7, 10, 22, 0.99));
+  border: 1px solid rgba(120, 170, 255, 0.22); border-radius: 16px;
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 60px rgba(0, 180, 255, 0.08);
+  overflow: hidden;
+}
+.palette-input-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 16px; border-bottom: 1px solid var(--border-soft);
+}
+.palette-ic { font-size: 15px; color: var(--accent); }
+#palette-input {
+  flex: 1; min-width: 0; background: transparent; border: none; outline: none;
+  color: var(--text); font-size: 15px; font-family: var(--font);
+}
+#palette-input::placeholder { color: var(--text-faint); }
+.palette-kbd { font-size: 10.5px; color: var(--text-faint); white-space: nowrap; }
+.palette-list { overflow: auto; padding: 6px; }
+.palette-sec {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--text-faint); padding: 9px 10px 4px;
+}
+.palette-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 9px; cursor: pointer; border: 1px solid transparent;
+}
+.palette-row .pr-ic { width: 20px; text-align: center; flex-shrink: 0; }
+.palette-row .pr-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
+.palette-row .pr-hint { font-size: 11px; color: var(--text-faint); flex-shrink: 0; }
+.palette-row.active { background: rgba(34, 211, 238, 0.12); border-color: rgba(34, 211, 238, 0.45); color: var(--text); }
+.palette-row.disabled { opacity: 0.45; cursor: default; }
+.palette-empty { padding: 20px 12px; color: var(--text-faint); font-size: 13px; text-align: center; }
+
+/* ─── Вкладки открытых файлов ─── */
+.file-tabs {
+  display: flex; align-items: flex-end; gap: 2px;
+  padding: 8px 10px 0; overflow-x: auto; overflow-y: hidden;
+  border-bottom: 1px solid var(--border-soft);
+}
+.file-tabs:empty { display: none; }
+.file-tab {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; max-width: 230px;
+  padding: 6px 8px 6px 10px; border: 1px solid transparent; border-bottom: none;
+  border-radius: 9px 9px 0 0; cursor: pointer; font-size: 12px;
+  color: var(--text-dim); white-space: nowrap;
+}
+.file-tab:hover { background: var(--bg-hover); color: var(--text); }
+.file-tab.active { background: rgba(34, 211, 238, 0.1); border-color: rgba(34, 211, 238, 0.4); color: var(--text); }
+.file-tab-name { overflow: hidden; text-overflow: ellipsis; }
+.file-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); flex-shrink: 0; }
+.file-tab-x { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 3px; border-radius: 5px; opacity: 0.6; }
+.file-tab-x:hover { background: rgba(255, 92, 122, 0.22); opacity: 1; }
+.file-panel { width: 900px; }
+#file-content { flex: 1 1 auto; min-height: 0; }
+
+/* ─── Код: читаемый вид (нумерация строк + подсветка) ─── */
+.code-wrap { display: flex; align-items: flex-start; font: 12px/1.55 var(--mono); }
+.code-gutter {
+  flex: 0 0 auto; text-align: right; padding: 0 10px 0 12px;
+  color: #3d4456; user-select: none; white-space: nowrap;
+  position: sticky; left: 0; z-index: 1; background: var(--bg-side);
+  border-right: 1px solid var(--border-soft);
+}
+.code-gn { height: 1.55em; }
+.code-pre { margin: 0; padding: 0 16px 0 12px; white-space: pre; color: var(--text); }
+.tok-com { color: #5c6b8a; font-style: italic; }
+.tok-str { color: #9ae6a0; }
+.tok-num { color: #f0b072; }
+.tok-kw { color: #c792ea; }
+.tok-lit { color: #f78ca0; }
+.tok-fn { color: #7cc7ff; }
+.tok-key { color: #7cc7ff; }
+.tok-tag { color: #7cc7ff; }
+.tok-attr { color: #f0b072; }
+.tok-prop { color: #8be9fd; }
+.tok-var { color: #f0b072; }
+.tok-head { color: #7cc7ff; font-weight: 700; }
+.tok-link { color: #8be9fd; text-decoration: underline; }
+.tok-code { color: #9ae6a0; }
+
+/* ─── Код: редактор с подсветкой (textarea поверх подсвеченного слоя) ─── */
+.code-edit-wrap { display: flex; align-items: stretch; font: 13px/20px var(--mono); }
+.code-edit-gutter {
+  flex: 0 0 auto; width: 46px; height: 55vh; overflow: hidden;
+  /* padding-top = 12px (text) + 1px (рамка панели) — иначе нумерация на строку выше */
+  padding: 13px 8px 13px 0; text-align: right; color: #3d4456;
+  background: #0a0f18; border-radius: 8px 0 0 8px; user-select: none;
+}
+.code-egn { height: 20px; }
+.code-edit-box {
+  position: relative; flex: 1 1 auto; min-width: 0; height: 55vh;
+  background: #0a0f18; border: 1px solid rgba(120, 150, 200, 0.25);
+  border-left: none; border-radius: 0 8px 8px 0; overflow: hidden;
+}
+.code-hl, .code-input {
+  margin: 0; padding: 12px; border: 0; tab-size: 2;
+  font: 13px/20px var(--mono); letter-spacing: normal; word-spacing: normal;
+  white-space: pre; overflow-wrap: normal; word-break: normal;
+}
+.code-hl { position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--text); }
+.code-input {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  background: transparent; color: transparent; caret-color: #7df3ff;
+  resize: none; outline: none; overflow: auto;
+}
+.code-edit-wrap.no-hl .code-hl { display: none; }
+.code-edit-wrap.no-hl .code-input { color: #dbeafe; caret-color: auto; }
+
+/* ─── Yandex Cloud: кнопка в шапке и экран-подсказка ─── */
+#btn-toggle-cloud { position: relative; }
+.hd-dot {
+  position: absolute; top: 5px; right: 5px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: transparent; pointer-events: none;
+}
+.hd-dot.ok { background: var(--ok); box-shadow: 0 0 6px rgba(46, 230, 168, 0.9); }
+.hd-dot.warn { background: var(--warn); box-shadow: 0 0 6px rgba(255, 207, 92, 0.9); }
+.yc-open-dash-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 2px 0 12px;
+}
+.yc-onboard {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 18px 16px 20px;
+}
+.yc-onboard-ic { font-size: 30px; line-height: 1; }
+.yc-onboard-title { font-size: 15px; font-weight: 700; }
+.yc-onboard-text { font-size: 12.5px; line-height: 1.55; color: var(--text-dim); }
+.yc-onboard-steps {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 12px; color: var(--text-dim);
+  background: rgba(4, 7, 16, 0.5);
+  border: 1px solid var(--border-soft); border-radius: 10px;
+  padding: 10px 12px;
+}
+.yc-onboard-steps b { color: var(--accent); margin-right: 6px; }
