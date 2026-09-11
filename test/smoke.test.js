@@ -11,6 +11,8 @@
    - server.js: защита /api/llm (только Yandex), валидация /api/fetch.
    - highlight: подсветка кода не теряет и не искажает исходный текст.
    - chats: атомарная запись истории, .bak-восстановление, автосейв при закрытии.
+   - сессия: постоянный профиль браузера, индикатор контекста, «Дописать ответ».
+   - vault: менеджер паролей (поиск, отсутствие утечек паролей, подстановка входа, интерфейс).
 */
 
 const assert = require("assert");
@@ -746,7 +748,421 @@ async function testBrowserTools() {
     const r = await bt.close({ tabId: "all" });
     assert.ok(typeof r === "string" && r.includes("закрыты"), r);
   });
+
+  // ── Постоянный профиль: сессии сайтов переживают перезапуск приложения ──
+  // playwright подменяем заглушкой — реальный браузер в тестах не запускаем.
+  const Module_ = require("module");
+  const origRequire = Module_.prototype.require;
+  const persistentDirs = [];
+  const mkPage = (u) => ({
+    _u: u || "about:blank",
+    url() { return this._u; },
+    async title() { return "t"; },
+    async goto(x) { this._u = x; },
+    on() {},
+    async close() {},
+    async fill() {},
+    async click() {},
+  });
+  const fakePw = {
+    chromium: {
+      executablePath() { return ""; },
+      async launch() {
+        return { isConnected: () => true, on() {}, async newPage() { return mkPage(""); }, async close() {} };
+      },
+      async launchPersistentContext(dir, opts) {
+        persistentDirs.push({ dir, opts });
+        const pages = [mkPage("about:blank")];
+        return { pages: () => pages, on() {}, async newPage() { return mkPage(""); }, async close() {} };
+      },
+    },
+  };
+  Module_.prototype.require = function (id) {
+    if (id === "playwright") return fakePw;
+    return origRequire.apply(this, arguments);
+  };
+  try {
+    const dir = path.join(tmpdir("agent-profile-"), "profile");
+    bt.setProfileDir(dir);
+    await test("browser-tools: профиль включён → launchPersistentContext + папка на диске", async () => {
+      const r = await bt.open({ url: "https://vk.com/im" });
+      assert.ok(/постоянный профиль/.test(r), "движок: " + r.slice(0, 90));
+      assert.strictEqual(persistentDirs.length, 1, "вызовов persistent: " + persistentDirs.length);
+      assert.ok(fs.existsSync(dir), "папка профиля не создана");
+    });
+    await test("browser-tools: следы автоматизации скрыты (без обхода защит сайтов)", () => {
+      const opts = persistentDirs[0] && persistentDirs[0].opts;
+      assert.ok(opts, "не нашёл опции запуска браузера");
+      assert.ok(
+        (opts.ignoreDefaultArgs || []).includes("--enable-automation"),
+        "не отключён флаг --enable-automation: " + JSON.stringify(opts.ignoreDefaultArgs)
+      );
+      assert.ok(
+        (opts.args || []).includes("--disable-blink-features=AutomationControlled"),
+        "нет флага AutomationControlled: " + JSON.stringify(opts.args)
+      );
+      assert.ok(opts.headless === false, "браузер должен быть видимым (headless=false)");
+    });
+
+    await test("browser-tools: status сообщает, что профиль постоянный", async () => {
+      assert.ok(/Профиль: постоянный/.test(await bt.status()));
+    });
+    await test("browser-tools: очистка профиля удаляет папку", async () => {
+      const m = await bt.clearProfile();
+      assert.ok(/^OK/.test(m), m);
+      assert.ok(!fs.existsSync(dir), "папка профиля осталась");
+    });
+    await test("browser-tools: профиль выключен → обычный запуск и честное сообщение", async () => {
+      bt.setProfileDir("");
+      assert.ok(/выключен/.test(await bt.clearProfile()));
+      const r = await bt.open({ url: "https://example.com" });
+      assert.ok(!/постоянный профиль/.test(r), "движок: " + r.slice(0, 90));
+      assert.ok(/Профиль: временный/.test(await bt.status()));
+    });
+  } finally {
+    Module_.prototype.require = origRequire;
+    bt.setProfileDir("");
+    await bt.stop().catch(() => {});
+  }
 }
+
+// ── 4d. Менеджер паролей (vault) ───────────────────────────────────────────
+async function testVault() {
+  const vault = require(path.join(ROOT, "src", "vault.js"));
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+
+  await test("vault: нормализация записи (обрезка, переводы строк, id, мусор)", () => {
+    const e = vault.normalizeEntry({
+      name: "  ВК  ",
+      url: " https://vk.com/im ",
+      login: "  user  ",
+      password: "p\nw\r\n",
+      note: " 2FA ",
+    });
+    assert.strictEqual(e.name, "ВК");
+    assert.strictEqual(e.url, "https://vk.com/im");
+    assert.strictEqual(e.login, "user");
+    assert.strictEqual(e.password, "pw"); // переводы строк убраны, символы пароля не портим
+    assert.strictEqual(e.note, "2FA");
+    assert.ok(/^v[a-z0-9]+$/.test(e.id), "плохой id: " + e.id);
+    assert.strictEqual(vault.normalizeEntry(null), null);
+    assert.strictEqual(vault.normalizeEntry("строка"), null);
+    assert.strictEqual(vault.normalizeEntry({ login: "x" }), null, "запись без имени и адреса должна отбрасываться");
+    assert.strictEqual(vault.normalizeEntry({ url: "vk.com" }).name, "vk.com");
+    assert.strictEqual(vault.hostOf("https://WWW.Vk.com:443/im?x=1"), "vk.com");
+  });
+
+  await test("vault: список чистится, дубликаты по id отбрасываются", () => {
+    const list = vault.sanitizeList([
+      { id: "a", name: "ВК", password: "p" },
+      { id: "a", name: "Дубль" },
+      null,
+      "мусор",
+      { name: "" },
+    ]);
+    assert.strictEqual(list.length, 1, "осталось: " + list.length);
+    assert.strictEqual(list[0].password, "p");
+    assert.strictEqual(vault.sanitizeList(null).length, 0);
+    assert.strictEqual(vault.sanitizeList("x").length, 0);
+  });
+
+  const site = vault.sanitizeList([
+    { id: "a", name: "ВК", url: "https://vk.com/", login: "user1", password: "pass1" },
+    { id: "b", name: "Авито", url: "avito.ru", login: "user2" },
+    { id: "c", name: "Яндекс Почта", url: "mail.yandex.ru", login: "user3" },
+  ]);
+
+  await test("vault: поиск по имени, регистру, хосту и полному URL", () => {
+    assert.strictEqual(vault.findEntry(site, "ВК").id, "a");
+    assert.strictEqual(vault.findEntry(site, "вк").id, "a");
+    assert.strictEqual(vault.findEntry(site, "https://vk.com/login").id, "a");
+    assert.strictEqual(vault.findEntry(site, "avito.ru").id, "b");
+    assert.strictEqual(vault.findEntry(site, "почта").id, "c");
+    assert.strictEqual(vault.findEntry(site, "yandex").id, "c");
+    assert.strictEqual(vault.findEntry(site, "ok.ru"), null);
+    assert.strictEqual(vault.findEntry(site, ""), null);
+  });
+
+  await test("vault: текст для агента НИКОГДА не содержит паролей", () => {
+    const text = vault.listText(site);
+    assert.ok(!text.includes("pass1"), "пароль утёк в текст: " + text.slice(0, 120));
+    assert.ok(text.includes("пароль: сохранён") && text.includes("пароль: не сохранён"));
+    assert.ok(text.includes("user2"), "логин должен быть виден агенту");
+    assert.ok(/Сохранённых паролей нет/.test(vault.listText([])));
+    const nf = vault.notFoundText(site, "ok.ru");
+    assert.ok(nf.includes("ok.ru") && nf.includes("ВК"));
+  });
+
+  await test("vault: fillLogin подставляет вход и не выводит пароль в ответ", async () => {
+    const calls = [];
+    const bt = {
+      async fill(a) { calls.push({ op: "fill", ...a }); return "OK"; },
+      async press(a) { calls.push({ op: "press", ...a }); return "OK"; },
+    };
+    const r = await vault.fillLogin(site[0], {}, bt);
+    assert.strictEqual(calls[0].op, "fill");
+    assert.strictEqual(calls[0].text, "user1");
+    assert.strictEqual(calls[0].selector, vault.LOGIN_SELECTOR);
+    assert.strictEqual(calls[1].op, "fill");
+    assert.strictEqual(calls[1].text, "pass1");
+    assert.strictEqual(calls[1].selector, vault.PASSWORD_SELECTOR);
+    assert.ok(!r.includes("pass1"), "пароль попал в текст ответа");
+    assert.ok(!r.includes("user1"), "логин не должен дублироваться в ответе");
+    assert.ok(r.includes("НЕ отправлена"));
+  });
+
+  await test("vault: fillLogin — submit, частичный вход и понятные ошибки", async () => {
+    const calls = [];
+    const bt = {
+      async fill(a) { calls.push({ op: "fill", ...a }); return "OK"; },
+      async press(a) { calls.push({ op: "press", ...a }); return "OK"; },
+    };
+    const r1 = await vault.fillLogin(site[0], { submit: true }, bt);
+    assert.strictEqual(calls[2].op, "press");
+    assert.strictEqual(calls[2].key, "Enter");
+    assert.ok(r1.includes("Форма отправлена"));
+
+    calls.length = 0;
+    const r2 = await vault.fillLogin(site[1], {}, bt); // запись без пароля
+    assert.strictEqual(calls.length, 1, "заполняться должен только логин");
+    assert.ok(r2.includes("Пароль не сохранён") && !r2.includes("pass"));
+
+    const errBt = { async fill() { return "Ошибка browserFill: элемент не найден"; }, async press() { return "OK"; } };
+    assert.ok((await vault.fillLogin(site[0], {}, errBt)).includes("Не удалось заполнить поле логина"));
+
+    let n = 0;
+    const halfBt = { async fill() { n++; return n === 1 ? "OK" : "Ошибка browserFill: нет поля"; }, async press() { return "OK"; } };
+    const r4 = await vault.fillLogin(site[0], {}, halfBt);
+    assert.ok(r4.includes("поле пароля не найдено") && !r4.includes("pass1"));
+
+    assert.ok((await vault.fillLogin(site[0], {}, null)).includes("Браузер агента недоступен"));
+    assert.ok((await vault.fillLogin({ name: "X", password: "p" }, {}, bt)).includes("только пароль без логина"));
+    assert.ok((await vault.fillLogin(null, {}, bt)).includes("Нет записи"));
+  });
+
+  await test("secrets: sitePasswords шифруется и читается обратно", () => {
+    const dir = tmpdir("agent-vault-");
+    const file = path.join(dir, "secrets.json");
+    const sec = require(path.join(ROOT, "src", "secrets.js"));
+    sec.init(file);
+    const entries = [{ id: "a", name: "ВК", url: "vk.com", login: "user1", password: "s3cret!" }];
+    const split = sec.splitSecrets({ model: "m", sitePasswords: entries });
+    assert.ok(!("sitePasswords" in split.rest), "sitePasswords остался в открытых настройках");
+    assert.deepStrictEqual(split.sec.sitePasswords, entries);
+    sec.saveSecrets(split.sec);
+    const raw = fs.readFileSync(file, "utf8");
+    assert.ok(!raw.includes("vk.com") && !raw.includes("s3cret!"), "значения не зашифрованы:\n" + raw.slice(0, 300));
+    sec.init(file); // читаем заново с диска
+    assert.deepStrictEqual(sec.loadSecrets().sitePasswords, entries);
+  });
+
+  await test("vault: инструменты агента, тексты и интерфейс связаны", () => {
+    const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+    const htmlSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+    const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+
+    assert.ok(mainSrc.includes('case "vaultList"') && mainSrc.includes('case "vaultFill"'), "нет обработчиков vault-инструментов");
+    assert.ok(mainSrc.includes("sitePasswords: []"), "нет настройки sitePasswords");
+    assert.ok(mainSrc.includes("vault.sanitizeList(s.sitePasswords)"), "список не чистится при загрузке настроек");
+    assert.ok(mainSrc.includes("merged.sitePasswords = prev.sitePasswords"), "нет защиты паролей от затирания при сохранении");
+
+    const defs = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name);
+    assert.ok(defs.includes("vaultList") && defs.includes("vaultFill"), "нет описаний vault-инструментов");
+    assert.ok(coreSrc.includes("НИКОГДА не проси пароль в чате"), "в промпте нет запрета просить пароль в чате");
+    assert.ok(coreSrc.includes("vaultFill подставляет логин и пароль прямо в форму"), "промпт не направляет агента в vaultFill");
+
+    for (const id of ["vault-list", "s-vault-name", "s-vault-url", "s-vault-login", "s-vault-pass", "s-vault-note", "btn-vault-add", "btn-vault-clear", "btn-vault-eye"]) {
+      assert.ok(htmlSrc.includes('id="' + id + '"'), "нет id=" + id + " в index.html");
+      assert.ok(appSrc.includes('"' + id + '"'), "нет ссылки на " + id + " в app.js");
+    }
+    assert.ok(htmlSrc.includes('id="s-vault-pass" type="password"'), "поле пароля должно быть скрытым");
+    assert.ok(appSrc.includes("function renderVault") && appSrc.includes("function vaultAdd") && appSrc.includes("function vaultDelete"));
+  });
+}
+
+// ── 4e. Интерфейс паролей: реальный код app.js + мини-DOM ──────────────────
+async function testVaultUi() {
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const A = "  // ─────────────── Пароли сайтов (Настройки → Секреты) ───────────────";
+  const B = "  // ─────────────── Секреты: переменные окружения (Настройки) ───────────────";
+  const i = appSrc.indexOf(A);
+  const j = appSrc.indexOf(B);
+  assert.ok(i > 0 && j > i, "не нашёл блок паролей в app.js");
+
+  const mkEl = (tag) => ({
+    tag, className: "", textContent: "", title: "", type: "", value: "",
+    children: [], onclick: null,
+    appendChild(c) { this.children.push(c); return c; },
+    classList: { add() {}, toggle() {}, remove() {} },
+  });
+  const inputs = new Map();
+  const box = mkEl("div");
+  // В настоящем DOM присваивание innerHTML удаляет вложенные узлы — повторяем это в заглушке.
+  Object.defineProperty(box, "innerHTML", {
+    get() { return this._html || ""; },
+    set(v) { this._html = v; if (v === "") this.children = []; },
+  });
+  const $ = (id) => {
+    if (id === "vault-list") return box;
+    if (!inputs.has(id)) inputs.set(id, mkEl("input"));
+    return inputs.get(id);
+  };
+  const toasts = [];
+  const settings = { sitePasswords: [] };
+  let persisted = 0;
+  const code = appSrc.slice(i, j);
+  const mod = new Function(
+    "$", "document", "settings", "persistSettings", "toast", "confirm",
+    code + "\nreturn { renderVault, vaultAdd, vaultDelete, vaultLoadToForm, vaultClearForm, vaultArr };"
+  )($, { createElement: (t) => mkEl(t) }, settings, () => { persisted++; }, (t) => toasts.push(t), () => true);
+
+  await test("vault UI: пустой список показывает подсказку", () => {
+    mod.renderVault();
+    assert.ok(box.innerHTML.includes("Записей пока нет"));
+  });
+
+  await test("vault UI: добавление обрезает поля, сохраняет и очищает форму", () => {
+    $("s-vault-name").value = "  ВК  ";
+    $("s-vault-url").value = "vk.com";
+    $("s-vault-login").value = " +79000000000 ";
+    $("s-vault-pass").value = "sup3r secret";
+    $("s-vault-note").value = " 2FA ";
+    mod.vaultAdd();
+    assert.strictEqual(settings.sitePasswords.length, 1);
+    const e = settings.sitePasswords[0];
+    assert.strictEqual(e.name, "ВК");
+    assert.strictEqual(e.login, "+79000000000");
+    assert.strictEqual(e.password, "sup3r secret"); // пароль не портим
+    assert.ok(/^v[a-z0-9]+$/.test(e.id));
+    assert.strictEqual(persisted, 1, "настройки не сохранены");
+    assert.strictEqual($("s-vault-name").value, "");
+    assert.strictEqual($("s-vault-pass").value, "");
+    assert.ok(toasts[toasts.length - 1].includes("сохранена зашифрованно"));
+  });
+
+  await test("vault UI: пустые записи не сохраняются (с понятными сообщениями)", () => {
+    $("s-vault-name").value = "";
+    $("s-vault-url").value = "";
+    $("s-vault-login").value = "u";
+    mod.vaultAdd();
+    assert.strictEqual(settings.sitePasswords.length, 1, "запись без имени и адреса сохранилась");
+    assert.strictEqual(toasts[toasts.length - 1], "Укажи название или адрес сайта");
+    $("s-vault-url").value = "avito.ru";
+    $("s-vault-login").value = "";
+    $("s-vault-pass").value = "";
+    mod.vaultAdd();
+    assert.strictEqual(settings.sitePasswords.length, 1, "запись без логина и пароля сохранилась");
+    assert.strictEqual(toasts[toasts.length - 1], "Заполни хотя бы логин или пароль");
+  });
+
+  await test("vault UI: в списке пароль показывается только маской", () => {
+    settings.sitePasswords.push({ id: "z", name: "Авито", url: "avito.ru", login: "user2", password: "topsecret", note: "тест" });
+    mod.renderVault();
+    assert.strictEqual(box.children.length, 2, "строк: " + box.children.length);
+    const cells = box.children[1].children;
+    assert.strictEqual(cells.length, 4, "в строке должно быть имя, данные, ✏️ и 🗑");
+    const valText = cells[1].textContent;
+    assert.ok(!valText.includes("topsecret"), "пароль показан в списке: " + valText);
+    assert.ok(valText.includes("••••••"), "нет маски пароля");
+    assert.ok(valText.includes("user2") && valText.includes("тест"));
+    assert.strictEqual(cells[2].textContent, "✏️");
+    assert.strictEqual(cells[3].textContent, "🗑");
+  });
+
+  await test("vault UI: правка загружает запись без пароля и обновляет её", () => {
+    mod.vaultLoadToForm(settings.sitePasswords[1]);
+    assert.strictEqual($("s-vault-name").value, "Авито");
+    assert.strictEqual($("s-vault-pass").value, "", "пароль не должен подставляться в форму");
+    assert.ok(toasts[toasts.length - 1].includes("Пароль введи заново"));
+    $("s-vault-pass").value = "newpass";
+    mod.vaultAdd();
+    assert.strictEqual(settings.sitePasswords.length, 2, "вместо обновления добавилась новая запись");
+    assert.strictEqual(settings.sitePasswords[1].id, "z");
+    assert.strictEqual(settings.sitePasswords[1].password, "newpass");
+    assert.strictEqual(toasts[toasts.length - 1], "Запись обновлена");
+  });
+
+  await test("vault UI: удаление и устойчивость к битым данным", () => {
+    mod.vaultDelete("z");
+    assert.strictEqual(settings.sitePasswords.length, 1);
+    assert.strictEqual(toasts[toasts.length - 1], "Запись удалена");
+    settings.sitePasswords = null;
+    assert.ok(Array.isArray(mod.vaultArr()), "vaultArr должен вернуть массив");
+    mod.renderVault();
+    assert.ok(box.innerHTML.includes("Записей пока нет"), "отрисовка не пережила null");
+  });
+}
+
+// ── 4c. Сессия и контекст: индикатор, профиль браузера, «Дописать ответ» ───
+async function testSessionExtras() {
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const htmlSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+  const preSrc = fs.readFileSync(path.join(ROOT, "src", "preload.js"), "utf8");
+  const cssSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "styles.css"), "utf8");
+
+  await test("контекст: main.js считает заполняемость и шлёт её в интерфейс", () => {
+    assert.ok(/type: "context"/.test(mainSrc), "нет события context");
+    assert.ok(/emitContext\(trimmedHistory\)/.test(mainSrc), "нет отправки после обрезки истории");
+    assert.ok(/emitContext\(canonical\)/.test(mainSrc), "нет обновления между раундами");
+  });
+
+  // Отрисовку индикатора берём как реальный код из app.js и подставляем простой DOM.
+  const s0 = appSrc.indexOf("  function fmtTokens(n) {");
+  const s1 = appSrc.indexOf("  // Состояние постоянного профиля браузера");
+  assert.ok(s0 > 0 && s1 > s0, "не нашёл функции индикатора контекста в app.js");
+  const ctxMod = new Function(
+    "$",
+    appSrc.slice(s0, s1) + "\nreturn { renderContext: renderContext, fmtTokens: fmtTokens };"
+  );
+  const cls = new Set();
+  const dom = {
+    "ctx-indicator": { classList: { add: (c) => cls.add(c) }, title: "" },
+    "ctx-fill": { style: {}, classList: { toggle: (c, on) => (on ? cls.add(c) : cls.delete(c)) } },
+    "ctx-text": { textContent: "" },
+  };
+  const ctx = ctxMod((id) => dom[id] || null);
+
+  await test("контекст: индикатор рисует проценты, токены и цвет по уровню", () => {
+    ctx.renderContext({ used: 12400, budget: 24000, percent: 52 });
+    assert.strictEqual(dom["ctx-fill"].style.width, "52%");
+    assert.strictEqual(dom["ctx-text"].textContent, "🧠 12.4k / 24k · 52%");
+    assert.ok(cls.has("visible"), "индикатор остался скрытым");
+    assert.ok(!cls.has("warn") && !cls.has("danger"), "лишний цвет на 52%");
+    ctx.renderContext({ used: 19000, budget: 24000, percent: 80 });
+    assert.ok(cls.has("warn"), "нет жёлтого на 80%");
+    ctx.renderContext({ used: 23000, budget: 24000, percent: 96 });
+    assert.ok(cls.has("danger"), "нет красного на 96%");
+    assert.strictEqual(ctx.fmtTokens(950), "950");
+    assert.strictEqual(ctx.fmtTokens(20000), "20k");
+  });
+
+  await test("контекст: индикатор скрыт по умолчанию (до первого ответа)", () => {
+    assert.ok(/\.ctx-indicator \{[\s\S]{0,80}display: none;/.test(cssSrc), "нет скрытого состояния в styles.css");
+    assert.ok(/\.ctx-indicator\.visible \{ display: flex; \}/.test(cssSrc), "нет класса visible");
+  });
+
+  await test("профиль браузера: разметка, preload и обработчики согласованы", () => {
+    for (const id of ["s-browser-profile", "browser-profile-info", "btn-browser-profile-clear"]) {
+      assert.ok(htmlSrc.includes('id="' + id + '"'), "нет id=" + id + " в index.html");
+      assert.ok(appSrc.includes('"' + id + '"'), "нет ссылки на " + id + " в app.js");
+    }
+    assert.ok(preSrc.includes('"browser:profileInfo"'), "нет канала browser:profileInfo");
+    assert.ok(preSrc.includes('"browser:clearProfile"'), "нет канала browser:clearProfile");
+    assert.ok(mainSrc.includes('ipcMain.handle("browser:profileInfo"'), "нет обработчика browser:profileInfo");
+    assert.ok(mainSrc.includes('ipcMain.handle("browser:clearProfile"'), "нет обработчика browser:clearProfile");
+    assert.ok(mainSrc.includes("browserProfile: true"), "профиль не включён по умолчанию");
+  });
+
+  await test("прерванный ответ: пометка и кнопка «Дописать ответ» на месте", () => {
+    assert.ok(/interrupted: true/.test(appSrc), "пометка прерванного ответа не ставится");
+    assert.ok(/function continueInterruptedAnswer\(chatId, m\)/.test(appSrc), "нет функции продолжения");
+    assert.ok(/Дописать ответ/.test(appSrc), "нет кнопки «Дописать ответ»");
+    assert.ok(/continueInterruptedAnswer\(m\.chatId \|\| chatsData\.activeId, m\)/.test(appSrc), "кнопка не привязана");
+  });
+}
+
 
 // ── 4b. mobile-bridge: rate-limit PIN ───────────────────────────────────────
 async function testMobileBridge() {
@@ -1148,6 +1564,102 @@ async function testChatPersistence() {
   });
 }
 
+// ── 6.5 mail: почта (SMTP/IMAP) ─────────────────────────────────────────────
+async function testMail() {
+  const mail = require(path.join(ROOT, "src", "mail.js"));
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+
+  await test("mail: пресеты серверов по домену адреса", () => {
+    const g = mail.guessServers("user@gmail.com");
+    assert.strictEqual(g.imapHost, "imap.gmail.com");
+    assert.strictEqual(g.smtpPort, 465);
+    assert.ok(/пароль приложения/.test(g.note), "нет подсказки про пароль приложения");
+    assert.strictEqual(mail.guessServers("user@yandex.ru").imapHost, "imap.yandex.ru");
+    assert.strictEqual(mail.guessServers("user@mail.ru").smtpHost, "smtp.mail.ru");
+    const o = mail.guessServers("user@outlook.com");
+    assert.strictEqual(o.starttls, true);
+    assert.strictEqual(o.smtpPort, 587);
+    const u = mail.guessServers("user@my-firm.ru");
+    assert.strictEqual(u.preset, false);
+    assert.strictEqual(u.imapHost, "imap.my-firm.ru");
+    assert.strictEqual(mail.guessServers("").smtpHost, "");
+  });
+
+  await test("mail: письмо — тема RFC 2047, получатели, base64-тело, защита от инъекции", () => {
+    const msg = mail.buildMessage({
+      from: "Михаил <me@yandex.ru>",
+      to: ["client@example.com", "boss@example.com"],
+      subject: "КП: предложение",
+      text: "Здравствуйте!\n.точка в начале",
+      date: new Date("2026-09-11T10:20:30Z"),
+    });
+    assert.ok(/Subject: =\?UTF-8\?B\?/.test(msg), "тема не закодирована RFC 2047");
+    assert.ok(msg.includes("To: client@example.com, boss@example.com"), "получатели не в To");
+    assert.ok(/Date: \w{3}, \d{2} \w{3} \d{4}/.test(msg), "нет корректной даты");
+    const body = msg.split("\r\n\r\n")[1].replace(/\s+/g, "");
+    assert.ok(Buffer.from(body, "base64").toString("utf8").includes("точка в начале"), "тело не декодируется обратно");
+    const injected = mail.buildMessage({ from: "a@b.ru", to: "c@d.ru", subject: "Тема\r\nBcc: hacker@evil.com", text: "x" });
+    assert.ok(!/\r\nBcc:/i.test(injected), "прошла инъекция заголовка");
+    const multi = mail.buildMessage({ from: "a@b.ru", to: "c@d.ru", subject: "s", text: "t", html: "<p>t</p>" });
+    assert.ok(/multipart\/alternative/.test(multi) && /text\/html/.test(multi), "нет multipart/alternative");
+  });
+
+  await test("mail: windows-1251 и UTF-8 декодируются без потерь", () => {
+    const win = Buffer.from([0xCF, 0xE0, 0xF0, 0xEE, 0xEB, 0xFC, 0x3A, 0x20, 0x37, 0x37, 0x37, 0x38, 0x38, 0x38]);
+    assert.strictEqual(mail.decodeBytes(win, "windows-1251"), "Пароль: 777888");
+    assert.strictEqual(mail.decodeBytes(Buffer.from("Привет", "utf8"), "UTF-8"), "Привет");
+    // Письмо объявлено UTF-8, а байты на самом деле cp1251 — спасаем (частая беда рассылок).
+    assert.strictEqual(mail.decodeBytes(win, "utf-8"), "Пароль: 777888");
+  });
+
+  await test("mail: разбор письма (тема, отправитель, код) и эвристика кода", () => {
+    const b64 = (s) => Buffer.from(s, "utf8").toString("base64");
+    const raw = [
+      "From: =?UTF-8?B?" + b64("Сервис Госуслуги") + "?= <noreply@gosuslugi.ru>",
+      "Subject: =?UTF-8?B?" + b64("Ваш код подтверждения") + "?=",
+      "Content-Type: text/plain; charset=UTF-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      b64("Ваш код: 483920"),
+      "",
+    ].join("\r\n");
+    const m = mail.parseMessage(raw, 7);
+    assert.strictEqual(m.subject, "Ваш код подтверждения");
+    assert.ok(m.from.includes("Сервис Госуслуги"), "отправитель не декодирован");
+    assert.strictEqual(m.fromAddress, "noreply@gosuslugi.ru");
+    assert.strictEqual(mail.extractCode(m.text), "483920");
+    assert.strictEqual(mail.extractCode("Your verification code is 55221"), "55221");
+    assert.strictEqual(mail.extractCode("Код 9876 (2026)"), "9876", "год не должен считаться кодом");
+    assert.strictEqual(mail.extractCode(""), null);
+    assert.strictEqual(mail.extractCode("просто текст без цифр"), null);
+    assert.ok(mail.isEmail("a@b.ru"));
+    assert.ok(!mail.isEmail("мусор") && !mail.isEmail("a@b") && !mail.isEmail(""));
+  });
+
+  await test("mail: интеграция — инструменты агента, промпт, мост и настройки", () => {
+    const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name);
+    for (const n of ["mailSend", "mailList", "mailCode"]) assert.ok(names.includes(n), "нет инструмента " + n);
+    const prompt = core.SYSTEM_PROMPT || "";
+    assert.ok(/Почта \(SMTP\/IMAP/.test(prompt), "в промпте нет правила про почту");
+    const preload = fs.readFileSync(path.join(ROOT, "src", "preload.js"), "utf8");
+    for (const s of ["mail:test", "mail:recent", "mail:testSend"]) assert.ok(preload.includes(s), "в preload нет " + s);
+    const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    assert.ok(main.includes('require("./mail.js")'), "main.js не подключает mail.js");
+    for (const s of ['case "mailSend"', 'case "mailList"', 'case "mailCode"', 'ipcMain.handle("mail:test"']) {
+      assert.ok(main.includes(s), "в main.js нет " + s);
+    }
+    const secrets = fs.readFileSync(path.join(ROOT, "src", "secrets.js"), "utf8");
+    assert.ok(secrets.includes('"mailPassword"'), "пароль почты не в списке секретов");
+    const html = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+    for (const id of ["s-mail-address", "s-mail-pass", "s-mail-imap-host", "s-mail-smtp-host", "s-mail-allow-send", "btn-mail-test"]) {
+      assert.ok(html.includes('id="' + id + '"'), "в index.html нет " + id);
+    }
+    const app = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+    assert.ok(app.includes('settings.mailAddress = $("s-mail-address")'), "app.js не сохраняет адрес почты");
+    assert.ok(app.includes("mailDoTest") && app.includes("mailFillServers"), "app.js не содержит логики почты");
+  });
+}
+
 // ── Запуск ──────────────────────────────────────────────────────────────────
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
@@ -1162,6 +1674,10 @@ async function testChatPersistence() {
   await testHighlight();
   await testMobileBridge();
   await testChatPersistence();
+  await testSessionExtras();
+  await testVault();
+  await testVaultUi();
+  await testMail();
   await testServer();
   await testSelfDev();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");

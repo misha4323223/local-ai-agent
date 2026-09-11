@@ -53,6 +53,8 @@ const agentStore = require("./agent-store.js"); // память проекта (
 const unifiedPatch = require("./unified-patch.js"); // применение unified diff (applyPatch)
 const codeIndex = require("./code-index.js"); // семантический индекс кода (BM25 + стемминг)
 const yandexCloud = require("./yandex-cloud.js"); // Yandex Cloud REST API: авторизация, дашборд, создание ресурсов
+const vault = require("./vault.js"); // пароли сайтов: поиск записи, безопасный текст, подстановка в форму
+const mail = require("./mail.js"); // почта агента: SMTP (отправка КП) + IMAP (коды подтверждения), на встроенных модулях
 secrets.init(path.join(app.getPath("userData"), "secrets.json"));
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
 const ipcHandlerMap = new Map();
@@ -101,6 +103,20 @@ const DEFAULT_SETTINGS = {
   visionModel: "",
   imageModel: "",
   serperApiKey: "", // ключ Serper — усиленный Google-поиск для агента (webSearch)
+  // Браузер агента: постоянный профиль (куки и входы на сайты переживают перезапуск приложения)
+  browserProfile: true,
+  // Менеджер паролей: записи { id, name, url, login, password, note } — шифруются как остальные секреты
+  sitePasswords: [],
+  // Почта (SMTP/IMAP): агент отправляет КП и читает коды подтверждения. Пароль — в secrets.json.
+  mailAddress: "", // адрес ящика (он же логин по умолчанию)
+  mailUser: "", // логин, если провайдер требует отдельный (обычно пусто)
+  mailFromName: "", // имя отправителя в письмах
+  mailImapHost: "", // пусто — определится по адресу
+  mailImapPort: 993,
+  mailSmtpHost: "", // пусто — определится по адресу
+  mailSmtpPort: 465,
+  mailStarttls: false, // SMTP через STARTTLS (587) вместо неявного TLS (465)
+  mailAllowAgentSend: false, // агенту ЗАПРЕЩЕНО отправлять письма, пока пользователь не включит
   activeProjectId: "", // id активного проекта (его dir = workingDir)
   // Локальный self-update (OTA): агент собирает бандл (scripts/make-ota.js), приложение применяет на ходу
   otaEnabled: true,
@@ -165,6 +181,8 @@ function normalizeSettings(raw) {
     }
   }
   if (!Array.isArray(s.projects)) s.projects = [];
+  // Пароли сайтов: чистка мусора и дублей (пустые/битые записи отбрасываются).
+  s.sitePasswords = vault.sanitizeList(s.sitePasswords);
   return s;
 }
 
@@ -182,6 +200,11 @@ function loadSettings() {
       if (sec[k] !== undefined) s[k] = sec[k];
     }
     agentEnv = (s && typeof s.agentEnv === "object" && s.agentEnv) || {};
+    // Постоянный профиль браузера агента: отдельная папка внутри userData.
+    // Выключено — работаем как раньше, с чистым профилем на каждый запуск.
+    try {
+      browserTools.setProfileDir(s.browserProfile === false ? "" : path.join(app.getPath("userData"), "browser-profile"));
+    } catch {}
     return s;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -2036,6 +2059,68 @@ async function executeTool(name, args, settings) {
       case "browserStatus": {
         return await browserTools.status();
       }
+      case "browserClearProfile": {
+        return await browserTools.clearProfile();
+      }
+      // Менеджер паролей: список сайтов (без паролей) и подстановка входа в форму.
+      // Пароль идёт напрямую в браузер и никогда не попадает в текст ответа.
+      case "vaultList": {
+        return vault.listText(settings.sitePasswords);
+      }
+      case "vaultFill": {
+        const site = args.site || args.name || args.url || "";
+        const entry = vault.findEntry(settings.sitePasswords, site);
+        if (!entry) return vault.notFoundText(settings.sitePasswords, site);
+        return await vault.fillLogin(entry, args, browserTools);
+      }
+      // Почта: отправка писем (КП клиентам) и чтение входящих (коды подтверждения).
+      case "mailSend": {
+        const cfg = mailConfig(settings);
+        if (!cfg.allowSend) {
+          return "⛔ Отправка писем агентом ЗАПРЕЩЕНА. Скажи пользователю включить Настройки → «✉️ Почта» → чекбокс «Разрешить агенту отправлять письма».";
+        }
+        if (!cfg.address || !cfg.password || !cfg.smtpHost) {
+          return "Почта не настроена. Скажи пользователю: Настройки → «✉️ Почта» → адрес, пароль приложения, затем кнопка «Определить по адресу».";
+        }
+        const r = await mail.sendMail(
+          { host: cfg.smtpHost, port: cfg.smtpPort, user: cfg.user, password: cfg.password, secure: !cfg.starttls, starttls: cfg.starttls },
+          { fromName: cfg.fromName, to: args.to || args.recipient, subject: args.subject, text: args.text, html: args.html }
+        );
+        if (!r.ok) return "Ошибка отправки: " + r.error;
+        return "OK — письмо отправлено: " + (Array.isArray(r.to) ? r.to.join(", ") : r.to) + ". Тема: " + String(args.subject || "").slice(0, 120);
+      }
+      case "mailList": {
+        const cfg = mailConfig(settings);
+        if (!cfg.address || !cfg.password || !cfg.imapHost) return "Почта не настроена — Настройки → «✉️ Почта».";
+        const r = await mail.listRecent(
+          { host: cfg.imapHost, port: cfg.imapPort, user: cfg.user, password: cfg.password, secure: true },
+          { limit: args.limit, unseenOnly: args.unseenOnly === true }
+        );
+        if (!r.ok) return "Ошибка чтения почты: " + r.error;
+        if (!r.messages.length) return "Входящих писем нет (ящик пуст).";
+        const rows = r.messages.map((m) => {
+          const code = mail.extractCode(m.text);
+          const preview = String(m.text || "").replace(/\s+/g, " ").trim().slice(0, 200);
+          return "• " + m.from + "\n  Тема: " + m.subject + "\n  Дата: " + m.date + (code ? "\n  Код: " + code : "") + "\n  " + preview;
+        });
+        return "Последние письма (" + r.messages.length + " из " + r.total + "):\n\n" + rows.join("\n\n") + "\n\nОтправить письмо: mailSend(to, subject, text).";
+      }
+      case "mailCode": {
+        const cfg = mailConfig(settings);
+        if (!cfg.address || !cfg.password || !cfg.imapHost) return "Почта не настроена — Настройки → «✉️ Почта».";
+        const r = await mail.listRecent(
+          { host: cfg.imapHost, port: cfg.imapPort, user: cfg.user, password: cfg.password, secure: true },
+          { limit: Math.min(parseInt(args.limit, 10) || 5, 10) }
+        );
+        if (!r.ok) return "Ошибка чтения почты: " + r.error;
+        const want = String(args.from || args.query || "").trim().toLowerCase();
+        const list = want ? r.messages.filter((m) => (m.from + " " + m.subject).toLowerCase().includes(want)) : r.messages;
+        for (const m of list) {
+          const code = mail.extractCode(m.text);
+          if (code) return "Код подтверждения: " + code + "\nИз письма: " + m.subject + " (" + m.from + ", " + m.date + ")";
+        }
+        return "Код подтверждения не найден в последних " + r.messages.length + " письмах" + (want ? " от «" + want + "»" : "") + ". Вызови mailList — возможно, письмо ещё не пришло.";
+      }
       // Инструменты управления собственным окном приложения (app-*): DOM внутри Electron-окна.
       case "appRead": {
         return await appUi.read(args, mainWindow);
@@ -3459,6 +3544,16 @@ async function runAi(settings, messages, win, opts) {
   const toolsWeight = activeTools.length ? estimateTokens(JSON.stringify(activeTools)) : 0;
   let histBudget = Math.max(1500, budget - toolsWeight); // бюджет истории без учёта схемы инструментов
   const ctxManager = createContextManager({ settings, emit, planMode });
+  // Индикатор контекста: сколько токенов занимают история + схема инструментов.
+  // Отправляется в интерфейс полоской под полем ввода (видно, когда контекст подходит к концу).
+  const emitContext = (hist) => {
+    try {
+      const histTokens = hist && hist.length ? estimateTokens(JSON.stringify(hist)) : 0;
+      const used = histTokens + toolsWeight;
+      const percent = budget > 0 ? Math.max(0, Math.min(100, Math.round((used / budget) * 100))) : 0;
+      emit({ type: "context", used, budget, percent, history: histTokens, tools: toolsWeight });
+    } catch {}
+  };
 
   // Вопрос пользователю (askUser / подтверждение опасной команды).
   const askUserWait = (question) => {
@@ -3476,6 +3571,7 @@ async function runAi(settings, messages, win, opts) {
     });
   };
   const trimmedHistory = await ctxManager.manage(messages, histBudget);
+  emitContext(trimmedHistory);
   // Авто-разбор присланных картинок вспомогательной vision-моделью (второй ключ):
   // скриншот → описание → кодер работает с текстом (его модель может не видеть картинки).
   let runHistory = trimmedHistory;
@@ -3570,6 +3666,7 @@ async function runAi(settings, messages, win, opts) {
     if (canonical.length > 1) {
       const sys = canonical[0];
       canonical = [sys, ...(await ctxManager.manage(canonical.slice(1), histBudget))];
+      emitContext(canonical);
     }
     // Финальный предохранитель перед отправкой: осиротевшие tool-сообщения
     // (role:"tool" без предшествующего assistant с tool_calls) — 400 wrong_api_format.
@@ -3613,6 +3710,7 @@ async function runAi(settings, messages, win, opts) {
         if (canonical.length > 1) {
           const sys = canonical[0];
           canonical = [sys, ...(await ctxManager.manage(canonical.slice(1), histBudget))];
+          emitContext(canonical);
         }
         if (canonical.length > 1) {
           const sys = canonical[0];
@@ -4022,6 +4120,13 @@ ipcMain.handle("settings:set", (_e, s) => {
     lastAgentRepoDir = null; // рабочая папка сменилась — сбрасываем «активный репозиторий»
   }
   const merged = normalizeSettings({ ...prev, ...(s || {}) });
+  // Защита хранилища паролей: если сохранение пришло без массива sitePasswords
+  // (старая версия интерфейса, обрезанный объект, мобильный клиент) — не затираем
+  // уже сохранённые записи. Пустой массив — это осознанная очистка, её пропускаем.
+  if (!s || !Array.isArray(s.sitePasswords)) merged.sitePasswords = prev.sitePasswords || [];
+  // Защита пароля почты: сохранение без ключа mailPassword (мобильный клиент,
+  // старый интерфейс) не должно стирать уже сохранённый пароль приложения.
+  if (!s || s.mailPassword === undefined) merged.mailPassword = prev.mailPassword || "";
   // При смене рабочей папки — сбрасываем локальную папку выбранного GitHub-репозитория,
   // чтобы не подхватывать старый путь от прошлой локации.
   if (s && s.workingDir && prev.workingDir !== s.workingDir) {
@@ -4037,9 +4142,77 @@ ipcMain.handle("settings:set", (_e, s) => {
   if (merged.mobileEnabled && !merged.mobilePin) {
     merged.mobilePin = String(Math.floor(100000 + Math.random() * 900000));
   }
+  try {
+    browserTools.setProfileDir(merged.browserProfile === false ? "" : path.join(app.getPath("userData"), "browser-profile"));
+  } catch {}
   saveSettings(merged);
   mobileBridge.applySettings(merged);
   return merged;
+});
+
+// ─────────────────────────── Браузер агента (постоянный профиль) ───────────────────────────
+// Сессии ВК и других сайтов хранятся в userData/browser-profile — вход переживает перезапуск.
+ipcMain.handle("browser:profileInfo", () => {
+  const s = loadSettings();
+  const dir = browserTools.profilePath();
+  let exists = false;
+  try { exists = !!(dir && fs.existsSync(dir)); } catch {}
+  return { enabled: s.browserProfile !== false, dir: dir || "", exists };
+});
+ipcMain.handle("browser:clearProfile", async () => {
+  const message = await browserTools.clearProfile();
+  return { ok: !/^Не удалось/.test(message), message };
+});
+
+// ─────────────────────────── Почта (SMTP/IMAP) ───────────────────────────
+// Проверка входа IMAP — кнопка «Проверить связь» в настройках. Письма не отправляются.
+ipcMain.handle("mail:test", async () => {
+  const cfg = mailConfig(loadSettings());
+  const servers = {
+    imapHost: cfg.imapHost, imapPort: cfg.imapPort,
+    smtpHost: cfg.smtpHost, smtpPort: cfg.smtpPort,
+    starttls: cfg.starttls, note: cfg.note,
+  };
+  if (!cfg.address) return { ok: false, error: "Укажи адрес почты.", servers };
+  if (!cfg.password) return { ok: false, error: "Укажи пароль приложения для почты.", servers };
+  const r = await mail.listRecent(
+    { host: cfg.imapHost, port: cfg.imapPort, user: cfg.user, password: cfg.password, secure: true },
+    { limit: 1 }
+  );
+  return { ok: r.ok, error: r.ok ? "" : r.error, total: r.ok ? r.total : 0, servers };
+});
+
+// Последние письма для интерфейса (кратко: без полного текста, но с найденным кодом).
+ipcMain.handle("mail:recent", async (_e, limit) => {
+  const cfg = mailConfig(loadSettings());
+  if (!cfg.address || !cfg.password) return { ok: false, error: "Почта не настроена." };
+  const r = await mail.listRecent(
+    { host: cfg.imapHost, port: cfg.imapPort, user: cfg.user, password: cfg.password, secure: true },
+    { limit: Math.min(parseInt(limit, 10) || 5, 10) }
+  );
+  if (!r.ok) return r;
+  return {
+    ok: true,
+    total: r.total,
+    messages: r.messages.map((m) => ({ from: m.from, subject: m.subject, date: m.date, code: mail.extractCode(m.text) })),
+  };
+});
+
+// Тестовое письмо самому себе — проверяет SMTP-отправку целиком.
+ipcMain.handle("mail:testSend", async () => {
+  const cfg = mailConfig(loadSettings());
+  if (!cfg.address) return { ok: false, error: "Укажи адрес почты." };
+  if (!cfg.password) return { ok: false, error: "Укажи пароль приложения для почты." };
+  const r = await mail.sendMail(
+    { host: cfg.smtpHost, port: cfg.smtpPort, user: cfg.user, password: cfg.password, secure: !cfg.starttls, starttls: cfg.starttls },
+    {
+      fromName: cfg.fromName,
+      to: cfg.address,
+      subject: "Проверка почты от AI-агента",
+      text: "Это тестовое письмо. Если ты его видишь — отправка писем настроена верно.\n\n— AI Developer Agent",
+    }
+  );
+  return r;
 });
 
 // ─────────────────────────── Мобильный доступ (LAN + PWA + PIN) ───────────────────────────
@@ -5116,6 +5289,31 @@ function ycConfig(s) {
     folderName: String(s.ycFolderName || "").trim(),
     allowCreate: !!s.ycAllowAgentCreate,
     allowDelete: !!s.ycAllowAgentDelete,
+  };
+}
+
+// Почта: собирает рабочую конфигурацию из настроек. Пустые серверы берутся из
+// пресета провайдера (Gmail/Яндекс/Mail.ru/Outlook/Rambler), иначе — imap.<домен>.
+function mailConfig(s) {
+  s = s || loadSettings();
+  const address = String(s.mailAddress || "").trim();
+  const guess = mail.guessServers(address);
+  const num = (v, fallback) => {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  return {
+    address,
+    user: String(s.mailUser || "").trim() || address,
+    fromName: String(s.mailFromName || "").trim(),
+    password: String(s.mailPassword || ""),
+    imapHost: String(s.mailImapHost || "").trim() || guess.imapHost,
+    imapPort: num(s.mailImapPort, guess.imapPort || 993),
+    smtpHost: String(s.mailSmtpHost || "").trim() || guess.smtpHost,
+    smtpPort: num(s.mailSmtpPort, guess.smtpPort || 465),
+    starttls: s.mailStarttls === true || guess.starttls === true,
+    allowSend: !!s.mailAllowAgentSend,
+    note: guess.note || "",
   };
 }
 

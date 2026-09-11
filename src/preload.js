@@ -102,6 +102,15 @@ contextBridge.exposeInMainWorld("api", {
   mobileStatus: () => ipcRenderer.invoke("mobile:status"),
   mobilePinRegen: () => ipcRenderer.invoke("mobile:pinRegen"),
 
+  // Браузер агента: постоянный профиль (сессии сайтов) — статус и очистка
+  browserProfileInfo: () => ipcRenderer.invoke("browser:profileInfo"),
+  browserClearProfile: () => ipcRenderer.invoke("browser:clearProfile"),
+
+  // Почта (SMTP/IMAP): проверка входа, последние письма, тестовое письмо себе
+  mailTest: () => ipcRenderer.invoke("mail:test"),
+  mailRecent: (limit) => ipcRenderer.invoke("mail:recent", limit),
+  mailTestSend: () => ipcRenderer.invoke("mail:testSend"),
+
   // Yandex Cloud (REST API): авторизация, каталог, дашборд, создание/удаление
   ycStatus: () => ipcRenderer.invoke("yc:status"),
   ycSetToken: (token) => ipcRenderer.invoke("yc:setToken", token),

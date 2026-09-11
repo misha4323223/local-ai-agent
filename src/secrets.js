@@ -28,7 +28,15 @@ const SECRET_KEYS = [
   "openaiProfiles", // массив сохранённых OpenAI-подключений (внутри — apiKey)
   "yandexOauthToken", // OAuth-токен Yandex (для Yandex Cloud REST API)
   "serperApiKey", // API-ключ Serper (усиленный Google-поиск для агента)
+  "sitePasswords", // пароли сайтов для агента (менеджер паролей) — шифруются как ключи
+  "mailPassword", // пароль приложения для почты (SMTP/IMAP) — шифруется
 ];
+
+// Секреты-объекты (не строки): перед шифрованием сериализуются в JSON.
+const OBJECT_KEYS = ["agentEnv", "openaiProfiles", "sitePasswords"];
+function isObjectKey(k) {
+  return OBJECT_KEYS.indexOf(k) !== -1;
+}
 
 let secretsFile = null; // полный путь к secrets.json
 let cache = null; // расшифрованный кэш { key: value }
@@ -97,10 +105,10 @@ function loadSecrets() {
     if (typeof v === "string" && (v.startsWith("enc:") || v.startsWith("plain:"))) {
       const d = decryptText(v);
       if (d === null) continue; // не расшифровать — не подставляем
-      cache[k] = k === "agentEnv" || k === "openaiProfiles" ? safeParse(d) : d;
+      cache[k] = isObjectKey(k) ? safeParse(d) : d;
     } else {
       // старый формат: открытый текст — подхватываем как есть
-      cache[k] = k === "agentEnv" || k === "openaiProfiles" ? safeParse(v) : v;
+      cache[k] = isObjectKey(k) ? safeParse(v) : v;
     }
   }
   return cache;
@@ -149,6 +157,7 @@ function splitSecrets(s) {
 
 module.exports = {
   SECRET_KEYS,
+  OBJECT_KEYS,
   init,
   loadSecrets,
   saveSecrets,

@@ -38,7 +38,7 @@
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
 20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), тихая установка скачанного установщика .exe — installExe (спросит подтверждение). ВАЖНО: команды по умолчанию выполняются в cmd.exe на Windows — если нужны командлеты PowerShell (Get-Process, Get-Service, Get-NetIPAddress и т.п.), напиши внутри runCommand: powershell -NoProfile -Command "...".
-21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url), управляй страницей через browserClick / browserFill / browserSelect / browserPress, читай содержимое через browserText, список вкладок — browserStatus, скриншот — browserScreenshot. Селекторы: CSS (#id, .class, input[name="..."]) или text=Текст кнопки, xpath=//button. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли бери ТОЛЬКО у пользователя через askUser (или из agentEnv, если он сам их туда положил) — не выдумывай и не записывай их в код. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
+21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url), управляй страницей через browserClick / browserFill / browserSelect / browserPress, читай содержимое через browserText, список вкладок — browserStatus, скриншот — browserScreenshot. Селекторы: CSS (#id, .class, input[name="..."]) или text=Текст кнопки, xpath=//button. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
 22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — прочитать, что сейчас видно в окне (вкладка, кнопки, поля, номера [N]), appClick — кликнуть по тексту/селектору/номеру, appFill — ввести текст в поле, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
 23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
 25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
@@ -48,8 +48,9 @@
 28. Yandex Cloud: инструменты ycStatus / ycList / ycCreate / ycDelete / ycDeploy / ycLogs. Начни с ycStatus — авторизация (Настройки → «☁️ Yandex Cloud»), каталог, разрешения агента. Создание/удаление ресурсов — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Создать можно: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc. Деплой — ycDeploy (directory, name, public): Docker-образ → Container Registry → Serverless Container → URL (нужен Docker). Логи — ycLogs (service, id). Результат проверяй через ycList.
 29. ВКонтакте (vk.com/vk.ru — домены взаимозаменяемы): браузерные инструменты. Поле ввода — contenteditable, селектор [role=textbox]: browserClick по полю → browserFill(selector: [role=textbox], text: ...) → отправка browserPress(key: Enter) (Shift+Enter — перенос строки). Страницы грузятся лениво — после открытия жди 2–5 секунд и перечитывай browserText; проверка отправки — текст сообщения в конце переписки. Работай в СУЩЕСТВУЮЩЕЙ вкладке браузера (новые открываются без сессии); состояние читай через browserText, а не скриншоты (ВК их обрезает); текст приходит вместе с левым меню — фильтруй по именам/датам. Вход/сессия — только руками пользователя, не обходи. Маршруты, селекторы, сценарии и известные контакты — в гайде, прочитай перед работой: readFile(path: agent-guide:vk).
 30. Анализ переписок (ВК, чаты, письма, файлы): определи КТО человек по уликам в тексте (работа/задачи → коллега; семейное/личное → родственник/друг; услуги/цены/заказы → клиент/поставщик; «Вы» и официальный тон → деловой контакт), выдели СУТЬ (2–4 предложения: о чём разговор, что решено, что ждёт ответа, срочность) и оформи ТАБЛИЦЕЙ: «Человек (профиль) | Кто он | Суть переписки | Важность | Следующий шаг». Для КЛИЕНТОВ дополнительно: профиль (потребность его словами, что обсуждали, бюджет/сроки если видно, возражения, тон) + фундамент для КП (2–4 пункта, что включить в предложение, и следующий логичный шаг). Не выдумывай: чего нет в тексте — «не определено». Длинную историю читай частями (PageUp + browserText). Полная методология — readFile(path: agent-guide:chat-analysis).
+31. Почта (SMTP/IMAP, Настройки → «✉️ Почта»): mailList — прочитать последние письма (отправитель, тема, дата, найденный код), mailCode — вытащить код подтверждения (from — фильтр по отправителю, например «yandex»), mailSend — отправить письмо (КП клиенту, ответ на запрос). Начни с mailList: если почта не настроена или нет разрешения на отправку, инструмент вернёт подсказку — передай её пользователю. Письма уходят с его ящика, поэтому перед отправкой клиенту покажи готовый текст и спроси подтверждение, если пользователь не просил отправить сразу. Пароль приложения не показывай и не проси в чате. Если письмо с кодом ещё не пришло — повтори mailCode через 10–20 секунд (письмо доходит не мгновенно).
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -420,6 +421,85 @@
         parameters: {
           type: "object",
           properties: {},
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserClearProfile",
+        description: "Очистить постоянный профиль браузера: закрыть браузер и стереть куки, localStorage и сессии всех сайтов. Используй, только если пользователь сам попросил «выйти со всех сайтов / очистить браузер агента» — после этого придётся авторизовываться заново.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "vaultList",
+        description: "Показать сохранённые в менеджере паролей сайты: название, адрес, логин и есть ли пароль. Пароли НИКОГДА не возвращаются — они подставляются только инструментом vaultFill. Без аргументов. Вызывай перед тем, как просить у пользователя логин.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "vaultFill",
+        description: "Подставить сохранённые логин и пароль в форму входа на открытой странице. Пароль берётся из менеджера паролей и уходит напрямую в браузер — в чат он не попадает, поэтому пароль в чате не спрашивай. site — название сайта или адрес («ВК», «vk.com»). submit:true — сразу отправить форму клавишей Enter (по умолчанию false: сначала проверь поля).",
+        parameters: {
+          type: "object",
+          properties: {
+            site: { type: "string", description: "Название сайта или адрес из vaultList (например «ВК» или vk.com)" },
+            submit: { type: "boolean", description: "Отправить форму сразу после заполнения (Enter). По умолчанию false" },
+            loginSelector: { type: "string", description: "Свой CSS-селектор поля логина (если автоопределение не сработало)" },
+            passwordSelector: { type: "string", description: "Свой CSS-селектор поля пароля" },
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+          },
+          required: ["site"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "mailSend",
+        description: "Отправить письмо по электронной почте (например коммерческое предложение клиенту). to — адрес или несколько через запятую; subject — тема; text — текст письма (можно с переносами строк); html — необязательная HTML-версия. Требует двух условий: настроенного пароля приложения (Настройки → «✉️ Почта») и включённого разрешения «Разрешить агенту отправлять письма». Письмо уходит с ящика пользователя — перед отправкой клиенту покажи готовый текст и попроси подтверждение, если пользователь не просил отправить сразу.",
+        parameters: {
+          type: "object",
+          properties: {
+            to: { type: "string", description: "Адрес получателя (или несколько через запятую)" },
+            subject: { type: "string", description: "Тема письма" },
+            text: { type: "string", description: "Текст письма (обычный текст)" },
+            html: { type: "string", description: "HTML-версия письма (необязательно)" },
+          },
+          required: ["to", "subject", "text"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "mailList",
+        description: "Прочитать последние входящие письма: отправитель, тема, дата, найденный код подтверждения и первые строки текста. limit — сколько писем (по умолчанию 5, максимум 10); unseenOnly: true — только непрочитанные. Используй, чтобы найти код подтверждения при регистрации на сайте или письмо от клиента.",
+        parameters: {
+          type: "object",
+          properties: {
+            limit: { type: "integer", description: "Сколько последних писем вернуть (1–10, по умолчанию 5)" },
+            unseenOnly: { type: "boolean", description: "Только непрочитанные письма (по умолчанию false)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "mailCode",
+        description: "Найти код подтверждения в свежих письмах (для регистрации или входа на сайтах). from — необязательный фильтр по отправителю или теме («yandex», «gosuslugi»). Возвращает сам код и письмо, в котором он найден. Вызывай после того, как сайт запросил код: письмо приходит в течение минуты.",
+        parameters: {
+          type: "object",
+          properties: {
+            from: { type: "string", description: "Фильтр по отправителю или теме письма (необязательно)" },
+            limit: { type: "integer", description: "Сколько последних писем проверить (по умолчанию 5, максимум 10)" },
+          },
         },
       },
     },
@@ -2107,6 +2187,25 @@
     browser_wait: "browserWait",
     browser_close: "browserClose",
     browser_status: "browserStatus",
+    browser_clear_profile: "browserClearProfile",
+    browserclearprofile: "browserClearProfile",
+    vault_list: "vaultList",
+    vaultlist: "vaultList",
+    vault_fill: "vaultFill",
+    vaultfill: "vaultFill",
+    mail_send: "mailSend",
+    mailsend: "mailSend",
+    send_mail: "mailSend",
+    send_email: "mailSend",
+    email: "mailSend",
+    mail_list: "mailList",
+    maillist: "mailList",
+    inbox: "mailList",
+    list_mail: "mailList",
+    mail_code: "mailCode",
+    mailcode: "mailCode",
+    confirmation_code: "mailCode",
+    email_code: "mailCode",
     app_read: "appRead",
     app_click: "appClick",
     app_fill: "appFill",

@@ -21,10 +21,14 @@
 */
 
 const fs = require("fs");
+const path = require("path");
 const { spawn } = require("child_process");
 
 let pw = null; // модуль playwright (лениво)
-let browser = null; // экземпляр браузера
+let browser = null; // Browser (обычный запуск) ИЛИ BrowserContext (постоянный профиль)
+let sessionClosed = false; // для BrowserContext: пришло событие "close" — сессия мертва
+let profileDir = ""; // папка постоянного профиля (пусто — сессии не сохраняются)
+let runningProfileDir = null; // папка профиля, с которой запущена текущая сессия
 let tabs = new Map(); // tabId -> { id, page, openedAt }
 let tabSeq = 0;
 let activeTabId = null;
@@ -95,6 +99,61 @@ function installChromium() {
   return installPromise;
 }
 
+// ── Постоянный профиль браузера ───────────────────────────────────────────
+// Папка задаётся из main.js (userData/browser-profile). Внутри неё Chromium
+// хранит куки, localStorage и авторизации — поэтому вход в ВК и на сайты
+// переживает закрытие и перезапуск приложения. Пустая строка — как раньше
+// (чистый профиль на каждый запуск).
+function setProfileDir(dir) {
+  profileDir = dir ? String(dir) : "";
+  return profileDir;
+}
+
+function profilePath() {
+  return profileDir;
+}
+
+function profileNote() {
+  return profileDir
+    ? "\nПрофиль: постоянный — куки и входы на сайтах сохраняются между запусками."
+    : "\nПрофиль: временный — при закрытии браузера сессии и входы теряются.";
+}
+
+// Жива ли текущая сессия: у Browser есть isConnected(), у BrowserContext — нет
+// (для него признак — не пришло событие "close", см. wireBrowser).
+function sessionAlive() {
+  if (!browser || sessionClosed) return false;
+  try {
+    if (typeof browser.isConnected === "function") return browser.isConnected();
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+// Запуск движка: с папкой профиля — launchPersistentContext, без неё — обычный launch.
+async function launchEngine(chromium, name, opts) {
+  // Следы автоматизации, которые мешают входу на сайты с жёсткими проверками
+  // (Google, банки): плашка «управляется автоматизированным ПО», флаг
+  // --enable-automation и navigator.webdriver = true. Это документированные
+  // опции Playwright — мы лишь не афишируем автоматизацию, пароли и входы
+  // по-прежнему вводит сам пользователь. Защиты сайтов не обходятся.
+  const args = ["--start-maximized", "--disable-infobars", "--disable-blink-features=AutomationControlled"];
+  const base = {
+    headless: false,
+    ignoreDefaultArgs: ["--enable-automation"],
+    ...opts,
+    args,
+  };
+  if (profileDir) {
+    try { fs.mkdirSync(profileDir, { recursive: true }); } catch {}
+    const ctx = await chromium.launchPersistentContext(profileDir, base);
+    return { ok: true, browser: ctx, engine: name + " · постоянный профиль", persistent: true };
+  }
+  const b = await chromium.launch(base);
+  return { ok: true, browser: b, engine: name, persistent: false };
+}
+
 // Запуск браузера: системный Edge → Chrome → свой Chromium (с авто-установкой).
 async function launchBrowser() {
   const { chromium } = loadPlaywright();
@@ -105,12 +164,7 @@ async function launchBrowser() {
   let lastErr = null;
   for (const a of attempts) {
     try {
-      const b = await chromium.launch({
-        headless: false,
-        ...a.opts,
-        args: ["--start-maximized", "--disable-infobars"],
-      });
-      return { ok: true, browser: b, engine: a.name };
+      return await launchEngine(chromium, a.name, a.opts);
     } catch (e) {
       lastErr = e;
     }
@@ -121,11 +175,7 @@ async function launchBrowser() {
   const needInstall = execPath && !fs.existsSync(execPath);
   if (needInstall) return { needInstall: true, message: "Chromium (playwright) не установлен — скачиваю…" };
   try {
-    const b = await chromium.launch({
-      headless: false,
-      args: ["--start-maximized", "--disable-infobars"],
-    });
-    return { ok: true, browser: b, engine: "Chromium (playwright)" };
+    return await launchEngine(chromium, "Chromium (playwright)", {});
   } catch (e) {
     lastErr = e;
   }
@@ -143,7 +193,12 @@ async function ensureBrowser() {
 }
 
 async function ensureBrowserInner() {
-  if (browser && browser.isConnected()) return { ok: true };
+  if (sessionAlive()) {
+    // Настройка постоянного профиля не менялась — работаем в текущей сессии.
+    if (runningProfileDir === profileDir) return { ok: true };
+    // Профиль включили/выключили или сменили папку — перезапускаем, чтобы применилось сразу.
+    await stop();
+  }
   const r = await launchBrowser();
   if (r.needInstall) {
     const inst = await installChromium();
@@ -161,22 +216,31 @@ async function ensureBrowserInner() {
     if (!r2.ok) return { ok: false, message: r2.error || "Chromium установлен, но не запустился." };
     browser = r2.browser;
     engineName = r2.engine;
+    runningProfileDir = profileDir;
     wireBrowser();
     return { ok: true };
   }
   if (!r.ok) return { ok: false, message: r.error || "Не удалось запустить браузер" };
   browser = r.browser;
   engineName = r.engine;
+  runningProfileDir = profileDir;
   wireBrowser();
   return { ok: true };
 }
 
 function wireBrowser() {
-  browser.on("disconnected", () => {
+  sessionClosed = false;
+  const reset = () => {
     tabs.clear();
     activeTabId = null;
     browser = null;
-  });
+    sessionClosed = true;
+  };
+  try {
+    // У Browser событие "disconnected", у BrowserContext (постоянный профиль) — "close".
+    const evt = typeof browser.isConnected === "function" ? "disconnected" : "close";
+    browser.on(evt, reset);
+  } catch {}
 }
 
 function resolveTab(tabId) {
@@ -186,7 +250,7 @@ function resolveTab(tabId) {
 }
 
 function needTab(tabId) {
-  if (!browser || !browser.isConnected()) {
+  if (!sessionAlive()) {
     return { error: "Браузер не запущен. Сначала вызови browserOpen (url)." };
   }
   const tab = resolveTab(tabId);
@@ -223,6 +287,15 @@ async function open(args) {
   if (!args.newTab && activeTabId) {
     const cur = tabs.get(activeTabId);
     if (cur) page = cur.page;
+  }
+  if (!page) {
+    // Постоянный профиль стартует с одной пустой вкладки — используем её, а не плодим новую.
+    try {
+      if (!tabs.size && typeof browser.pages === "function") {
+        const pages = browser.pages();
+        if (pages.length === 1 && pages[0].url() === "about:blank") page = pages[0];
+      }
+    } catch {}
   }
   if (!page) page = await browser.newPage();
   const tabId = "tab" + (++tabSeq);
@@ -387,8 +460,10 @@ async function close(args) {
     for (const tb of list) { try { await tb.page.close(); } catch {} }
     tabs.clear();
     activeTabId = null;
-    if (browser && browser.isConnected()) { try { await browser.close(); } catch {} }
+    if (sessionAlive()) { try { await browser.close(); } catch {} }
     browser = null;
+    sessionClosed = true;
+    runningProfileDir = null;
     return "OK — все вкладки и браузер закрыты.";
   }
   const t = needTab(args.tabId || args.tab);
@@ -402,8 +477,8 @@ async function close(args) {
 
 // Список открытых вкладок.
 async function status() {
-  if (!browser || !browser.isConnected()) {
-    return "Браузер не запущен. Ни одной вкладки нет. Открой страницу через browserOpen (url).";
+  if (!sessionAlive()) {
+    return "Браузер не запущен. Ни одной вкладки нет. Открой страницу через browserOpen (url)." + profileNote();
   }
   const rows = [];
   for (const [id, tb] of tabs.entries()) {
@@ -412,17 +487,32 @@ async function status() {
   }
   if (!rows.length) return "Браузер запущен, вкладок нет. browserOpen (url) — открыть страницу.";
   return "Открытые вкладки (" + rows.length + "), движок: " + engineName + ":\n" + rows.join("\n") +
-    "\n\nАктивная — ▶. Для действий в конкретной вкладке передавай tabId.";
+    "\n\nАктивная — ▶. Для действий в конкретной вкладке передавай tabId." + profileNote();
 }
 
 // Остановить браузер (вызывается при выходе из приложения).
 async function stop() {
-  if (browser && browser.isConnected()) {
+  if (sessionAlive()) {
     try { await browser.close(); } catch {}
   }
   browser = null;
   tabs.clear();
   activeTabId = null;
+  sessionClosed = true;
+  runningProfileDir = null;
+}
+
+// Полная очистка постоянного профиля: выход со всех сайтов, стирание куки и сессий.
+async function clearProfile() {
+  await stop();
+  if (!profileDir) return "Постоянный профиль браузера выключен — очищать нечего.";
+  await new Promise((r) => setTimeout(r, 400)); // даём Chromium отпустить файлы профиля
+  try {
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  } catch (e) {
+    return "Не удалось очистить профиль браузера: " + (((e && e.message) || String(e)) + "").slice(0, 200);
+  }
+  return "OK — профиль браузера очищен. При следующем входе на сайт потребуется авторизация заново.";
 }
 
 module.exports = {
@@ -437,4 +527,7 @@ module.exports = {
   close,
   status,
   stop,
+  setProfileDir,
+  profilePath,
+  clearProfile,
 };

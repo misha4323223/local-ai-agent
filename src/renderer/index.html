@@ -486,6 +486,7 @@
           <button class="stab" data-tab="mobile" title="Доступ с телефона по локальной сети">📱 Мобильный</button>
           <button class="stab" data-tab="secrets" title="Переменные окружения и секреты для команд">🔒 Секреты</button>
           <button class="stab" data-tab="yandex" title="Yandex Cloud: авторизация, каталог, разрешения агента">☁️ Yandex Cloud</button>
+          <button class="stab" data-tab="mail" title="Почта: отправка писем и коды подтверждения (SMTP/IMAP)">✉️ Почта</button>
           <button class="stab" data-tab="ota" title="Локальные обновления кода на ходу">🔄 Self-update</button>
         </div>
 
@@ -760,6 +761,22 @@
               </label>
             </div>
           </div>
+          <div class="settings-section">
+            <div class="settings-section-title">🌐 Браузер агента</div>
+            <div class="field">
+              <label class="check-row" title="Chromium агента хранит куки и авторизации в отдельной папке внутри данных приложения — сессии ВК и других сайтов переживают закрытие и перезапуск. Это отдельный профиль: твой обычный браузер не затрагивается.">
+                <input id="s-browser-profile" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Постоянный профиль — запоминать входы на сайтах</b>
+                  <small>Включено по умолчанию. Куки, localStorage и авторизации сохраняются в отдельной папке, поэтому вход в ВК и на другие сайты не слетает после закрытия приложения — агент не просит логин заново. Выключишь — браузер агента снова будет открываться «чистым» каждый раз.</small>
+                </span>
+              </label>
+              <div class="hint-block" id="browser-profile-info">Профиль: загрузка состояния…</div>
+              <div class="input-row">
+                <button id="btn-browser-profile-clear" class="btn btn-ghost btn-small" title="Закрыть браузер агента и стереть куки и сессии всех сайтов. Обычный браузер пользователя не затрагивается.">🧹 Очистить профиль (выйти со всех сайтов)</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- ── Вкладка: Мобильный доступ ── -->
@@ -809,6 +826,28 @@
                 <button id="btn-env-file" class="btn btn-ghost btn-small" title="Выбрать файл .env и импортировать всё">📄 Выбрать файл .env</button>
                 <input id="env-file-input" type="file" accept=".env,.txt,text/plain" class="hidden" />
               </div>
+            </div>
+          </div>
+          <div class="settings-section">
+            <div class="settings-section-title">🔑 Пароли сайтов</div>
+            <div class="field">
+              <label>Логины и пароли для входа на сайты <span class="hint">(хранятся зашифрованно, как ключи API. Агент подставляет их в форму инструментом vaultFill и НИКОГДА не выводит пароль в чат.)</span></label>
+              <div id="vault-list" class="env-list"></div>
+              <div class="vault-form">
+                <input id="s-vault-name" placeholder="Название (например ВК)" spellcheck="false" autocomplete="off" />
+                <input id="s-vault-url" placeholder="Адрес сайта (vk.com)" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" />
+                <input id="s-vault-login" placeholder="Логин / телефон / e-mail" spellcheck="false" autocomplete="off" />
+                <div class="input-row">
+                  <input id="s-vault-pass" type="password" placeholder="Пароль" spellcheck="false" autocomplete="new-password" />
+                  <button id="btn-vault-eye" class="btn btn-ghost" title="Показать/скрыть пароль">👁</button>
+                </div>
+                <input id="s-vault-note" placeholder="Заметка (например: 2FA-код в приложении)" spellcheck="false" autocomplete="off" />
+                <div class="vault-actions">
+                  <button id="btn-vault-add" class="btn btn-primary btn-small" title="Сохранить запись зашифрованно">💾 Сохранить</button>
+                  <button id="btn-vault-clear" class="btn btn-ghost btn-small" title="Очистить форму">Очистить форму</button>
+                </div>
+              </div>
+              <div class="hint-block">Пароль не попадает в чат: агент подставляет его прямо в форму на странице (vaultFill). Если сайта в списке нет — просто войди руками в окне браузера агента: постоянный профиль запомнит сессию. ✏️ загружает запись в форму для правки (пароль вводится заново — в форме он не показывается).</div>
             </div>
           </div>
           <div class="settings-section">
@@ -870,6 +909,66 @@
               </label>
             </div>
             <div id="yc-settings-msg" class="hint-block"></div>
+          </div>
+        </div>
+
+        <!-- ── Вкладка: Почта (SMTP/IMAP) ── -->
+        <div class="settings-tab-body hidden" data-tab-body="mail">
+          <div class="settings-section">
+            <div class="settings-section-title">✉️ Почта — письма и коды подтверждения</div>
+            <div class="field">
+              <label>Адрес ящика агента <span class="hint">(сюда приходят коды подтверждения, отсюда агент отправляет письма)</span></label>
+              <div class="input-row">
+                <input id="s-mail-address" placeholder="agent@yandex.ru" spellcheck="false" autocomplete="off" />
+                <button id="btn-mail-detect" class="btn btn-ghost" title="Определить серверы IMAP/SMTP по адресу">Определить по адресу</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Пароль приложения <span class="hint">(НЕ обычный пароль: Gmail, Яндекс и Mail.ru требуют «пароль приложения». Хранится зашифрованно.)</span></label>
+              <div class="input-row">
+                <input id="s-mail-pass" type="password" placeholder="пароль приложения" spellcheck="false" autocomplete="off" />
+                <button id="btn-mail-eye" class="btn btn-ghost" title="Показать/скрыть">👁</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Имя отправителя <span class="hint">(необязательно — как подписывать письма)</span></label>
+              <input id="s-mail-from-name" placeholder="Михаил · Booomerangs" spellcheck="false" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label>Серверы <span class="hint">(пусто — подставятся автоматически по адресу)</span></label>
+              <div class="input-row">
+                <input id="s-mail-imap-host" placeholder="imap.yandex.ru" spellcheck="false" autocomplete="off" style="flex:2;min-width:0" />
+                <input id="s-mail-imap-port" placeholder="993" spellcheck="false" autocomplete="off" style="flex:1;min-width:0" title="IMAP-порт (обычно 993)" />
+              </div>
+              <div class="input-row" style="margin-top:8px">
+                <input id="s-mail-smtp-host" placeholder="smtp.yandex.ru" spellcheck="false" autocomplete="off" style="flex:2;min-width:0" />
+                <input id="s-mail-smtp-port" placeholder="465" spellcheck="false" autocomplete="off" style="flex:1;min-width:0" title="SMTP-порт (465 или 587)" />
+              </div>
+            </div>
+            <div class="field">
+              <label class="check-row" title="Для Outlook/Hotmail. Для Gmail, Яндекса и Mail.ru оставь выключенным — там неявный TLS на 465.">
+                <input id="s-mail-starttls" type="checkbox" />
+                <span class="check-row-text">
+                  <b>SMTP через STARTTLS (порт 587)</b>
+                  <small>Обычно выключено. Включай для Outlook/Hotmail или если провайдер требует 587.</small>
+                </span>
+              </label>
+              <label class="check-row" title="Пока выключено, инструмент mailSend отказывается отправлять письма — защита от случайных рассылок.">
+                <input id="s-mail-allow-send" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Разрешить агенту отправлять письма</b>
+                  <small>Нужно, чтобы агент отправлял КП клиентам (mailSend). Выключено по умолчанию.</small>
+                </span>
+              </label>
+            </div>
+            <div class="input-row">
+              <button id="btn-mail-test" class="btn btn-primary btn-small" title="Проверить вход в ящик по IMAP">🔌 Проверить связь</button>
+              <button id="btn-mail-test-send" class="btn btn-small" title="Отправить тестовое письмо себе — проверяет SMTP">✉️ Тестовое письмо</button>
+              <button id="btn-mail-recent" class="btn btn-ghost btn-small" title="Показать последние письма">📥 Последние</button>
+            </div>
+            <div id="mail-msg" class="hint-block"></div>
+            <div id="mail-list" class="env-list"></div>
+            <div class="hint-block">Агент читает почту инструментами mailList и mailCode (код подтверждения), отправляет письма через mailSend. Пароль нигде не выводится в чат. Для Gmail включи двухфакторную аутентификацию и создай «пароль приложения» — обычный пароль Google не подойдёт.</div>
           </div>
         </div>
 

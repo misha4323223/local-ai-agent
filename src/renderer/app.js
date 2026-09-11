@@ -428,6 +428,8 @@
           id: "recovered-" + c.id + "-" + Date.now(),
           role: "system",
           content: "⚠️ Предыдущий ответ был прерван закрытием приложения. Сохранённая часть осталась в истории — можно продолжить с этого места.",
+          interrupted: true,
+          chatId: c.id,
           createdAt: Date.now(),
         });
       }
@@ -708,6 +710,23 @@
       meta.className = "meta";
       meta.textContent = fmtClock(m.createdAt);
       wrap.appendChild(meta);
+    }
+    // Прерванный ответ (приложение закрыли посреди хода): кнопка «Дописать ответ»
+    if (m.role === "system" && m.interrupted) {
+      const row = document.createElement("div");
+      row.className = "msg-actions";
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "ma-btn";
+      b.textContent = "↻ Дописать ответ";
+      b.title = "Продолжить прерванный ответ с того места, где он остановился";
+      b.onclick = (e) => {
+        e.stopPropagation();
+        if (row.parentNode) row.parentNode.removeChild(row);
+        continueInterruptedAnswer(m.chatId || chatsData.activeId, m);
+      };
+      row.appendChild(b);
+      wrap.appendChild(row);
     }
     // Сохранённые размышления (после перезагрузки/переключения чата) — свёрнуты
     if (m.role === "assistant" && m.thinking) {
@@ -1147,6 +1166,24 @@
   }
 
   // ─────────────── Отправка ───────────────
+  // Продолжить ответ, прерванный закрытием приложения. Идём тем же путём, что и
+  // обычная отправка (в историю попадает прозрачная просьба дописать), поэтому
+  // агент видит контекст и просто доводит задачу до конца.
+  function continueInterruptedAnswer(chatId, m) {
+    if (streaming) {
+      toast("Дождись окончания текущего ответа");
+      return;
+    }
+    const chat = chatsData.chats.find((c) => c.id === chatId);
+    if (!chat) return;
+    if (m) m.interrupted = false;
+    if (chatsData.activeId !== chat.id) selectChat(chat.id);
+    const input = $("input");
+    input.value = "Продолжи предыдущий ответ с того места, где он прервался, и доведи задачу до конца. Не начинай заново и не повторяй уже сделанное.";
+    autoResize();
+    sendMessage();
+  }
+
   async function sendMessage() {
     const input = $("input");
     const text = input.value.trim();
@@ -1360,6 +1397,10 @@
           $("messages").appendChild(note);
           scrollBottom();
         }
+        break;
+      }
+      case "context": {
+        renderContext(ev);
         break;
       }
       case "compact": {
@@ -1972,6 +2013,223 @@
     });
     inp.addEventListener("blur", () => finish(true));
   }
+
+  // ─────────────── Пароли сайтов (Настройки → Секреты) ───────────────
+  // Записи живут в settings.sitePasswords и уходят в main.js вместе с настройками —
+  // там они шифруются (secrets.json + safeStorage/DPAPI). В интерфейсе пароль
+  // никогда не показывается: только пометка «пароль: ••••••«.
+  function vaultArr() {
+    return Array.isArray(settings.sitePasswords) ? settings.sitePasswords : [];
+  }
+
+  let vaultEditingId = ""; // id записи, которую правим (пусто — добавляем новую)
+
+  function renderVault() {
+    const box = $("vault-list");
+    if (!box) return;
+    const list = vaultArr();
+    box.innerHTML = "";
+    if (!list.length) {
+      box.innerHTML =
+        '<div class="env-note">Записей пока нет. Добавь сайт ниже — агент сможет входить на него сам (vaultFill), не спрашивая пароль в чате.</div>';
+      return;
+    }
+    for (const e of list) {
+      if (!e || typeof e !== "object") continue;
+      const row = document.createElement("div");
+      row.className = "env-row";
+      const name = document.createElement("span");
+      name.className = "env-key";
+      name.textContent = e.name || e.url || "Сайт";
+      name.title = e.name || "";
+      const val = document.createElement("span");
+      val.className = "env-val";
+      const bits = [];
+      if (e.url) bits.push(e.url);
+      bits.push(e.login ? "логин: " + e.login : "логин не задан");
+      bits.push(e.password ? "пароль: ••••••" : "пароль не задан");
+      if (e.note) bits.push("📝 " + e.note);
+      val.textContent = bits.join(" · ");
+      val.title = e.note ? "Заметка: " + e.note : "";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "btn btn-ghost btn-small";
+      edit.textContent = "✏️";
+      edit.title = "Загрузить запись в форму для правки";
+      edit.onclick = () => vaultLoadToForm(e);
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "btn btn-ghost btn-small env-del";
+      del.textContent = "🗑";
+      del.title = "Удалить запись " + (e.name || e.url || "");
+      del.onclick = () => vaultDelete(e.id);
+      row.appendChild(name);
+      row.appendChild(val);
+      row.appendChild(edit);
+      row.appendChild(del);
+      box.appendChild(row);
+    }
+  }
+
+  function vaultLoadToForm(e) {
+    vaultEditingId = e.id || "";
+    $("s-vault-name").value = e.name || "";
+    $("s-vault-url").value = e.url || "";
+    $("s-vault-login").value = e.login || "";
+    $("s-vault-pass").value = "";
+    $("s-vault-note").value = e.note || "";
+    toast("Запись загружена. Пароль введи заново — в форме он не показывается.");
+  }
+
+  function vaultClearForm() {
+    vaultEditingId = "";
+    for (const id of ["s-vault-name", "s-vault-url", "s-vault-login", "s-vault-pass", "s-vault-note"]) {
+      if ($(id)) $(id).value = "";
+    }
+  }
+
+  function vaultAdd() {
+    const entry = {
+      id: vaultEditingId || "v" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      name: $("s-vault-name").value.trim(),
+      url: $("s-vault-url").value.trim(),
+      login: $("s-vault-login").value.trim(),
+      password: $("s-vault-pass").value,
+      note: $("s-vault-note").value.trim(),
+    };
+    if (!entry.name && !entry.url) {
+      toast("Укажи название или адрес сайта");
+      return;
+    }
+    if (!entry.login && !entry.password) {
+      toast("Заполни хотя бы логин или пароль");
+      return;
+    }
+    if (!Array.isArray(settings.sitePasswords)) settings.sitePasswords = [];
+    const i = settings.sitePasswords.findIndex((x) => x && x.id === entry.id);
+    if (i >= 0) settings.sitePasswords[i] = entry;
+    else settings.sitePasswords.push(entry);
+    persistSettings();
+    vaultClearForm();
+    renderVault();
+    toast(i >= 0 ? "Запись обновлена" : "Запись сохранена зашифрованно");
+  }
+
+  function vaultDelete(id) {
+    const list = vaultArr();
+    const e = list.find((x) => x && x.id === id);
+    if (!e) return;
+    if (!confirm("Удалить запись «" + (e.name || e.url || "сайт") + "»?")) return;
+    settings.sitePasswords = list.filter((x) => x && x.id !== id);
+    persistSettings();
+    renderVault();
+    toast("Запись удалена");
+  }
+
+  // ─────────────── Почта (Настройки → ✉️ Почта) ───────────────
+  function renderMailStatus(text, isError) {
+    const box = $("mail-msg");
+    if (!box) return;
+    box.textContent = text || "";
+    box.classList.toggle("error", !!isError);
+  }
+
+  // Пресеты провайдеров (та же логика, что в src/mail.js) — чтобы кнопка
+  // «Определить по адресу» работала и без запроса к main-процессу.
+  function mailGuessed() {
+    const a = String($("s-mail-address") ? $("s-mail-address").value : "").trim().toLowerCase();
+    if (/@(gmail|googlemail)\.com$/.test(a)) return { imapHost: "imap.gmail.com", imapPort: 993, smtpHost: "smtp.gmail.com", smtpPort: 465, starttls: false, note: "Gmail: нужен «пароль приложения» (включается при двухфакторной аутентификации)." };
+    if (/@(yandex|ya)\.(ru|com|kz|by|ua)$/.test(a)) return { imapHost: "imap.yandex.ru", imapPort: 993, smtpHost: "smtp.yandex.ru", smtpPort: 465, starttls: false, note: "Яндекс: включи IMAP в «Все настройки → Почтовые программы» и создай пароль приложения." };
+    if (/@mail\.ru$/.test(a)) return { imapHost: "imap.mail.ru", imapPort: 993, smtpHost: "smtp.mail.ru", smtpPort: 465, starttls: false, note: "Mail.ru: нужен пароль для внешнего приложения." };
+    if (/@(outlook|hotmail|live|msn)\./.test(a)) return { imapHost: "outlook.office365.com", imapPort: 993, smtpHost: "smtp.office365.com", smtpPort: 587, starttls: true, note: "Outlook: SMTP через STARTTLS (587)." };
+    if (/@rambler\.ru$/.test(a)) return { imapHost: "imap.rambler.ru", imapPort: 993, smtpHost: "smtp.rambler.ru", smtpPort: 465, starttls: false, note: "" };
+    const d = a.includes("@") ? a.split("@").pop() : "";
+    return {
+      imapHost: d ? "imap." + d : "",
+      imapPort: 993,
+      smtpHost: d ? "smtp." + d : "",
+      smtpPort: 465,
+      starttls: false,
+      note: d ? "Провайдер не опознан — проверь адреса серверов и порты." : "",
+    };
+  }
+
+  function mailFillServers() {
+    const g = mailGuessed();
+    if (g.imapHost) $("s-mail-imap-host").value = g.imapHost;
+    if (g.imapPort) $("s-mail-imap-port").value = String(g.imapPort);
+    if (g.smtpHost) $("s-mail-smtp-host").value = g.smtpHost;
+    if (g.smtpPort) $("s-mail-smtp-port").value = String(g.smtpPort);
+    $("s-mail-starttls").checked = !!g.starttls;
+    renderMailStatus(g.note || "Серверы заполнены — проверь и нажми «Сохранить настройки».", false);
+  }
+
+  function mailRenderList(res) {
+    const box = $("mail-list");
+    if (!box) return;
+    box.innerHTML = "";
+    if (!res || !res.ok) { renderMailStatus((res && res.error) || "Не удалось прочитать почту.", true); return; }
+    if (!res.messages || !res.messages.length) { renderMailStatus("Входящих писем нет.", false); return; }
+    for (const m of res.messages) {
+      const row = document.createElement("div");
+      row.className = "env-row";
+      const subj = document.createElement("div");
+      subj.className = "env-key";
+      subj.textContent = (m.code ? "🔑 " + m.code + " · " : "") + (m.subject || "(без темы)");
+      const meta = document.createElement("div");
+      meta.className = "env-val";
+      meta.textContent = (m.from || "") + " · " + (m.date || "");
+      row.appendChild(subj);
+      row.appendChild(meta);
+      box.appendChild(row);
+    }
+    renderMailStatus("Последние письма: " + res.messages.length + " из " + (res.total || res.messages.length) + ".", false);
+  }
+
+  async function mailDoTest() {
+    if (!isElectron) { renderMailStatus("Проверка почты доступна в desktop-приложении.", true); return; }
+    renderMailStatus("Проверяю вход в ящик…", false);
+    try {
+      const r = await api.mailTest();
+      if (r && r.ok) {
+        const s = r.servers || {};
+        renderMailStatus(
+          "✓ Вход выполнен. Писем в ящике: " + (r.total || 0) +
+          " · IMAP " + (s.imapHost || "") + ":" + (s.imapPort || "") +
+          " · SMTP " + (s.smtpHost || "") + ":" + (s.smtpPort || ""),
+          false
+        );
+      } else {
+        const note = r && r.servers && r.servers.note ? "\n" + r.servers.note : "";
+        renderMailStatus("✗ " + ((r && r.error) || "Не удалось войти.") + note, true);
+      }
+    } catch (e) {
+      renderMailStatus("✗ Ошибка: " + ((e && e.message) || e), true);
+    }
+  }
+
+  async function mailDoTestSend() {
+    if (!isElectron) { renderMailStatus("Отправка доступна в desktop-приложении.", true); return; }
+    renderMailStatus("Отправляю тестовое письмо…", false);
+    try {
+      const r = await api.mailTestSend();
+      const addr = $("s-mail-address") ? $("s-mail-address").value.trim() : "";
+      renderMailStatus(r && r.ok ? "✓ Тестовое письмо отправлено на " + addr + ". Проверь входящие." : "✗ " + ((r && r.error) || "Не удалось отправить."), !(r && r.ok));
+    } catch (e) {
+      renderMailStatus("✗ Ошибка: " + ((e && e.message) || e), true);
+    }
+  }
+
+  async function mailDoRecent() {
+    if (!isElectron) { renderMailStatus("Чтение почты доступно в desktop-приложении.", true); return; }
+    renderMailStatus("Читаю последние письма…", false);
+    try {
+      mailRenderList(await api.mailRecent(5));
+    } catch (e) {
+      renderMailStatus("✗ Ошибка: " + ((e && e.message) || e), true);
+    }
+  }
+
 
   // ─────────────── Секреты: переменные окружения (Настройки) ───────────────
   function renderEnvVars() {
@@ -2625,6 +2883,8 @@
     $("s-gh-token").value = settings.githubToken || "";
     $("s-allow-agent-push").checked = !!settings.allowAgentPush;
     $("s-agent-auto-commit").checked = settings.agentAutoCommit !== false;
+    $("s-browser-profile").checked = settings.browserProfile !== false;
+    renderBrowserProfileInfo();
     $("s-mobile-enabled").checked = !!settings.mobileEnabled;
     $("s-mobile-port").value = settings.mobilePort || 9090;
     renderMobileStatus();
@@ -2641,6 +2901,16 @@
     $("s-ota-dir").value = settings.otaDir || "";
     renderOpenaiProfiles();
     $("s-auto-switch").checked = !!settings.autoSwitchProfiles;
+    // Почта
+    $("s-mail-address").value = settings.mailAddress || "";
+    $("s-mail-from-name").value = settings.mailFromName || "";
+    $("s-mail-pass").value = settings.mailPassword || "";
+    $("s-mail-imap-host").value = settings.mailImapHost || "";
+    $("s-mail-imap-port").value = settings.mailImapPort ? String(settings.mailImapPort) : "";
+    $("s-mail-smtp-host").value = settings.mailSmtpHost || "";
+    $("s-mail-smtp-port").value = settings.mailSmtpPort ? String(settings.mailSmtpPort) : "";
+    $("s-mail-starttls").checked = !!settings.mailStarttls;
+    $("s-mail-allow-send").checked = !!settings.mailAllowAgentSend;
     renderOtaStatus();
   }
 
@@ -2660,6 +2930,7 @@
     settings.githubToken = $("s-gh-token").value.trim();
     settings.allowAgentPush = !!$("s-allow-agent-push").checked;
     settings.agentAutoCommit = !!$("s-agent-auto-commit").checked;
+    settings.browserProfile = !!$("s-browser-profile").checked;
     settings.mobileEnabled = !!$("s-mobile-enabled").checked;
     settings.mobilePort = parseInt($("s-mobile-port").value, 10) || 9090;
     settings.visionEnabled = !!$("s-vision-enabled").checked;
@@ -2667,6 +2938,15 @@
     settings.visionUrl = $("s-vision-url").value.trim();
     settings.visionKey = $("s-vision-key").value.trim();
     settings.serperApiKey = $("s-serper-key").value.trim();
+    settings.mailAddress = $("s-mail-address").value.trim();
+    settings.mailFromName = $("s-mail-from-name").value.trim();
+    settings.mailPassword = $("s-mail-pass").value.trim();
+    settings.mailImapHost = $("s-mail-imap-host").value.trim();
+    settings.mailImapPort = parseInt($("s-mail-imap-port").value, 10) || 993;
+    settings.mailSmtpHost = $("s-mail-smtp-host").value.trim();
+    settings.mailSmtpPort = parseInt($("s-mail-smtp-port").value, 10) || 465;
+    settings.mailStarttls = !!$("s-mail-starttls").checked;
+    settings.mailAllowAgentSend = !!$("s-mail-allow-send").checked;
     settings.visionModel = $("s-vision-model").value.trim();
     settings.imageModel = $("s-image-model").value.trim();
     settings.otaEnabled = !!$("s-ota-enabled").checked;
@@ -2796,6 +3076,7 @@
 
   function openSettings() {
     renderEnvVars();
+    renderVault();
     fillSettingsUI();
     showSettingsTab("model"); // всегда открываем с вкладки «Модель»
     setProviderUI(settings.provider || "openai");
@@ -3014,6 +3295,55 @@
       }
     } catch (e) {
       box.innerHTML = '<span class="hint-label">Ошибка: ' + esc((e && e.message) || String(e)) + "</span>";
+    }
+  }
+
+  // Токены в коротком виде: 12400 → «12.4k»
+  function fmtTokens(n) {
+    const v = Number(n) || 0;
+    if (v < 1000) return String(v);
+    return (Math.round(v / 100) / 10).toFixed(1).replace(/\.0$/, "") + "k";
+  }
+
+  // Полоска заполняемости контекста модели под полем ввода (приходит событием "context").
+  function renderContext(ev) {
+    const el = $("ctx-indicator");
+    if (!el || !$("ctx-fill") || !$("ctx-text")) return;
+    const pct = Math.max(0, Math.min(100, parseInt(ev && ev.percent, 10) || 0));
+    const used = Number((ev && ev.used) || 0);
+    const budget = Number((ev && ev.budget) || 0);
+    const fill = $("ctx-fill");
+    fill.style.width = pct + "%";
+    fill.classList.toggle("warn", pct >= 75 && pct < 92);
+    fill.classList.toggle("danger", pct >= 92);
+    $("ctx-text").textContent = "🧠 " + fmtTokens(used) + " / " + fmtTokens(budget) + " · " + pct + "%";
+    el.classList.add("visible");
+    el.title =
+      "Контекст модели: занято " + used.toLocaleString("ru-RU") + " из " + budget.toLocaleString("ru-RU") +
+      " токенов (" + pct + "%). История и схема инструментов. При заполнении старая часть автоматически сжимается в памятку.";
+  }
+
+  // Состояние постоянного профиля браузера агента: включён ли и есть ли папка на диске.
+  async function renderBrowserProfileInfo() {
+    const el = $("browser-profile-info");
+    if (!el) return;
+    const box = $("s-browser-profile");
+    if (box && !box.checked) {
+      el.textContent = "Профиль выключен: браузер агента каждый раз стартует «чистым» — вход на сайты придётся повторять.";
+      return;
+    }
+    if (!isElectron || !api.browserProfileInfo) {
+      el.textContent = "Постоянный профиль работает в desktop-приложении: куки и входы на сайты сохраняются между запусками.";
+      return;
+    }
+    try {
+      const r = await api.browserProfileInfo();
+      el.textContent =
+        "Профиль: " +
+        (r && r.exists ? "папка на диске, сессии сайтов сохраняются" : "пока пуст — заполнится при первом входе на сайт") +
+        (r && r.dir ? " · " + r.dir : "");
+    } catch {
+      el.textContent = "Не удалось прочитать состояние профиля браузера.";
     }
   }
 
@@ -3781,6 +4111,21 @@
     const p = await api.pickDirectory();
     if (p) $("s-workdir").value = p;
   };
+
+  // Браузер агента: постоянный профиль (сессии сайтов) — очистка и обновление подписи
+  if ($("btn-browser-profile-clear")) {
+    $("btn-browser-profile-clear").onclick = async () => {
+      if (!isElectron || !api.browserClearProfile) {
+        toast("Очистка профиля доступна в desktop-приложении");
+        return;
+      }
+      if (!confirm("Выйти со всех сайтов в браузере агента? Куки и сессии будут стёрты — при следующем входе потребуется авторизация заново.")) return;
+      const r = await api.browserClearProfile();
+      toast((r && r.message) || "Профиль очищен");
+      renderBrowserProfileInfo();
+    };
+  }
+  if ($("s-browser-profile")) $("s-browser-profile").onchange = renderBrowserProfileInfo;
 
   // ─────────────── Панель проекта: файлы + коммиты ───────────────
   let panelTab = "files";
@@ -5660,6 +6005,23 @@
     e.target.value = "";
   });
 
+  // ── Секреты: пароли сайтов ──
+  if ($("btn-vault-add")) $("btn-vault-add").onclick = vaultAdd;
+  if ($("btn-vault-clear")) $("btn-vault-clear").onclick = vaultClearForm;
+  if ($("btn-vault-eye")) $("btn-vault-eye").onclick = () => toggleKey("s-vault-pass");
+  if ($("s-vault-pass")) {
+    // Enter в любом поле формы сохраняет запись.
+    for (const id of ["s-vault-name", "s-vault-url", "s-vault-login", "s-vault-pass", "s-vault-note"]) {
+      const el = $(id);
+      if (el) el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          vaultAdd();
+        }
+      });
+    }
+  }
+
   // ── Нижняя панель: терминал + превью ──
   $("btn-toggle-console").onclick = () => {
     if (!isElectron) {
@@ -6358,6 +6720,11 @@
   };
   $("btn-toggle-vision-key").onclick = () => toggleKey("s-vision-key");
   $("btn-toggle-serper-key").onclick = () => toggleKey("s-serper-key");
+  if ($("btn-mail-eye")) $("btn-mail-eye").onclick = () => toggleKey("s-mail-pass");
+  if ($("btn-mail-detect")) $("btn-mail-detect").onclick = mailFillServers;
+  if ($("btn-mail-test")) $("btn-mail-test").onclick = mailDoTest;
+  if ($("btn-mail-test-send")) $("btn-mail-test-send").onclick = mailDoTestSend;
+  if ($("btn-mail-recent")) $("btn-mail-recent").onclick = mailDoRecent;
   $("btn-refresh-vision-models").onclick = () => loadAuxModels("vision");
   $("btn-refresh-image-models").onclick = () => loadAuxModels("image");
   $("btn-mobile-menu").onclick = () => $("sidebar").classList.toggle("open");
