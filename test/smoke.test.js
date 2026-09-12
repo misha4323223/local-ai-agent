@@ -7,12 +7,16 @@
      нормализация имён, извлечение tool_calls, тримминг контекста;
    - secrets: разделение настроек, roundtrip записи/чтения, миграция legacy;
    - ota: сравнение версий, применение бандла, защита хеша, отказ без файлов;
-   - browser-tools: корректное состояние «браузер не запущен»;
+   - browser-tools: состояние «браузер не запущен», карта страницы (browserSnapshot),
+     клик/ввод по ref и имени вместо перебора селекторов, пароли из полей не собираются;
    - server.js: защита /api/llm (только Yandex), валидация /api/fetch.
    - highlight: подсветка кода не теряет и не искажает исходный текст.
    - chats: атомарная запись истории, .bak-восстановление, автосейв при закрытии.
    - сессия: постоянный профиль браузера, индикатор контекста, «Дописать ответ».
    - vault: менеджер паролей (поиск, отсутствие утечек паролей, подстановка входа, интерфейс).
+   - yandex: логи внутренним API (REST+gRPC), автоматические YC_TOKEN/YC_CLOUD_ID/YC_FOLDER_ID, встроенный yc CLI;
+     адреса сервисов (postbox/logging), повторы и пачечный опрос дашборда, свежие настройки у инструментов.
+   - app-ui: стабильные ref вместо номеров [N] (клик не уезжает после перерисовки окна).
 */
 
 const assert = require("assert");
@@ -51,7 +55,7 @@ async function testAgentCore() {
   await test("TOOL_DEFINITIONS: 90+ инструментов и все browser-*", () => {
     const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name).filter(Boolean);
     assert.ok(names.length >= 90, "ожидалось >= 90 инструментов, есть " + names.length);
-    for (const n of ["browserOpen", "browserFill", "browserClick", "browserSelect", "browserPress", "browserText", "browserScreenshot", "browserWait", "browserClose", "browserStatus"]) {
+    for (const n of ["browserOpen", "browserSnapshot", "browserFill", "browserClick", "browserSelect", "browserPress", "browserText", "browserScreenshot", "browserWait", "browserClose", "browserStatus"]) {
       assert.ok(names.includes(n), "нет инструмента " + n);
     }
     // У каждого определения обязательные поля.
@@ -826,6 +830,664 @@ async function testBrowserTools() {
   }
 }
 
+// ── 4c. Браузерная карта страницы (browserSnapshot) и умные действия ────────
+// Главное обещание: агент НЕ перебирает селекторы, а берёт ref из карты;
+// при промахе инструмент сам возвращает похожие элементы с их ref.
+async function testBrowserBrain() {
+  const bt = require(path.join(ROOT, "src", "browser-tools.js"));
+  const dom = require(path.join(ROOT, "src", "dom-map.js"));
+  const Module_ = require("module");
+
+  const EL = (spec) =>
+    Object.assign(
+      {
+        key: "", tag: "button", type: "", id: "", cls: "", role: "button", name: "",
+        label: "", placeholder: "", text: "", href: "", contenteditable: false,
+        visible: true, disabled: false, checked: false, options: [], ref: "",
+      },
+      spec
+    );
+  const contains = (hay, needle) =>
+    String(hay || "").toLowerCase().indexOf(String(needle || "").toLowerCase()) >= 0;
+  const matchSelector = (sel, e) => {
+    const ref = String(sel).match(/^\[data-agent-ref="([^"]+)"\]$/);
+    if (ref) return e.ref === ref[1];
+    const s = String(sel).trim();
+    const tag = s.match(/^[a-zA-Z][\w-]*/);
+    const id = s.match(/#([\w-]+)/);
+    const cls = s.match(/\.([\w-]+)/);
+    if (!tag && !id && !cls) return false;
+    if (tag && e.tag !== tag[0].toLowerCase()) return false;
+    if (id && e.id !== id[1]) return false;
+    if (cls && String(e.cls).split(/\s+/).indexOf(cls[1]) < 0) return false;
+    return true;
+  };
+  const fakePage = (elements) => {
+    const page = {
+      els: elements, clicked: [], filled: [], selected: [], typed: [],
+      _u: "about:blank",
+      keyboard: { press: async () => {}, insertText: async (t) => page.typed.push(t) },
+      async goto(u) { page._u = u; },
+      async waitForLoadState() {},
+      url() { return page._u; },
+      async title() { return "Тестовая страница"; },
+      on() {},
+      async close() {},
+    };
+    const by = (pred) => elements.filter(pred);
+    const loc = (list) => ({
+      _list: list,
+      first() { return loc(list.slice(0, 1)); },
+      async count() { return list.length; },
+      async isVisible() { return !!(list[0] && list[0].visible); },
+      async scrollIntoViewIfNeeded() {},
+      async click() {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        if (!e.visible) throw new Error("element is not visible");
+        page.clicked.push(e.key);
+      },
+      async fill(t) {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        if (e.contenteditable) throw new Error("Element is not an <input>, <textarea> or [contenteditable]");
+        page.filled.push({ key: e.key, text: t });
+      },
+      async selectOption(v) {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        if (!(e.options || []).some((o) => o.value === v)) throw new Error("did not find option");
+        page.selected.push({ key: e.key, value: v });
+      },
+      async evaluate(fn) {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        return fn({ options: e.options || [] });
+      },
+    });
+    page.locator = (sel) => loc(by((e) => matchSelector(sel, e)));
+    page.getByRole = (role, opts) => loc(by((e) => e.role === role && (!opts || !opts.name || contains(e.name, opts.name))));
+    page.getByLabel = (t) => loc(by((e) => contains(e.label || e.ariaLabel, t)));
+    page.getByPlaceholder = (t) => loc(by((e) => contains(e.placeholder, t)));
+    page.getByText = (t) => loc(by((e) => contains(e.text || e.name, t)));
+    // Настоящий сборщик карты пропускает невидимое — подставной ведёт себя так же.
+    page.evaluate = async () => ({
+      url: "https://vk.com/im",
+      title: "ВК",
+      items: elements.filter((e) => e.visible).map((e) => ({
+        ref: e.ref,
+        tag: e.tag,
+        type: e.type,
+        roleAttr: e.roleAttr || "",
+        contenteditable: !!e.contenteditable,
+        text: e.text || e.name || "",
+        value: e.value || "",
+        ariaLabel: e.ariaLabel || "",
+        labelText: e.label,
+        placeholder: e.placeholder,
+        id: e.id,
+        cls: e.cls,
+        href: e.href,
+        inViewport: e.visible,
+        disabled: !!e.disabled,
+        checked: !!e.checked,
+      })),
+    });
+    return page;
+  };
+
+  const els = [
+    EL({ key: "home", tag: "a", role: "link", name: "Главная", href: "/" }),
+    EL({ key: "login", tag: "button", role: "button", name: "Войти", id: "login", cls: "btn primary" }),
+    EL({ key: "search", tag: "input", type: "search", role: "searchbox", name: "Поиск", ariaLabel: "Поиск", placeholder: "Найти", id: "q" }),
+    EL({ key: "msg", tag: "div", role: "textbox", roleAttr: "textbox", name: "Написать сообщение", contenteditable: true }),
+    EL({ key: "city", tag: "select", role: "combobox", label: "Город", id: "city", options: [{ value: "msk", text: "Москва" }, { value: "tula", text: "Тула" }] }),
+    EL({ key: "captcha", tag: "input", type: "checkbox", role: "checkbox", name: "Я не робот", visible: false }),
+  ];
+  els.forEach((e, i) => { e.ref = "e" + (i + 1); });
+  const page = fakePage(els);
+
+  const origRequire = Module_.prototype.require;
+  // Важно: browser-tools кэширует playwright между тестами — сбрасываем кэш,
+  // иначе вместо нашего подставного движка остался бы движок предыдущего теста.
+  bt.setPlaywright(null);
+  Module_.prototype.require = function (id) {
+    if (id === "playwright") {
+      return {
+        chromium: {
+          executablePath: () => "",
+          async launch() {
+            return { isConnected: () => true, on() {}, async newPage() { return page; }, async close() {} };
+          },
+        },
+      };
+    }
+    return origRequire.apply(this, arguments);
+  };
+  try {
+    await bt.open({ url: "https://vk.com/im" });
+
+    await test("browserSnapshot: карта с ref, ролями и именами", async () => {
+      const s = await bt.snapshot({});
+      assert.ok(/Карта страницы: «ВК»/.test(s), s.slice(0, 160));
+      assert.ok(/e2\s+button\s+«Войти»/.test(s), "нет кнопки:\n" + s);
+      assert.ok(/e3\s+searchbox\s+«Поиск»/.test(s), "нет поля поиска:\n" + s);
+      assert.ok(/e4\s+textbox\s+«Написать сообщение»/.test(s), "нет contenteditable:\n" + s);
+      assert.ok(/browserClick \{ ref: "e2" \}/.test(s), "нет подсказки по ref:\n" + s);
+      assert.ok(!/Я не робот/.test(s), "невидимый элемент попал в карту:\n" + s);
+    });
+
+    await test("browserSnapshot: filter сужает список", async () => {
+      const s = await bt.snapshot({ filter: "войти" });
+      assert.ok(/по фильтру «войти» — 1/.test(s), s.slice(0, 200));
+      assert.ok(!/«Главная»/.test(s), "фильтр не отсеял лишнее:\n" + s);
+    });
+
+    await test("browserClick: по имени — берёт саму кнопку, без селектора", async () => {
+      page.clicked.length = 0;
+      const r = await bt.click({ name: "Войти" });
+      assert.ok(/^OK/.test(r), r);
+      assert.deepStrictEqual(page.clicked, ["login"], "клики: " + JSON.stringify(page.clicked));
+    });
+
+    await test("browserClick: по ref из карты и по номеру вместо ref", async () => {
+      page.clicked.length = 0;
+      await bt.click({ ref: "e4" });
+      await bt.click({ ref: 1 });
+      assert.deepStrictEqual(page.clicked, ["msg", "home"], "клики: " + JSON.stringify(page.clicked));
+    });
+
+    await test("browserClick: имя в кавычках («Войти») не мешает поиску", async () => {
+      page.clicked.length = 0;
+      const r = await bt.click({ name: "«Войти»" });
+      assert.ok(/^OK/.test(r), r);
+      assert.deepStrictEqual(page.clicked, ["login"]);
+    });
+
+    await test("browserClick: несовпавшая роль не ломает поиск по имени", async () => {
+      page.clicked.length = 0;
+      const r = await bt.click({ role: "clickable", name: "Войти" });
+      assert.ok(/^OK/.test(r), r);
+      assert.deepStrictEqual(page.clicked, ["login"], "роль не совпала — должен сработать поиск по имени");
+    });
+
+    await test("browserClick: промах по имени возвращает похожие элементы с ref", async () => {
+      const r = await bt.click({ name: "Войти в аккаунт" });
+      assert.ok(/Ошибка browserClick/.test(r), r.slice(0, 160));
+      assert.ok(/Не нашёл «Войти в аккаунт»/.test(r), "кривой заголовок:\n" + r);
+      assert.ok(/Похожие элементы/.test(r), "нет подсказок:\n" + r);
+      assert.ok(/browserClick \{ ref: "e2" \}/.test(r), "нет готового действия:\n" + r);
+    });
+
+    await test("browserClick: безнадёжный селектор — отдаёт карту страницы", async () => {
+      const r = await bt.click({ selector: "#nope" });
+      assert.ok(/Ошибка browserClick/.test(r), r.slice(0, 160));
+      assert.ok(/«Войти»/.test(r), "нет карты страницы:\n" + r);
+    });
+
+    await test("browserFill: поле по подписи (label / aria-label) и по ref", async () => {
+      const r = await bt.fill({ label: "Поиск", text: "велосипед" });
+      assert.ok(/^OK — поле «подпись «Поиск»»/.test(r), r);
+      assert.deepStrictEqual(page.filled, [{ key: "search", text: "велосипед" }]);
+    });
+
+    await test("browserFill: contenteditable через insertText (ВК)", async () => {
+      const r = await bt.fill({ ref: "e4", text: "привет" });
+      assert.ok(/способ: insertText/.test(r), r);
+      assert.deepStrictEqual(page.typed, ["привет"]);
+    });
+
+    await test("browserFill: промах показывает похожие поля (textbox)", async () => {
+      const r = await bt.fill({ selector: "textarea.nope", text: "x" });
+      assert.ok(/Ошибка browserFill/.test(r), r.slice(0, 120));
+      assert.ok(/textbox/.test(r), "нет похожих полей:\n" + r);
+    });
+
+    await test("browserSelect: неверный вариант — показываем реальные значения списка", async () => {
+      const r = await bt.select({ label: "Город", value: "Сочи" });
+      assert.ok(/не выбрался вариант «Сочи»/.test(r), r);
+      assert.ok(/msk \(«Москва»\)/.test(r) && /tula \(«Тула»\)/.test(r), "нет вариантов:\n" + r);
+      const ok = await bt.select({ label: "Город", value: "tula" });
+      assert.ok(/^OK — в «подпись «Город»» выбрано: tula/.test(ok), ok);
+    });
+
+    await test("browserWait: ждём словами — и находим, и объясняем промах", async () => {
+      const ok = await bt.wait({ name: "Войти", timeout: 1000 });
+      assert.ok(/^OK — элемент «role=button name="Войти"» появился/.test(ok), ok);
+      const no = await bt.wait({ name: "Капча", timeout: 400 });
+      assert.ok(/Ошибка browserWait/.test(no), no.slice(0, 160));
+      assert.ok(/Не нашёл «Капча»/.test(no) && /browserSnapshot/.test(no), no);
+    });
+
+    await test("браузерные инструменты: без аргументов — понятная подсказка", async () => {
+      assert.ok(/укажи, по чему кликать/.test(await bt.click({})));
+      assert.ok(/укажи поле/.test(await bt.fill({ text: "x" })));
+      assert.ok(/укажи список/.test(await bt.select({ value: "x" })));
+      assert.ok(/укажи selector, ref или name\/text/.test(await bt.wait({})));
+    });
+  } finally {
+    Module_.prototype.require = origRequire;
+    await bt.stop().catch(() => {});
+    bt.setPlaywright(null);
+  }
+
+  // ── Настоящий сборщик карты на мини-DOM: ref стабильны, пароли не утекают ──
+  await test("browserSnapshot: сборщик карты не отдаёт значения полей (пароли) и скрытое", () => {
+    const mk = (tag, attrs, extra) => {
+      const store = Object.assign({}, attrs);
+      return Object.assign(
+        {
+          tagName: tag.toUpperCase(),
+          className: attrs.class || "",
+          innerText: attrs.__text || "",
+          textContent: attrs.__text || "",
+          isContentEditable: !!attrs.__ce,
+          onclick: null,
+          disabled: false,
+          checked: false,
+          labels: [],
+          closest: () => null,
+          getAttribute: (n) => (n in store ? store[n] : null),
+          setAttribute: (n, v) => { store[n] = v; },
+          getBoundingClientRect: () =>
+            (extra && extra.rect) || { top: 10, left: 10, bottom: 40, right: 200, width: 190, height: 30 },
+        },
+        extra || {}
+      );
+    };
+    const nodes = [
+      mk("button", { __text: "Войти" }),
+      mk("input", { type: "password", name: "pass", "aria-label": "Пароль", value: "СЕКРЕТ" }),
+      mk("input", { type: "hidden", name: "token", value: "СЕКРЕТ2" }),
+      mk("div", { __ce: true, role: "textbox" }),
+      mk("button", { __text: "Невидимая" }, { getBoundingClientRect: () => ({ top: 0, left: 0, bottom: 0, right: 0, width: 0, height: 0 }) }),
+      mk("div", { role: "presentation", __text: "мусор" }),
+      mk("span", { tabindex: "0", __text: "без роли, но кликабельный" }),
+    ];
+    global.window = {
+      __aiAgentRefSeq: 0,
+      innerHeight: 800,
+      innerWidth: 1200,
+      getComputedStyle: () => ({ visibility: "visible", display: "block", opacity: "1", pointerEvents: "auto" }),
+    };
+    global.document = { title: "T", querySelectorAll: () => nodes, getElementById: () => null };
+    global.location = { href: "https://x.ru/" };
+    try {
+      const raw = bt.collectInPage();
+      assert.deepStrictEqual(
+        raw.items.map((i) => i.ref),
+        ["e1", "e2", "e3", "e4", "e5"],
+        "refs: " + JSON.stringify(raw.items.map((i) => i.ref))
+      );
+      assert.strictEqual(raw.items.filter((i) => i.type === "hidden").length, 0, "hidden-поле в карте");
+      const pass = raw.items.find((i) => i.type === "password");
+      assert.strictEqual(pass.value, "", "пароль попал в карту!");
+      assert.strictEqual(dom.accessibleName(pass), "Пароль");
+      assert.strictEqual(dom.isInteractive({ tag: "div", roleAttr: "presentation", text: "x" }), false);
+      assert.strictEqual(
+        dom.accessibleName({ tag: "input", type: "submit", value: "Войти" }),
+        "Войти",
+        "подпись кнопки-<input> берётся из value"
+      );
+      assert.strictEqual(dom.refName("#e12"), "e12");
+      assert.strictEqual(dom.refName("div.x"), "");
+      const again = bt.collectInPage();
+      assert.deepStrictEqual(again.items.map((i) => i.ref), raw.items.map((i) => i.ref), "ref не должны меняться");
+    } finally {
+      delete global.window;
+      delete global.document;
+      delete global.location;
+    }
+  });
+}
+
+// ── 1c. app-инструменты: стабильные ref вместо номеров [N] ──────────────────
+// Мини-DOM: проверяем, что клик идёт по ref (номер ломается при перерисовке),
+// промах возвращает свежую карту, разрушительное блокируется, пароли не утекают.
+async function testAppUiRefs() {
+  const appUi = require(path.join(ROOT, "src", "app-ui-tools.js"));
+
+  const matches = (el, sel) => {
+    sel = String(sel).trim();
+    if (sel.indexOf(",") !== -1) return sel.split(",").some((s) => matches(el, s));
+    const attr = sel.match(/^\[([\w-]+)(?:="([^"]*)")?\]$/);
+    if (attr) {
+      const v = el.getAttribute(attr[1]);
+      return attr[2] === undefined ? v !== null : v === attr[2];
+    }
+    const tag = sel.match(/^[a-zA-Z][\w-]*/);
+    const id = sel.match(/#([\w-]+)/);
+    const cls = sel.match(/\.([\w-]+)/);
+    if (!tag && !id && !cls) return false;
+    if (tag && String(el.tagName).toLowerCase() !== tag[0].toLowerCase()) return false;
+    if (id && el.id !== id[1]) return false;
+    if (cls && String(el.className).split(/\s+/).indexOf(cls[1]) < 0) return false;
+    return true;
+  };
+
+  class El {
+    constructor(tag, attrs, opts) {
+      const a = Object.assign({}, attrs || {});
+      const o = opts || {};
+      this.tagName = tag.toUpperCase();
+      this._attrs = a;
+      this.id = a.id || "";
+      this.className = a.class || "";
+      this.innerText = o.text != null ? o.text : a.__text || "";
+      this.textContent = this.innerText;
+      this.placeholder = a.placeholder || "";
+      this.title = a.title || "";
+      this.type = a.type || "";
+      this._v = a.value || "";
+      this.disabled = !!o.disabled;
+      this.checked = !!o.checked;
+      this.isContentEditable = !!o.ce;
+      this.labels = o.labels || [];
+      this.onclick = o.onclick || null;
+      this.clicks = 0;
+      this.events = [];
+      this._parent = o.parent || null;
+      this._gone = !!o.gone;
+      this.rect = o.rect || { width: 90, height: 24, top: 10, left: 10, bottom: 34, right: 100 };
+    }
+    get value() { return this._v; }
+    set value(v) { this._v = v; }
+    getAttribute(n) { return n in this._attrs ? String(this._attrs[n]) : null; }
+    setAttribute(n, v) { this._attrs[n] = String(v); }
+    getBoundingClientRect() { return Object.assign({}, this.rect); }
+    scrollIntoView() { this.scrolled = true; }
+    click() { this.clicks++; }
+    dispatchEvent(e) { this.events.push(e && e.type); return true; }
+    closest(sel) {
+      let n = this._parent;
+      while (n) {
+        if (matches(n, sel)) return n;
+        n = n._parent;
+      }
+      return null;
+    }
+  }
+  function Proto() {}
+  Object.defineProperty(Proto.prototype, "value", {
+    get() { return this._v; },
+    set(v) { this._v = v; },
+    configurable: true,
+  });
+  class FakeEvent { constructor(type) { this.type = type; } }
+
+  const makeWin = (elements, title) => {
+    const doc = {
+      title: title || "AI Developer Agent",
+      body: { innerText: "Текст окна для агента" },
+      activeElement: null,
+      querySelectorAll: (sel) => elements.filter((el) => !el._gone && matches(el, sel)),
+      querySelector: (sel) => elements.filter((el) => !el._gone && matches(el, sel))[0] || null,
+    };
+    const win = {
+      __aiAppRefSeq: 0,
+      document: doc,
+      isDestroyed: () => false,
+      webContents: {
+        isDestroyed: () => false,
+        executeJavaScript: (code) =>
+          Promise.resolve(
+            new Function(
+              "document", "window", "getComputedStyle", "HTMLInputElement", "HTMLTextAreaElement", "Event",
+              "return " + code + ";"
+            )(doc, win, () => ({ display: "block", visibility: "visible", opacity: "1" }), Proto, Proto, FakeEvent)
+          ),
+        capturePage: async () => ({ isEmpty: () => false, toPNG: () => Buffer.from("png") }),
+      },
+    };
+    return win;
+  };
+
+  await test("appRead: карта с ref, ролями, именами, id; значения полей и .hidden не утекают", async () => {
+    const hiddenBox = new El("div", { class: "hidden" });
+    const els = [
+      new El("button", { id: "btn-settings", __text: "Настройки" }),
+      new El("button", { id: "btn-secrets", __text: "Секреты" }),
+      new El("input", { id: "s-token", type: "password", value: "СЕКРЕТ-ТОКЕН" }),
+      new El("input", { id: "s-model", placeholder: "Модель", value: "gpt-4o" }),
+      new El("button", { id: "btn-hidden", __text: "Внутри скрытого" }, { parent: hiddenBox }),
+    ];
+    const out = await appUi.read({}, makeWin(els));
+    assert.ok(/e1\s+button\s+«Настройки»\s+#btn-settings/.test(out), out.slice(0, 400));
+    assert.ok(/значение скрыто/.test(out), "нет пометки скрытого значения:\n" + out);
+    assert.ok(!/СЕКРЕТ-ТОКЕН/.test(out), "значение секретного поля попало в карту!");
+    assert.ok(!/gpt-4o/.test(out), "значение обычного поля попало в карту:\n" + out);
+    assert.ok(!/Внутри скрытого/.test(out), "элемент из .hidden попал в карту:\n" + out);
+    assert.ok(/действуй по ref/.test(out), "нет подсказки про ref:\n" + out.slice(0, 300));
+  });
+
+  await test("appClick: ref переживает перерисовку окна (номер [N] — нет)", async () => {
+    const els = [
+      new El("button", { id: "btn-settings", __text: "Настройки" }),
+      new El("button", { id: "btn-secrets", __text: "Секреты" }),
+    ];
+    const win = makeWin(els);
+    await appUi.read({}, win);
+    // Перерисовка: сверху появилась кнопка «↻» — позиции сдвинулись, ref остались.
+    els.unshift(new El("button", { id: "btn-refresh", __text: "↻" }));
+    const r = await appUi.click({ ref: "e2" }, win);
+    assert.ok(/^OK — клик по ref e2/.test(r), r);
+    assert.strictEqual(els[2].clicks, 1, "клик ушёл не в тот элемент");
+    assert.strictEqual(els[0].clicks, 0, "клик попал в новую кнопку");
+  });
+
+  await test("appClick: устаревший ref НЕ кликает наугад — отдаёт свежую карту", async () => {
+    const els = [new El("button", { id: "btn-a", __text: "Первая" }), new El("button", { id: "btn-b", __text: "Вторая" })];
+    const win = makeWin(els);
+    await appUi.read({}, win);
+    els[1]._gone = true;
+    const r = await appUi.click({ ref: "e2" }, win);
+    assert.ok(/Ошибка appClick/.test(r) && /ref устарел/.test(r), r.slice(0, 200));
+    assert.ok(/«Первая»/.test(r), "нет свежей карты:\n" + r);
+    assert.strictEqual(els[0].clicks + els[1].clicks, 0, "клик всё-таки прошёл");
+  });
+
+  await test("appClick: номер [N] работает, но предупреждает; промах подсказывает ref", async () => {
+    const els = [new El("button", { id: "btn-a", __text: "Настройки" }), new El("button", { id: "btn-b", __text: "Секреты" })];
+    const win = makeWin(els);
+    const byIndex = await appUi.click({ index: 2 }, win);
+    assert.ok(/^OK/.test(byIndex) && /НОМЕРУ/.test(byIndex), byIndex);
+    assert.strictEqual(els[1].clicks, 1);
+    const miss = await appUi.click({ text: "Секретики" }, win);
+    assert.ok(/Ошибка appClick/.test(miss) && /Похожие элементы/.test(miss), miss.slice(0, 240));
+    assert.ok(/appRead/.test(miss) && !/browserSnapshot/.test(miss), "подсказка про чужой инструмент:\n" + miss);
+  });
+
+  await test("appClick: разрушительное блокируется и по ref/селектору, не только по тексту", async () => {
+    const els = [new El("button", { id: "btn-del", __text: "Удалить аккаунт" })];
+    const win = makeWin(els);
+    const byRef = await appUi.click({ ref: "e1" }, win);
+    assert.ok(/⛔/.test(byRef), byRef.slice(0, 160));
+    const bySel = await appUi.click({ selector: "#btn-del" }, win);
+    assert.ok(/⛔/.test(bySel), bySel.slice(0, 160));
+    assert.strictEqual(els[0].clicks, 0, "опасный клик прошёл");
+  });
+
+  await test("appFill: ввод по ref и по подписи; секретное поле не эхом", async () => {
+    const els = [new El("input", { id: "s-model", placeholder: "Модель" }), new El("input", { id: "s-mail-pass", type: "password" })];
+    const win = makeWin(els);
+    const r1 = await appUi.fill({ ref: "e1", text: "gpt-4o-mini" }, win);
+    assert.ok(/^OK/.test(r1), r1);
+    assert.strictEqual(els[0]._v, "gpt-4o-mini");
+    assert.ok(els[0].events.includes("input") && els[0].events.includes("change"), "нет событий ввода: " + els[0].events);
+    const r3 = await appUi.fill({ ref: "e2", text: "МойПароль123" }, win);
+    assert.ok(/^OK/.test(r3) && !/МойПароль123/.test(r3) && /секретное/.test(r3), "секрет выведен: " + r3);
+  });
+
+  await test("appSelect: неверный вариант — показываем реальные варианты списка", async () => {
+    const sel = new El("select", { id: "s-folder" });
+    sel.options = [{ value: "msk", text: "Москва" }, { value: "tula", text: "Тула" }];
+    const win = makeWin([sel]);
+    const bad = await appUi.select({ ref: "e1", value: "sochi" }, win);
+    assert.ok(/нет варианта «sochi»/.test(bad) && /msk \(«Москва»\)/.test(bad), bad);
+    const ok = await appUi.select({ selector: "#s-folder", value: "tula" }, win);
+    assert.ok(/^OK/.test(ok), ok);
+    assert.strictEqual(sel.value, "tula");
+  });
+
+  await test("appWait: ждём по тексту; пустой запрос ничего не «находит»", async () => {
+    const win = makeWin([new El("button", { id: "btn-ok", __text: "Сохранить" })]);
+    assert.ok(/^OK — элемент появился/.test(await appUi.wait({ text: "Сохранить", timeout: 2000 }, win)));
+    const nothing = await appUi.click({}, win);
+    assert.ok(/укажи ref/.test(nothing), nothing);
+    assert.strictEqual(win.document.querySelectorAll("button").length, 1, "мини-DOM сломан");
+  });
+}
+
+// ── Yandex Cloud по отчёту песочницы: адреса, повторы, пачки, UX ────────────
+async function testYcDiagnosis() {
+  const yc = require(path.join(ROOT, "src", "yandex-cloud.js"));
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const htmlSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+  const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+
+  const makeFetch = (handler) => {
+    const calls = [];
+    let inflight = 0;
+    let maxInflight = 0;
+    const f = async (url) => {
+      calls.push(String(url));
+      inflight++;
+      maxInflight = Math.max(maxInflight, inflight);
+      try {
+        await new Promise((r) => setTimeout(r, 5));
+        const r = await handler(String(url), calls.length);
+        return {
+          ok: r.status ? r.status < 400 : true,
+          status: r.status || 200,
+          async text() { return r.body == null ? "" : JSON.stringify(r.body); },
+        };
+      } finally {
+        inflight--;
+      }
+    };
+    f.calls = calls;
+    f.stats = () => ({ maxInflight, count: calls.length });
+    return f;
+  };
+  const iamBody = () => ({ iamToken: "t", expiresAt: new Date(Date.now() + 3600e3).toISOString() });
+
+  const realFetch = global.fetch;
+  try {
+    await test("yc: адреса сервисов — logging/logGroups и существующий хост Postbox", async () => {
+      const lg = yc.SERVICES.find((s) => s.key === "logging");
+      assert.strictEqual(lg.listPath, "/logging/v1/logGroups", "неверный путь лог-групп");
+      const f = makeFetch((url) => {
+        if (url.includes("/endpoints")) return { body: {} }; // нет списка эндпоинтов → фолбэк
+        if (url.includes("/iam/v1/tokens")) return { body: iamBody() };
+        return { body: { addresses: [] } };
+      });
+      global.fetch = f;
+      yc.resetIamCache();
+      await yc.listService("oauth", "folder1", yc.serviceByKey("postbox"));
+      const url = f.calls.find((u) => u.includes("postbox"));
+      assert.ok(/^https:\/\/postbox\.cloud\.yandex\.net\//.test(url), "неверный адрес Postbox: " + url);
+      assert.ok(url.includes("folderId=folder1"), "нет folderId: " + url);
+    });
+
+    await test("yc: сетевой сбой повторяется (2 попытки), 403 — нет и подписан адресом", async () => {
+      let n = 0;
+      const f = makeFetch((url) => {
+        if (url.includes("/endpoints")) return { body: {} };
+        if (url.includes("/iam/v1/tokens")) return { body: iamBody() };
+        n++;
+        if (n === 1) throw new TypeError("fetch failed");
+        return { body: { networks: [{ id: "n1" }, { id: "n2" }] } };
+      });
+      global.fetch = f;
+      yc.resetIamCache();
+      const r = await yc.listService("oauth", "f1", yc.serviceByKey("vpc"));
+      assert.strictEqual(r.count, 2);
+      assert.strictEqual(n, 2, "попыток: " + n);
+
+      let m = 0;
+      const f2 = makeFetch((url) => {
+        if (url.includes("/endpoints")) return { body: {} };
+        if (url.includes("/iam/v1/tokens")) return { body: iamBody() };
+        m++;
+        return { status: 403, body: { message: "Permission denied" } };
+      });
+      global.fetch = f2;
+      yc.resetIamCache();
+      let err = null;
+      try {
+        await yc.listService("oauth", "f1", yc.serviceByKey("cdn"));
+      } catch (e) {
+        err = e;
+      }
+      assert.ok(err && /Нет доступа \(403\)/.test(err.message), err && err.message);
+      assert.ok(/cdn\.api\.cloud\.yandex\.net/.test(err.message), "нет адреса в ошибке: " + err.message);
+      assert.strictEqual(m, 1, "403 не должен повторяться");
+    });
+
+    await test("yc: дашборд опрашивает сервисы пачками, порядок и ошибки сохранены", async () => {
+      const f = makeFetch((url) => {
+        if (url.includes("/endpoints")) return { body: {} };
+        if (url.includes("/iam/v1/tokens")) return { body: iamBody() };
+        if (!url.includes("vpc")) throw new TypeError("fetch failed");
+        return { body: { networks: [{ id: "n1" }] } };
+      });
+      global.fetch = f;
+      yc.resetIamCache();
+      const res = await yc.resourcesStatus("oauth", "f1");
+      assert.deepStrictEqual(res.map((s) => s.key), yc.SERVICES.map((s) => s.key), "порядок карточек поехал");
+      assert.ok(f.stats().maxInflight <= 3, "залп запросов: " + f.stats().maxInflight);
+      const broken = res.filter((s) => !s.ok);
+      assert.ok(broken.length > 0 && broken.every((s) => /Сеть:|Таймаут:|\[/.test(s.error)), "непонятная ошибка: " + (broken[0] || {}).error);
+      assert.ok(res.find((s) => s.key === "vpc" && s.ok), "vpc должен был ответить");
+    });
+
+    await test("yc: классификация ошибок (сеть / таймаут / API с адресом)", () => {
+      assert.ok(yc.isNetworkError(new TypeError("fetch failed")), "не распознан сетевой сбой");
+      const ab = new Error("This operation was aborted");
+      ab.name = "AbortError";
+      assert.ok(yc.isNetworkError(ab), "не распознан таймаут");
+      assert.ok(/Таймаут: logging\.api\.cloud\.yandex\.net\/x/.test(yc.serviceError(ab, "https://logging.api.cloud.yandex.net", "/x")));
+      assert.ok(/Сеть:/.test(yc.serviceError(new TypeError("fetch failed"), "https://vpc.api.cloud.yandex.net", "/vpc/v1/networks")));
+      assert.strictEqual(yc.hostOf("https://a.b.c/x"), "a.b.c");
+    });
+
+    await test("инструменты агента читают свежие настройки (каталог применяется сразу)", () => {
+      assert.strictEqual((mainSrc.match(/ycConfig\(settings\)/g) || []).length, 0, "остались вызовы со старым settings");
+      assert.ok((mainSrc.match(/ycConfig\(loadSettings\(\)\)/g) || []).length >= 6, "yc-инструменты не читают свежие настройки");
+      assert.ok(mainSrc.includes("mailConfig(loadSettings())"), "почта не читает свежие настройки");
+      assert.ok(mainSrc.includes("loadSettings().sitePasswords"), "пароли сайтов не читаются свежими");
+    });
+
+    await test("cmd на Windows: UTF-8 (chcp 65001) для всех команд агента", () => {
+      assert.ok(mainSrc.includes("function shellArgsFor(command)"), "нет хелпера кодировки");
+      assert.ok(mainSrc.includes('"chcp 65001>nul & "'), "нет переключения кодировки");
+      const uses = (mainSrc.match(/shellArgsFor\(command\)/g) || []).length;
+      assert.ok(uses >= 3, "кодировка подключена не во все места запуска: " + uses);
+      assert.strictEqual((mainSrc.match(/\[\"\/d\", \"\/s\", \"\/c\", command\]/g) || []).length, 0, "остался запуск cmd без UTF-8");
+    });
+
+    await test("UI: ошибки дашборда и списка каталогов видны текстом", () => {
+      assert.ok(appSrc.includes('err.className = "yc-card-err"'), "ошибка сервиса не показывается текстом");
+      assert.ok(appSrc.includes("⚠️ Не ответили:"), "сводка не сообщает, сколько сервисов упало");
+      assert.ok(appSrc.includes("⏳ Загрузка каталогов…"), "нет состояния загрузки каталогов");
+      assert.ok(appSrc.includes("Каталоги не загрузились"), "пустой список каталогов не объясняет причину");
+      assert.ok(htmlSrc.includes("галочка = РАЗРЕШЕНО"), "семантика чекбоксов разрешений не пояснена");
+    });
+
+    await test("app-инструменты: ref в описаниях и «номер [N] устаревает» в промпте", () => {
+      for (const n of ["appClick", "appFill", "appSelect", "appWait"]) {
+        const d = coreSrc.split('name: "' + n + '"')[1] || "";
+        assert.ok(d.slice(0, 600).includes("ref"), "в описании " + n + " нет ref");
+      }
+      assert.ok(/номер \[N\] устаревает при любой перерисовке/.test(coreSrc), "промпт не предупреждает про номера");
+    });
+  } finally {
+    global.fetch = realFetch;
+    yc.resetIamCache();
+  }
+}
+
 // ── 4d. Менеджер паролей (vault) ───────────────────────────────────────────
 async function testVault() {
   const vault = require(path.join(ROOT, "src", "vault.js"));
@@ -1144,7 +1806,10 @@ async function testSessionExtras() {
   });
 
   await test("профиль браузера: разметка, preload и обработчики согласованы", () => {
-    for (const id of ["s-browser-profile", "browser-profile-info", "btn-browser-profile-clear"]) {
+    for (const id of [
+      "s-browser-profile", "browser-profile-info", "btn-browser-profile-clear",
+      "s-browser-connect", "s-browser-connect-port", "btn-browser-connect", "browser-connect-info",
+    ]) {
       assert.ok(htmlSrc.includes('id="' + id + '"'), "нет id=" + id + " в index.html");
       assert.ok(appSrc.includes('"' + id + '"'), "нет ссылки на " + id + " в app.js");
     }
@@ -1153,6 +1818,10 @@ async function testSessionExtras() {
     assert.ok(mainSrc.includes('ipcMain.handle("browser:profileInfo"'), "нет обработчика browser:profileInfo");
     assert.ok(mainSrc.includes('ipcMain.handle("browser:clearProfile"'), "нет обработчика browser:clearProfile");
     assert.ok(mainSrc.includes("browserProfile: true"), "профиль не включён по умолчанию");
+    assert.ok(preSrc.includes('"browser:connect"'), "нет канала browser:connect");
+    assert.ok(mainSrc.includes('ipcMain.handle("browser:connect"'), "нет обработчика browser:connect");
+    assert.ok(preSrc.includes('"browser:connectInfo"'), "нет канала browser:connectInfo");
+    assert.ok(mainSrc.includes("browserConnectPort: 9222"), "нет настройки порта отладки");
   });
 
   await test("прерванный ответ: пометка и кнопка «Дописать ответ» на месте", () => {
@@ -1660,17 +2329,562 @@ async function testMail() {
   });
 }
 
+// ── Yandex Cloud: логи внутренним API + встроенный yc CLI ──────────────────
+async function testYandexCloud() {
+  const ycCli = require(path.join(ROOT, "src", "yc-cli.js"));
+  const ycLogs = require(path.join(ROOT, "src", "yc-logs.js"));
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+  const http2 = require("http2");
+
+  await test("yc-logs: протобаф — критерий запроса и разбор ответа (уровень, ресурс, время)", () => {
+    const req = ycLogs.buildReadRequest({
+      logGroupId: "grp-1",
+      resourceIds: ["cont-1"],
+      resourceTypes: ["serverless.container"],
+      sinceMs: 1700000000000,
+      untilMs: 1700003600000,
+      pageSize: 50,
+      filter: 'level = "ERROR"',
+    });
+    const crit = ycLogs.pbDecode(req).find((f) => f.field === 2 && f.wire === 2);
+    assert.ok(crit, "в запросе нет criteria");
+    const c = ycLogs.pbDecode(crit.buf);
+    const str = (num) => {
+      const f = c.find((x) => x.field === num && x.wire === 2);
+      return f ? f.buf.toString("utf8") : "";
+    };
+    assert.strictEqual(str(1), "grp-1");
+    assert.strictEqual(str(2), "serverless.container");
+    assert.strictEqual(str(3), "cont-1");
+    assert.strictEqual(str(7), 'level = "ERROR"');
+    assert.strictEqual(Number(c.find((f) => f.field === 8 && f.wire === 0).num), 50);
+    assert.ok(c.some((f) => f.field === 4 && f.wire === 2), "нет since");
+    assert.ok(c.some((f) => f.field === 5 && f.wire === 2), "нет until");
+
+    const resource = Buffer.concat([ycLogs.pbString(1, "serverless.container"), ycLogs.pbString(2, "cont-1")]);
+    const entry = Buffer.concat([
+      ycLogs.pbString(1, "uid-1"),
+      ycLogs.pbMessage(2, resource),
+      ycLogs.pbMessage(3, Buffer.concat([ycLogs.pbInt(1, 1700000000), ycLogs.pbInt(2, 500000000)])),
+      ycLogs.pbInt(6, 5),
+      ycLogs.pbString(7, "контейнер упал: timeout"),
+    ]);
+    const entries = ycLogs.parseReadResponse(Buffer.concat([ycLogs.pbString(1, "grp-1"), ycLogs.pbMessage(2, entry)]));
+    assert.strictEqual(entries.length, 1);
+    assert.strictEqual(entries[0].message, "контейнер упал: timeout");
+    assert.strictEqual(entries[0].level, 5);
+    assert.strictEqual(entries[0].resourceId, "cont-1");
+    assert.strictEqual(entries[0].timestamp, 1700000000500);
+    assert.strictEqual(ycLogs.LEVEL_NAMES[5], "ERROR");
+    const line = ycLogs.formatEntries(entries, { max: 5 })[0];
+    assert.ok(line.includes("ERROR") && line.includes("timeout"), "строка лога: " + line);
+    assert.deepStrictEqual(ycLogs.parseReadResponse(Buffer.alloc(0)), []);
+  });
+
+  await test("yc-logs: gRPC-кадры разделяются, обрезанный кадр не съедает мусор", () => {
+    const frame = (buf) => {
+      const h = Buffer.alloc(5);
+      h.writeUInt8(0, 0);
+      h.writeUInt32BE(buf.length, 1);
+      return Buffer.concat([h, buf]);
+    };
+    const parts = ycLogs.grpcFrames(Buffer.concat([frame(Buffer.from("первый")), frame(Buffer.from("второй"))]));
+    assert.strictEqual(parts.length, 2);
+    assert.strictEqual(parts[1].toString("utf8"), "второй");
+    assert.strictEqual(ycLogs.grpcFrames(Buffer.concat([frame(Buffer.from("ок")), Buffer.from([0, 0, 0, 0, 99, 1, 2])])).length, 1);
+  });
+
+  await test("yc-logs: живой обмен — лог-группы по REST, записи по gRPC (http2), внешний yc не нужен", async () => {
+    const resource = Buffer.concat([ycLogs.pbString(1, "serverless.container"), ycLogs.pbString(2, "cont-42")]);
+    const entry = Buffer.concat([
+      ycLogs.pbString(1, "u"),
+      ycLogs.pbMessage(2, resource),
+      ycLogs.pbInt(6, 3),
+      ycLogs.pbString(7, "hello from logs"),
+    ]);
+    const respBuf = Buffer.concat([ycLogs.pbString(1, "grp"), ycLogs.pbMessage(2, entry)]);
+    let seenAuth = "";
+    let seenPath = "";
+    const server = http2.createServer();
+    server.on("stream", (stream, headers) => {
+      seenAuth = String(headers.authorization || "");
+      seenPath = String(headers[":path"] || "");
+      const h = Buffer.alloc(5);
+      h.writeUInt8(0, 0);
+      h.writeUInt32BE(respBuf.length, 1);
+      stream.respond({ ":status": 200, "content-type": "application/grpc+proto", "grpc-status": "0" });
+      stream.end(Buffer.concat([h, respBuf]));
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const port = server.address().port;
+    try {
+      const res = await ycLogs.readLogs({
+        iamToken: "t.IAM",
+        baseUrl: "http://127.0.0.1:" + port,
+        folderId: "folder-1",
+        resourceIds: ["cont-42"],
+        resourceTypes: ["serverless.container"],
+        limit: 10,
+        fetchImpl: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ groups: [{ id: "grp", name: "default" }] }) }),
+      });
+      assert.strictEqual(res.logGroupId, "grp");
+      assert.strictEqual(res.logGroupName, "default");
+      assert.strictEqual(res.entries.length, 1);
+      assert.strictEqual(res.entries[0].message, "hello from logs");
+      assert.strictEqual(seenAuth, "Bearer t.IAM");
+      assert.strictEqual(seenPath, "/yandex.cloud.logging.v1.LogReadingService/Read");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  await test("yc-logs: нет лог-групп и ошибки gRPC объясняются человеку", async () => {
+    const noGroups = await ycLogs
+      .readLogs({ iamToken: "t", baseUrl: "http://127.0.0.1:1", folderId: "f", fetchImpl: async () => ({ ok: true, status: 200, text: async () => "{}" }) })
+      .then(() => null, (e) => e);
+    assert.ok(noGroups && /нет ни одной лог-группы/.test(noGroups.message), "сообщение: " + (noGroups && noGroups.message));
+
+    const bad = await ycLogs
+      .readLogs({
+        iamToken: "t",
+        baseUrl: "http://127.0.0.1:1",
+        folderId: "f",
+        fetchImpl: async () => ({ ok: false, status: 403, text: async () => "Permission denied" }),
+      })
+      .then(() => null, (e) => e);
+    assert.ok(bad && /HTTP 403/.test(bad.message), "сообщение: " + (bad && bad.message));
+
+    const noFolder = await ycLogs.readLogs({ iamToken: "t", baseUrl: "http://127.0.0.1:1", folderId: "" }).then(() => null, (e) => e);
+    assert.ok(noFolder && /каталог/.test(noFolder.message), "сообщение: " + (noFolder && noFolder.message));
+
+    // Понятная подсказка по коду gRPC (нет прав / плохой токен / нет группы).
+    const g = ycLogs.grpcCall("http://127.0.0.1:1", "/x", "t", Buffer.alloc(0), 2000).then(() => null, (e) => e);
+    const ge = await g;
+    assert.ok(ge instanceof Error, "нет ошибки при недоступном сервере");
+  });
+
+  await test("yc-cli: платформа, версия и адреса бинаря (официальная схема хранилища)", () => {
+    assert.deepStrictEqual(ycCli.platformInfo("win32", "x64"), { ok: true, os: "windows", arch: "amd64", binName: "yc.exe" });
+    assert.strictEqual(ycCli.platformInfo("darwin", "arm64").arch, "arm64");
+    assert.strictEqual(ycCli.platformInfo("linux", "x64").binName, "yc");
+    assert.strictEqual(ycCli.platformInfo("linux", "ia32").arch, "386");
+    assert.strictEqual(ycCli.platformInfo("win32", "arm64").ok, false, "Windows/ARM не поддерживается");
+    assert.strictEqual(ycCli.platformInfo("aix", "x64").ok, false);
+    assert.ok(ycCli.versionUrl().endsWith("/release/stable"));
+    assert.strictEqual(
+      ycCli.binaryUrl("0.140.0", "linux", "amd64", "yc"),
+      "https://storage.yandexcloud.net/yandexcloud-yc/release/0.140.0/linux/amd64/yc"
+    );
+    assert.ok(ycCli.binDir("/tmp/x").endsWith(path.join("x", "bin")));
+    assert.strictEqual(ycCli.installed("/tmp/нет-такой-папки-xyz"), null);
+  });
+
+  await test("yc-cli: установка кладёт бинарь в папку приложения и не оставляет .tmp", async () => {
+    const dir = tmpdir("yc-cli-");
+    const big = Buffer.alloc(1024 * 1024 + 64, 7);
+    const calls = [];
+    const fetchImpl = async (url) => {
+      calls.push(url);
+      if (url.endsWith("/release/stable")) return { ok: true, status: 200, text: async () => "0.140.0" };
+      return { ok: true, status: 200, arrayBuffer: async () => big };
+    };
+    const r = await ycCli.install({ userData: dir, platform: "linux", arch: "x64", fetchImpl, timeoutMs: 5000 });
+    assert.ok(r.ok, "установка не прошла: " + (r && r.error));
+    assert.strictEqual(r.version, "0.140.0");
+    const target = path.join(ycCli.binDir(dir), "yc");
+    assert.ok(fs.existsSync(target), "бинарь не появился");
+    assert.strictEqual(fs.statSync(target).size, big.length);
+    assert.ok(!fs.existsSync(target + ".tmp"), "остался временный файл");
+    assert.strictEqual(ycCli.installed(dir), target);
+    assert.ok(calls.some((u) => u.includes("/0.140.0/linux/amd64/yc")), "скачан не тот бинарь: " + calls.join(", "));
+  });
+
+  await test("yc-cli: недокачанный файл не подменяет бинарь, мусор не остаётся", async () => {
+    const dir = tmpdir("yc-cli-bad-");
+    const small = await ycCli.install({
+      userData: dir,
+      platform: "linux",
+      arch: "x64",
+      fetchImpl: async (url) =>
+        url.endsWith("stable") ? { ok: true, status: 200, text: async () => "0.140.0" } : { ok: true, status: 200, arrayBuffer: async () => Buffer.alloc(10) },
+    });
+    assert.strictEqual(small.ok, false);
+    assert.ok(!fs.existsSync(path.join(ycCli.binDir(dir), "yc")), "недокачанный файл не должен занимать место бинаря");
+    assert.ok(!fs.existsSync(path.join(ycCli.binDir(dir), "yc.tmp")), "остался .tmp");
+
+    const bad = await ycCli.install({ userData: dir, platform: "linux", arch: "x64", fetchImpl: async () => ({ ok: true, status: 200, text: async () => "<html>error</html>" }) });
+    assert.strictEqual(bad.ok, false);
+    assert.ok(/Неожиданный ответ/.test(bad.error), "сообщение: " + bad.error);
+
+    const offline = await ycCli.install({ userData: dir, platform: "linux", arch: "x64", fetchImpl: async () => { throw new Error("нет сети"); } });
+    assert.strictEqual(offline.ok, false);
+    assert.ok(/нет связи/i.test(offline.error), "сообщение: " + offline.error);
+
+    const noDir = await ycCli.install({ userData: "", fetchImpl: async () => ({ ok: true, status: 200, text: async () => "1.0.0" }) });
+    assert.strictEqual(noDir.ok, false);
+    const noFetch = await ycCli.install({ userData: dir, fetchImpl: null, platform: "sunos", arch: "x64" });
+    assert.strictEqual(noFetch.ok, false);
+  });
+
+  await test("Yandex Cloud: токен и каталог автоматически уходят в окружение команд", () => {
+    const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    assert.ok(main.includes('require("./yc-cli.js")') && main.includes('require("./yc-logs.js")'), "модули не подключены");
+    assert.ok(/function ycAutoEnv\(s\)/.test(main), "нет ycAutoEnv");
+    assert.ok(/out\.YC_TOKEN = cfg\.oauth/.test(main), "токен не подставляется");
+    assert.ok(/out\.YC_CLOUD_ID = cfg\.cloudId/.test(main), "cloudId не подставляется");
+    assert.ok(/out\.YC_FOLDER_ID = cfg\.folderId/.test(main), "folderId не подставляется");
+    assert.ok(main.includes("agentEnv = { ...userAgentEnv, ...ycAutoEnv(s) }"), "окружение не собирается из двух частей");
+    assert.ok(main.includes("applyAgentEnv(s);"), "loadSettings не пересобирает окружение");
+    assert.ok(main.includes("applyAgentEnv(merged);"), "смена настроек не пересобирает окружение");
+    // Автоподстановка не должна оседать в настройках: сохраняем только пользовательское.
+    assert.ok(main.includes("s.agentEnv = { ...userAgentEnv }"), "в настройки пишется не только пользовательское");
+    assert.ok(!main.includes("s.agentEnv = { ...agentEnv }"), "в настройки попадает объединённое окружение");
+    assert.ok(main.includes("YC_TOKEN") && main.includes("[авто: Yandex Cloud]"), "envList не помечает автоматические переменные");
+    assert.ok(/подставляется автоматически из настроек Yandex Cloud/.test(main), "envUnset не защищает автоматические переменные");
+    // Папка встроенного yc CLI — в PATH всех команд.
+    assert.ok(/function ycEnsurePath\(\)/.test(main), "нет ycEnsurePath");
+    assert.ok(main.includes('ycCli.binDir(app.getPath("userData"))'), "не берётся папка приложения");
+    assert.ok(main.includes("setMergedPath(before, dir)"), "PATH не обновляется");
+  });
+
+  await test("Yandex Cloud: ycLogs идёт через внутренний API — внешний yc CLI больше не нужен", () => {
+    const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    assert.ok(/async function readYcLogsText\(/.test(main), "нет чтения логов внутренним API");
+    assert.ok(main.includes('yandexCloud.endpoint("logging")'), "нет адреса сервиса логирования");
+    assert.ok(main.includes("ycLogs.readLogs("), "не вызывается модуль логов");
+    assert.ok(!main.includes("yc logging read"), "остался вызов внешнего yc CLI");
+    assert.ok(!main.includes('findProgram("yc")'), "логи всё ещё ищут внешний yc");
+    assert.ok(main.includes('ipcMain.handle("yc:logs"') && main.includes("readYcLogsText(cfg,"), "IPC логов не переведён");
+    assert.ok(main.includes('case "ycLogs"') && main.includes('case "ycInstall"'), "нет инструментов ycLogs/ycInstall");
+    assert.ok(main.includes('ipcMain.handle("yc:cliStatus"') && main.includes('ipcMain.handle("yc:installCli"'), "нет IPC встроенного yc CLI");
+    assert.ok(main.includes("const YC_RESOURCE_TYPES") && main.includes("serverless.container"), "нет карты типов ресурсов");
+  });
+
+  await test("Yandex Cloud: инструменты, алиасы промпта, мост и интерфейс согласованы", () => {
+    const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name);
+    for (const n of ["ycStatus", "ycList", "ycCreate", "ycDelete", "ycDeploy", "ycLogs", "ycInstall"]) {
+      assert.ok(names.includes(n), "нет инструмента " + n);
+    }
+    const prompt = core.SYSTEM_PROMPT || "";
+    for (const n of ["ycLogs", "ycInstall"]) assert.ok(prompt.includes(n), "в промпте нет " + n);
+    assert.ok(/yc init не нужен/.test(prompt), "в промпте нет пояснения про автоматическую авторизацию");
+    assert.ok(/внутренним API Cloud Logging/.test(prompt), "в промпте не сказано, что логи идут внутренним API");
+    const logsDef = core.TOOL_DEFINITIONS.find((d) => d.function && d.function.name === "ycLogs");
+    assert.ok(/внутренним API/.test(logsDef.function.description), "описание ycLogs не обновлено");
+    assert.deepStrictEqual(logsDef.function.parameters.required, ["id"], "id должен быть единственным обязательным");
+    const installDef = core.TOOL_DEFINITIONS.find((d) => d.function && d.function.name === "ycInstall");
+    assert.ok(/userData\/bin/.test(installDef.function.description), "описание ycInstall без папки установки");
+    const preload = fs.readFileSync(path.join(ROOT, "src", "preload.js"), "utf8");
+    for (const s of ["ycCliStatus", "ycInstallCli"]) assert.ok(preload.includes(s), "в preload нет " + s);
+    const html = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+    for (const id of ["btn-yc-install-cli", "yc-cli-status"]) assert.ok(html.includes('id="' + id + '"'), "в index.html нет " + id);
+    const app = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+    assert.ok(app.includes("api.ycInstallCli()"), "app.js не устанавливает yc CLI");
+    assert.ok(app.includes("api.ycCliStatus()"), "app.js не показывает статус yc CLI");
+    assert.ok(app.includes('$("btn-yc-install-cli")'), "в app.js нет обработчика кнопки");
+  });
+
+  await test("readYcLogsText: берёт реальный код main.js и собирает запрос из настроек", async () => {
+    const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    const s0 = main.indexOf("// Ключ сервиса → тип ресурса Cloud Logging");
+    const s1 = main.indexOf("// Встроенный yc CLI:");
+    assert.ok(s0 > 0 && s1 > s0, "не нашёл helpers логирования в main.js");
+    const code = main.slice(s0, s1);
+
+    const mkApi = (logGroup) => {
+      const captured = { token: "", svc: "", read: null };
+      const sandbox = {
+        yandexCloud: {
+          getIamToken: async (t) => {
+            captured.token = t;
+            return "iam-1";
+          },
+          endpoint: async (svc) => {
+            captured.svc = svc;
+            return "https://logging.test";
+          },
+        },
+        ycLogs: {
+          readLogs: async (o) => {
+            captured.read = o;
+            return logGroup;
+          },
+          formatEntries: (entries, o) => entries.map((e) => "FMT:" + e.message + " max=" + o.max),
+        },
+      };
+      const fn = new Function(...Object.keys(sandbox), code + "\nreturn { readYcLogsText, YC_RESOURCE_TYPES };");
+      return { api: fn(...Object.values(sandbox)), captured };
+    };
+
+    const ok = mkApi({ logGroupId: "grp", logGroupName: "default", entries: [{ timestamp: 1700000000000, level: 3, resourceId: "c1", message: "ok", json: null }] });
+    assert.strictEqual(ok.api.YC_RESOURCE_TYPES.serverlessContainers, "serverless.container");
+    const text = await ok.api.readYcLogsText({ oauth: "y0", folderId: "f1" }, "serverlessContainers", "cont-9", { limit: 7, sinceHours: 12 });
+    assert.strictEqual(ok.captured.token, "y0", "IAM-токен должен браться из настроек");
+    assert.strictEqual(ok.captured.svc, "logging", "адрес берётся у сервиса logging");
+    assert.strictEqual(ok.captured.read.baseUrl, "https://logging.test");
+    assert.strictEqual(ok.captured.read.folderId, "f1");
+    assert.deepStrictEqual(ok.captured.read.resourceIds, ["cont-9"]);
+    assert.deepStrictEqual(ok.captured.read.resourceTypes, ["serverless.container"], "тип ресурса выводится из ключа сервиса");
+    assert.strictEqual(ok.captured.read.limit, 7);
+    assert.strictEqual(ok.captured.read.sinceHours, 12);
+    assert.ok(text.includes("FMT:ok max=50"), "записи не отформатированы: " + text);
+    assert.ok(text.includes("12 ч") && text.includes("default"), "в ответе нет окна времени/группы: " + text);
+
+    // Без каталога запрос не уходит — сразу понятная ошибка.
+    await assert.rejects(() => ok.api.readYcLogsText({ oauth: "y", folderId: "" }, "", "id", {}), /каталог/);
+
+    // Пустые логи — честное «логов нет», а не пустая строка.
+    const empty = mkApi({ logGroupId: "g", logGroupName: "", entries: [] });
+    const emptyText = await empty.api.readYcLogsText({ oauth: "y", folderId: "f" }, "", "id", {});
+    assert.ok(/Логов за последние 3 ч нет/.test(emptyText), "сообщение: " + emptyText);
+  });
+
+}
+
+// ── 5. Оболочка (shell), коды ошибок, установщики и свой Chrome по CDP ─────
+async function testShellAndCdp() {
+  const http = require("http");
+  const mainFull = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const core2 = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+  const pre2 = fs.readFileSync(path.join(ROOT, "src", "preload.js"), "utf8");
+  const html2 = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+  const app2 = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+
+  // ── Реальный срез main.js: выбор оболочки и PowerShell-кодирование ────────
+  const h0 = mainFull.indexOf("function shellArgsFor(command) {");
+  const h1 = mainFull.indexOf("// Запуск произвольной команды в терминале");
+  assert.ok(h0 > 0 && h1 > h0, "не нашёл блок оболочек в main.js");
+  const helpers = mainFull.slice(h0, h1);
+  const mkHelpers = (findProgram) =>
+    new Function("fs", "path", "process", "findProgram", helpers + "; return { normalizeShell, powershellArgs, resolveShell };")(
+      fs, path, process, findProgram
+    );
+  const H = mkHelpers((name) => ({ found: true, path: "/usr/bin/" + name }));
+
+  await test("shell: псевдонимы оболочек и команда PowerShell без искажений", () => {
+    assert.strictEqual(H.normalizeShell("PS"), "powershell");
+    assert.strictEqual(H.normalizeShell("pwsh"), "pwsh");
+    assert.strictEqual(H.normalizeShell("git-bash"), "bash");
+    assert.strictEqual(H.normalizeShell("КОМАНДНАЯ СТРОКА"), "cmd");
+    assert.strictEqual(H.normalizeShell("calc.exe"), "", "мусор не должен становиться оболочкой");
+    const ps = H.powershellArgs('Get-Process | Where-Object { $_.Name -eq "node" }');
+    assert.ok(ps.includes("-EncodedCommand"), "нет -EncodedCommand");
+    assert.ok(ps.includes("-NoProfile"), "нет тихих ключей");
+    const decoded = Buffer.from(ps[ps.indexOf("-EncodedCommand") + 1], "base64").toString("utf16le");
+    assert.ok(/UTF8/.test(decoded), "нет UTF-8 на выходе PowerShell");
+    assert.ok(decoded.includes('$_.Name -eq "node"'), "команда искажена: " + decoded);
+    assert.deepStrictEqual(H.resolveShell("echo $HOME", "bash").args, ["-lc", "echo $HOME"]);
+    assert.strictEqual(H.resolveShell("echo hi", "").kind, process.platform === "win32" ? "cmd" : "sh");
+  });
+
+  await test("shell: нет оболочки — подсказка, а не безликий «код 1»", () => {
+    const noPs = mkHelpers(() => ({ found: false, reason: "нет" }));
+    assert.ok(/installSystemPackage/.test(noPs.resolveShell("x", "powershell").shellHint), "нет подсказки про установку PowerShell");
+    assert.ok(/shell: "cmd"/.test(noPs.resolveShell("x", "powershell").shellHint), "нет альтернативы cmd");
+    const cmdCode = mainFull.slice(mainFull.indexOf("function runTerminalCommand(command, cwd, timeoutMs, shellName)"));
+    assert.ok(/sh\.shellHint/.test(cmdCode), "подсказка оболочки не попадает в ответ");
+    assert.ok(/const sh = resolveShell\(command, shellName\)/.test(cmdCode), "runTerminalCommand не использует выбор оболочки");
+    const rc = mainFull.slice(mainFull.indexOf('case "runCommand"'), mainFull.indexOf('case "startBackground"'));
+    assert.ok(/normalizeShell\(shellRaw\)/.test(rc), "runCommand не проверяет оболочку");
+    assert.ok(/runTerminalCommand\(cmd, cwd, timeoutMs, shellName\)/.test(rc), "runCommand не передаёт оболочку");
+    const bg = mainFull.slice(mainFull.indexOf('case "startBackground"'), mainFull.indexOf('case "listBackground"'));
+    assert.ok(/shellArgs: bgShell\.args/.test(bg), "startBackground не передаёт оболочку");
+    assert.ok(mainFull.includes('shell: { type: "string", description: "Оболочка: cmd') === false, "описание в main.js не нужно");
+    assert.ok(/shell: "powershell"/.test(core2) || /shell: \\"powershell\\"/.test(core2), "нет описания shell у инструмента runCommand");
+  });
+
+  // ── spawnRaw: системные коды ошибок сохраняются ─────────────────────────
+  const r0 = mainFull.indexOf("function spawnRaw(args, opts) {");
+  const r1 = mainFull.indexOf("\n}\n", mainFull.indexOf("resolve({ ok: !err, code, out", r0));
+  assert.ok(r0 > 0 && r1 > r0, "не нашёл spawnRaw");
+  let pendingErr = null;
+  const spawnRaw = new Function(
+    "execFile", "os", "stripAnsi", "agentEnv",
+    mainFull.slice(r0, r1 + 2) + "; return spawnRaw;"
+  )(
+    (bin, args, opts, cb) => { setTimeout(() => cb(pendingErr, pendingErr ? "" : "ok", ""), 0); },
+    os,
+    (x) => String(x || ""),
+    {}
+  );
+
+  await test("spawnRaw: EINVAL/EACCES/EPERM и текст ошибки больше не теряются", async () => {
+    const cases = [
+      [{ code: "EINVAL", message: "spawn EINVAL" }, "EINVAL", /spawn EINVAL/],
+      [{ code: "EACCES", message: "spawn EACCES" }, "EACCES", /EACCES/],
+      [{ code: "EPERM", message: "operation not permitted" }, "EPERM", /not permitted/],
+      [{ code: 2, message: "exit 2" }, 2, /./],
+      [{ code: "ENOENT", message: "spawn foo ENOENT" }, 127, /ENOENT/],
+      [{ killed: true, message: "killed" }, -1, /./],
+      [{ message: "непонятный сбой" }, 1, /непонятный сбой/],
+    ];
+    for (const [err, wantCode, wantText] of cases) {
+      pendingErr = err;
+      const r = await spawnRaw(["x"], {});
+      assert.strictEqual(r.ok, false);
+      assert.strictEqual(r.code, wantCode, "код для " + JSON.stringify(err) + " → " + r.code + ", ждали " + wantCode);
+      assert.ok(wantText.test(r.err), "текст ошибки потерян: «" + r.err + "»");
+    }
+    pendingErr = null;
+    const okRes = await spawnRaw(["x"], {});
+    assert.strictEqual(okRes.ok, true);
+    assert.strictEqual(okRes.code, 0);
+  });
+
+  // ── installExe: .exe / .msi / .zip ──────────────────────────────────────
+  const i0 = mainFull.indexOf("function findInstallersIn(dir) {");
+  const i1 = mainFull.indexOf("\nasync function downloadAndExtractTo", i0);
+  assert.ok(i0 > 0 && i1 > i0, "не нашёл findInstallersIn");
+  const findInstallersIn = new Function("fs", "path", mainFull.slice(i0, i1) + "; return findInstallersIn;")(fs, path);
+
+  await test("installExe: установщик ищется в распакованном архиве (сначала из корня)", () => {
+    const dir = tmpdir("inst-test-");
+    fs.mkdirSync(path.join(dir, "app", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "readme.txt"), "x");
+    fs.writeFileSync(path.join(dir, "setup.exe"), "x");
+    fs.writeFileSync(path.join(dir, "app", "pkg.msi"), "x");
+    fs.writeFileSync(path.join(dir, "app", "bin", "tool.exe"), "x");
+    const found = findInstallersIn(dir);
+    assert.strictEqual(found.length, 3, "найдено не то: " + JSON.stringify(found));
+    assert.ok(found[0].endsWith("setup.exe"), "первым должен идти установщик из корня: " + found[0]);
+    assert.ok(found.some((f) => f.endsWith("pkg.msi")), ".msi не найден");
+    assert.ok(!found.some((f) => f.endsWith(".txt")), "текстовый файл попал в установщики");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  await test("installExe: ветки .msi (msiexec) и .zip на месте, .exe не форсируется", () => {
+    const inst = mainFull.slice(mainFull.indexOf('case "installExe"'), mainFull.indexOf('case "noteSave"'));
+    assert.ok(inst.includes("msiexec /i"), "нет ветки .msi");
+    assert.ok(inst.includes("/passive /norestart"), "нет тихих ключей msiexec по умолчанию");
+    assert.ok(inst.includes("downloadAndExtractTo(url, destDir)"), "нет распаковки .zip");
+    assert.ok(inst.includes("findInstallersIn("), "нет поиска установщика в архиве");
+    assert.ok(inst.includes("downloadFileTo(url, destMsi)") && inst.includes("downloadFileTo(url, dest)"), "загрузка не переиспользует downloadFileTo");
+    assert.ok(/path\.extname\(pathOnly\)/.test(inst), "расширение не берётся из URL");
+    assert.ok(/\.\(exe\|msi\|zip\|msix\|appx\)[^/]*\/i\.test\(rawBase\)/.test(inst), "имя файла не учитывает расширение");
+    assert.ok(core2.includes("msiexec") && core2.includes(".zip (распаковка"), "описание installExe не обновлено");
+  });
+
+  // ── gitPublish вне GitHub ───────────────────────────────────────────────
+  await test("gitPublish: публикация на GitLab/Bitbucket по remoteUrl", () => {
+    const gp = mainFull.slice(mainFull.indexOf('case "gitPublish"'), mainFull.indexOf('case "gitInit"'));
+    assert.ok(gp.includes("args.remoteUrl"), "нет ветки remoteUrl");
+    assert.ok(/remote", "set-url"/.test(gp) || gp.includes('"remote", "set-url"'), "нет обновления существующего remote");
+    assert.ok(gp.includes('"remote", "add"'), "нет добавления remote");
+    assert.ok(gp.includes('"push", "-u"'), "нет push -u <remote> <branch>");
+    assert.ok(/git@bitbucket\.org/.test(core2), "описание gitPublish не объясняет формат адреса");
+  });
+
+  // ── Свой Chrome по CDP ──────────────────────────────────────────────────
+  const bt = require(path.join(ROOT, "src", "browser-tools.js"));
+  assert.ok(typeof bt.connect === "function" && typeof bt.setConnectMode === "function", "нет API CDP в browser-tools");
+
+  await test("browserConnect: подхват вкладок пользователя, отключение без закрытия его Chrome", async () => {
+    const closed = [];
+    let killed = 0;
+    const mkPage = (url, title) => ({
+      url: () => url, title: async () => title, on: () => {}, goto: async () => {},
+      waitForLoadState: async () => {}, close: async () => { closed.push(url); },
+    });
+    const vk = mkPage("https://vk.com/im", "ВКонтакте");
+    const mail = mkPage("https://mail.yandex.ru/", "Почта");
+    const fresh = mkPage("about:blank", "Новая вкладка");
+    const ctx = { pages: () => [vk, mail], newPage: async () => fresh };
+    const browserMock = {
+      isConnected: () => true,
+      contexts: () => [ctx],
+      on: () => {},
+      close: async () => { killed++; },
+      newPage: async () => { throw new Error("в CDP-режиме нельзя создавать вкладки вне контекста пользователя"); },
+    };
+    const endpoints = [];
+    bt.setPlaywright({ chromium: { connectOverCDP: async (ep) => { endpoints.push(ep); return browserMock; } } });
+    bt.setProfileDir(path.join(os.tmpdir(), "agent-profile-test"));
+
+    const server = http.createServer((req, res) => {
+      if (req.url === "/json/version") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ Browser: "Chrome/140.0.0.0" }));
+        return;
+      }
+      res.writeHead(404);
+      res.end("no");
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const port = server.address().port;
+
+    try {
+      const cfg = bt.setConnectMode({ enabled: true, port, dataDir: path.join(os.tmpdir(), "cdp-dir") });
+      assert.strictEqual(cfg.port, port, "порт не принят");
+      assert.strictEqual(bt.setConnectMode({ enabled: true, port: 80, dataDir: "/x" }).port, 9222, "некорректный порт не отброшен");
+      bt.setConnectMode({ enabled: true, port, dataDir: path.join(os.tmpdir(), "cdp-dir") });
+
+      const out = await bt.connect({ launch: false });
+      assert.ok(/^OK — подключился к твоему Chrome по CDP/.test(out), "нет подтверждения: " + out.slice(0, 140));
+      assert.strictEqual(endpoints[0], "http://127.0.0.1:" + port, "подключение не к тому адресу: " + endpoints[0]);
+      assert.ok(/vk\.com\/im/.test(out) && /mail\.yandex/.test(out), "вкладки пользователя не подхвачены:\n" + out);
+
+      const st = await bt.status();
+      assert.ok(/СВОЙ Chrome по CDP/.test(st), "статус не сообщает режим CDP");
+      const tabId = (st.match(/(tab\d+)/) || [])[1];
+      assert.ok(tabId, "нет id вкладки в статусе");
+      const refused = await bt.close({ tabId });
+      assert.ok(/вкладка твоего Chrome/.test(refused), "вкладка пользователя закрыта: " + refused);
+
+      const off = await bt.close({ tabId: "all" });
+      assert.ok(/отключился от твоего Chrome/.test(off), "нет отключения: " + off);
+      assert.strictEqual(killed, 0, "Chrome пользователя был закрыт!");
+      assert.deepStrictEqual(closed, [], "вкладки пользователя закрыты: " + JSON.stringify(closed));
+      assert.strictEqual(bt.connectInfo().active, false, "флаг CDP не сброшен");
+
+      await bt.connect({ launch: false });
+      const opened = await bt.open({ url: "https://example.com", newTab: true });
+      assert.ok(/Вкладка tab\d+ открыта/.test(opened) && /CDP/.test(opened), "новая вкладка не открылась в своём Chrome: " + opened);
+
+      await bt.close({ tabId: "all" });
+      bt.setConnectMode({ enabled: true, port: 65500, dataDir: "/x" });
+      const fail = await bt.connect({ launch: false });
+      assert.ok(/^Ошибка browserConnect/.test(fail), "нет ошибки подключения: " + fail.slice(0, 100));
+      assert.ok(/Chrome 136\+/.test(fail) && /user-data-dir/.test(fail), "нет предупреждения про Chrome 136+ и --user-data-dir");
+    } finally {
+      bt.setConnectMode({ enabled: false, port: 9222, dataDir: "" });
+      await bt.stop();
+      bt.setPlaywright(null);
+      await new Promise((r) => server.close(r));
+    }
+  });
+
+  await test("browserConnect: инструмент, промпт, каналы и настройки согласованы", () => {
+    assert.ok(core2.includes('name: "browserConnect"'), "нет определения инструмента в agent-core");
+    const list = core2.split("\n").find((l) => l.startsWith("Доступные инструменты:")) || "";
+    assert.ok(/browserConnect/.test(list), "инструмента нет в списке для модели");
+    assert.ok(/browser_connect: "browserConnect"/.test(core2), "нет алиаса browser_connect");
+    assert.ok(/начни с browserConnect/.test(core2), "промпт не объясняет, когда подключаться к своему Chrome");
+    assert.ok(pre2.includes("browserConnect: (opts) =>"), "preload не пробрасывает browserConnect");
+    assert.ok(mainFull.includes('case "browserConnect": {'), "нет диспетчера инструмента");
+    assert.ok(mainFull.includes("function applyBrowserSettings(s)"), "нет единой точки применения браузерных настроек");
+    assert.ok(/browserConnect === true/.test(mainFull), "настройка не читается");
+    for (const id of ["s-browser-connect", "s-browser-connect-port", "btn-browser-connect", "browser-connect-info"]) {
+      assert.ok(html2.includes('id="' + id + '"'), "нет id=" + id + " в index.html");
+      assert.ok(app2.includes('"' + id + '"'), "app.js не ссылается на " + id);
+    }
+    assert.ok(app2.includes("settings.browserConnect = !!$(\"s-browser-connect\").checked"), "настройка не сохраняется");
+    assert.ok(app2.includes("api.browserConnect({ port })"), "кнопка не вызывает подключение");
+  });
+}
+
 // ── Запуск ──────────────────────────────────────────────────────────────────
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
   await testAgentCore();
   await testAppUiTools();
+  await testAppUiRefs();
   await testAgentStore();
   await testUnifiedPatch();
   await testCodeIndex();
   await testSecrets();
   await testOta();
   await testBrowserTools();
+  await testBrowserBrain();
   await testHighlight();
   await testMobileBridge();
   await testChatPersistence();
@@ -1678,6 +2892,9 @@ async function testMail() {
   await testVault();
   await testVaultUi();
   await testMail();
+  await testYandexCloud();
+  await testYcDiagnosis();
+  await testShellAndCdp();
   await testServer();
   await testSelfDev();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");

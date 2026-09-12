@@ -55,6 +55,8 @@ const codeIndex = require("./code-index.js"); // семантический ин
 const yandexCloud = require("./yandex-cloud.js"); // Yandex Cloud REST API: авторизация, дашборд, создание ресурсов
 const vault = require("./vault.js"); // пароли сайтов: поиск записи, безопасный текст, подстановка в форму
 const mail = require("./mail.js"); // почта агента: SMTP (отправка КП) + IMAP (коды подтверждения), на встроенных модулях
+const ycCli = require("./yc-cli.js"); // официальный yc CLI внутрь папки приложения: загрузка + PATH (без системных прав)
+const ycLogs = require("./yc-logs.js"); // логи Cloud Logging внутренним API (REST + gRPC) — внешний yc CLI не нужен
 secrets.init(path.join(app.getPath("userData"), "secrets.json"));
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
 const ipcHandlerMap = new Map();
@@ -105,6 +107,10 @@ const DEFAULT_SETTINGS = {
   serperApiKey: "", // ключ Serper — усиленный Google-поиск для агента (webSearch)
   // Браузер агента: постоянный профиль (куки и входы на сайты переживают перезапуск приложения)
   browserProfile: true,
+  // Работа в СВОЁМ Chrome через порт отладки (CDP): агент действует в твоих
+  // вкладках с твоими входами на сайты. По умолчанию выключено.
+  browserConnect: false,
+  browserConnectPort: 9222,
   // Менеджер паролей: записи { id, name, url, login, password, note } — шифруются как остальные секреты
   sitePasswords: [],
   // Почта (SMTP/IMAP): агент отправляет КП и читает коды подтверждения. Пароль — в secrets.json.
@@ -188,7 +194,40 @@ function normalizeSettings(raw) {
 
 // Переменные окружения агента (envSet/envList/envUnset). Значения хранятся в settings.json
 // (settings.agentEnv) и подмешиваются во все команды: runCommand, фоновые процессы, shell, git, docker.
-let agentEnv = {};
+let agentEnv = {}; // итоговый набор: пользовательский + автоматический (Yandex Cloud)
+let userAgentEnv = {}; // только то, что задал пользователь — это и сохраняется в настройках
+
+// Автоматические переменные Yandex Cloud. yc CLI читает их прямо из окружения
+// (YC_TOKEN / YC_CLOUD_ID / YC_FOLDER_ID), поэтому при подключённом аккаунте он
+// работает без интерактивного `yc init`. В чат значения не выводятся: envList
+// показывает только имя и длину.
+function ycAutoEnv(s) {
+  const out = {};
+  try {
+    const cfg = ycConfig(s);
+    if (cfg.oauth) out.YC_TOKEN = cfg.oauth;
+    if (cfg.cloudId) out.YC_CLOUD_ID = cfg.cloudId;
+    if (cfg.folderId) out.YC_FOLDER_ID = cfg.folderId;
+  } catch {}
+  return out;
+}
+
+// Папка со встроенным yc CLI — в PATH всех команд агента (как node).
+function ycEnsurePath() {
+  try {
+    const dir = ycCli.binDir(app.getPath("userData"));
+    if (!dir) return;
+    const before = envPathInfo().value;
+    if (!String(before || "").split(path.delimiter).map((x) => x.trim()).includes(dir)) setMergedPath(before, dir);
+  } catch {}
+}
+
+// Пересобрать окружение агента: пользовательские переменные + автоматические YC.
+function applyAgentEnv(s) {
+  userAgentEnv = (s && typeof s.agentEnv === "object" && s.agentEnv) || {};
+  agentEnv = { ...userAgentEnv, ...ycAutoEnv(s) };
+  ycEnsurePath();
+}
 
 function loadSettings() {
   try {
@@ -199,12 +238,10 @@ function loadSettings() {
     for (const k of secrets.SECRET_KEYS) {
       if (sec[k] !== undefined) s[k] = sec[k];
     }
-    agentEnv = (s && typeof s.agentEnv === "object" && s.agentEnv) || {};
+    applyAgentEnv(s);
     // Постоянный профиль браузера агента: отдельная папка внутри userData.
     // Выключено — работаем как раньше, с чистым профилем на каждый запуск.
-    try {
-      browserTools.setProfileDir(s.browserProfile === false ? "" : path.join(app.getPath("userData"), "browser-profile"));
-    } catch {}
+    applyBrowserSettings(s);
     return s;
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -421,12 +458,103 @@ function stripAnsi(s) {
     .replace(/\r/g, "");
 }
 
+// Кодировка консоли Windows: cmd по умолчанию отдаёт CP866, и кириллица в выводе
+// команд превращается в кашу («set | findstr», git, сборки). Переключаем страницу
+// кода на UTF-8 прямо в команде. На других ОС аргументы как были.
+function shellArgsFor(command) {
+  if (process.platform === "win32") return ["/d", "/s", "/c", "chcp 65001>nul & " + command];
+  return ["-c", command];
+}
+
+// Оболочка для runCommand/startBackground: cmd (по умолчанию на Windows),
+// powershell/pwsh, bash, sh. Псевдонимы принимаются и по-русски.
+const SHELL_KINDS = {
+  cmd: "cmd", "командная строка": "cmd", консоль: "cmd", dos: "cmd",
+  powershell: "powershell", ps: "powershell", ps1: "powershell", "пс": "powershell",
+  pwsh: "pwsh", powershell7: "pwsh", ps7: "pwsh",
+  bash: "bash", gitbash: "bash", "git-bash": "bash", "баш": "bash",
+  sh: "sh", zsh: "sh", dash: "sh",
+};
+
+function normalizeShell(name) {
+  const key = String(name == null ? "" : name).trim().toLowerCase();
+  if (!key) return "";
+  return SHELL_KINDS[key] || "";
+}
+
+// PowerShell: включаем UTF-8 на выходе (иначе кириллица в pipe превращается в
+// кашу, как в cmd с CP866) и запрещаем прогресс-бар, который ломает парсинг.
+// Команда передаётся через -EncodedCommand (UTF-16LE base64): это снимает ВСЕ
+// проблемы с кавычками, $ и 2>$null, из-за которых раньше приходилось писать
+// .ps1-файлы на каждое действие.
+const PS_PRELUDE =
+  "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " +
+  "$OutputEncoding=[System.Text.Encoding]::UTF8; " +
+  "$ProgressPreference='SilentlyContinue'; ";
+
+function powershellArgs(command) {
+  const script = PS_PRELUDE + String(command || "");
+  const enc = Buffer.from(script, "utf16le").toString("base64");
+  return ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc];
+}
+
+// bash из Git for Windows (там же, где git) — чтобы shell: "bash" работал без PATH.
+function findBash() {
+  if (process.platform !== "win32") return findProgram("bash").path || "/bin/bash";
+  const pf = process.env.ProgramFiles || "C:\\Program Files";
+  const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  const home = process.env.USERPROFILE || "";
+  const cands = [
+    path.join(pf, "Git", "bin", "bash.exe"),
+    path.join(pf, "Git", "usr", "bin", "bash.exe"),
+    path.join(pf86, "Git", "bin", "bash.exe"),
+    home ? path.join(home, "AppData", "Local", "Programs", "Git", "bin", "bash.exe") : "",
+  ];
+  for (const c of cands) {
+    try { if (c && fs.existsSync(c)) return c; } catch {}
+  }
+  return findProgram("bash").path || "bash";
+}
+
+// Единая точка выбора оболочки → { kind, shell, args, shellHint }.
+// shellHint — человеческое объяснение, если оболочки нет в системе.
+function resolveShell(command, shellName) {
+  const kind = normalizeShell(shellName) || (process.platform === "win32" ? "cmd" : "sh");
+  if (kind === "cmd") {
+    return { kind, shell: process.env.ComSpec || "cmd.exe", args: shellArgsFor(command), shellHint: "" };
+  }
+  if (kind === "powershell" || kind === "pwsh") {
+    const probe = findProgram(kind === "pwsh" ? "pwsh" : "powershell");
+    return {
+      kind,
+      shell: probe.found ? probe.path : kind === "pwsh" ? "pwsh" : "powershell",
+      args: powershellArgs(command),
+      shellHint: probe.found
+        ? ""
+        : "PowerShell не найден в PATH. Варианты: installSystemPackage(\"pwsh\") для PowerShell 7 или shell: \"cmd\".",
+    };
+  }
+  if (kind === "bash") {
+    return {
+      kind,
+      shell: findBash(),
+      args: ["-lc", command],
+      shellHint:
+        process.platform === "win32"
+          ? "bash не найден. Поставь Git for Windows (installSystemPackage(\"git\")) — bash идёт вместе с ним, либо используй shell: \"cmd\" или \"powershell\"."
+          : "",
+    };
+  }
+  return { kind: "sh", shell: "/bin/sh", args: ["-c", command], shellHint: "" };
+}
+
 // Запуск произвольной команды в терминале (без интерактива).
 // Возвращает текст с кодом завершения и временем выполнения.
-function runTerminalCommand(command, cwd, timeoutMs) {
+function runTerminalCommand(command, cwd, timeoutMs, shellName) {
   return new Promise((resolve) => {
-    const shell = process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : "/bin/sh";
-    const args = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+    const sh = resolveShell(command, shellName);
+    const shell = sh.shell;
+    const args = sh.args;
     const start = Date.now();
     execFile(shell, args, {
       cwd,
@@ -443,12 +571,16 @@ function runTerminalCommand(command, cwd, timeoutMs) {
         if (out && errText) resolve(out + "\n\n[stderr]\n" + errText + timeNote);
         else resolve((out || errText || "Готово (без вывода).") + timeNote);
       } else {
-        const code = err.killed ? "таймаут" : err.code;
+        const code = err.killed ? "таймаут" : err.code == null ? 1 : err.code;
         const parts = [];
         if (out) parts.push(out);
         if (errText) parts.push(errText);
+        // Ошибки запуска (ENOENT/EACCES/EINVAL) не пишут в stderr — без этого
+        // агент видел пустой вывод и не мог понять причину.
+        if (!errText && err.message) parts.push(String(err.message));
         if (!parts.length) parts.push(err.message || String(err));
-        resolve("Команда завершилась с кодом " + code + timeNote + ":\n" + parts.join("\n").slice(0, 6000));
+        const shHint = err.code === "ENOENT" && sh.shellHint ? "\n\n" + sh.shellHint : "";
+        resolve("Команда завершилась с кодом " + code + timeNote + ":\n" + parts.join("\n").slice(0, 6000) + shHint);
       }
     });
   });
@@ -642,7 +774,7 @@ function findSymbolReferences(root, symbol) {
 function spawnCollect(command, cwd, timeoutMs, waitFor) {
   return new Promise((resolve) => {
     const shell = process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : "/bin/sh";
-    const args = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+    const args = shellArgsFor(command);
     let out = "";
     let done = false;
     const finish = (payload) => {
@@ -737,7 +869,7 @@ function bgSpawn(command, opts) {
   opts = opts || {};
   const isWin = process.platform === "win32";
   const shell = opts.shell || (isWin ? process.env.ComSpec || "cmd.exe" : "/bin/sh");
-  const args = opts.shellArgs || (isWin ? ["/d", "/s", "/c", command] : ["-c", command]);
+  const args = opts.shellArgs || shellArgsFor(command);
   const child = spawn(shell, args, {
     cwd: opts.cwd || os.homedir(),
     detached: !isWin,
@@ -1277,13 +1409,19 @@ function spawnRaw(args, opts) {
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", FORCE_COLOR: "0", ...agentEnv },
     }, (err, stdout, stderr) => {
       let code = 0;
+      let errText = stripAnsi(stderr || "");
       if (err) {
         if (typeof err.code === "number") code = err.code;
         else if (err.killed) code = -1; // таймаут
         else if (err.code === "ENOENT") code = 127;
+        // EINVAL, EPERM, EACCES и прочие системные коды — раньше все становились
+        // безликой «1» с пустым выводом, и диагноз был невозможен.
+        else if (typeof err.code === "string") code = err.code;
         else code = 1;
+        // У ошибок запуска stderr пуст — отдаём сообщение, иначе агент видит пустоту.
+        if (!errText) errText = stripAnsi(String(err.message || err));
       }
-      resolve({ ok: !err, code, out: stripAnsi(stdout || ""), err: stripAnsi(stderr || "") });
+      resolve({ ok: !err, code, out: stripAnsi(stdout || ""), err: errText });
     });
   });
 }
@@ -1471,6 +1609,45 @@ async function installSystemPkg(pkg) {
       ? "\n\nПохоже, установка не удалась: без sudo пакетный менеджер требует пароль. Запусти через runCommandAsAdmin(\"" + cmd + "\") — появится системный запрос прав."
       : "\n\nПроверь: checkInstalledProgram(" + name + ").")
   );
+}
+
+// Скачивает файл по URL в указанный путь с проверкой размера.
+async function downloadFileTo(url, dest, limitMb) {
+  let res;
+  try {
+    res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "AI-Developer-Agent" } });
+  } catch (e) {
+    return { ok: false, error: "Ошибка загрузки " + url + ": " + (e.message || String(e)) };
+  }
+  if (!res.ok) return { ok: false, error: "Ошибка HTTP " + res.status + " при загрузке " + url };
+  const buf = Buffer.from(await res.arrayBuffer());
+  const limit = (limitMb || 800) * 1024 * 1024;
+  if (buf.length > limit) return { ok: false, error: "Файл слишком большой (> " + (limitMb || 800) + " МБ)." };
+  try {
+    fs.writeFileSync(dest, buf);
+  } catch (e) {
+    return { ok: false, error: "Не удалось сохранить файл: " + (e.message || String(e)) };
+  }
+  return { ok: true, size: buf.length };
+}
+
+// Ищет установщики в распакованном архиве (не глубже 3 уровней; сначала те,
+// что лежат ближе к корню — обычно это setup.exe верхнего уровня).
+function findInstallersIn(dir) {
+  const out = [];
+  const walk = (d, depth) => {
+    if (depth > 3 || out.length >= 40) return;
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const en of entries) {
+      const full = path.join(d, en.name);
+      if (en.isDirectory()) { walk(full, depth + 1); continue; }
+      if (/\.(exe|msi|bat|cmd)$/i.test(en.name)) out.push(full);
+    }
+  };
+  walk(dir, 0);
+  out.sort((a, b) => a.split(path.sep).length - b.split(path.sep).length);
+  return out;
 }
 
 async function downloadAndExtractTo(url, destDir) {
@@ -1701,10 +1878,15 @@ async function executeTool(name, args, settings) {
       case "runCommand": {
         const cmd = String(args.command || "").trim();
         if (!cmd) return "Ошибка: укажи команду";
+        const shellRaw = String(args.shell == null ? "" : args.shell).trim();
+        const shellName = normalizeShell(shellRaw);
+        if (shellRaw && !shellName) {
+          return "Ошибка: неизвестная оболочка «" + shellRaw + "». Доступно: cmd, powershell, pwsh, bash, sh.";
+        }
         const cwd = agentWorkDir(settings);
         const timeoutMs = Math.min(parseInt(args.timeoutMs, 10) || 120000, 300000);
-        termAgentEcho("$ " + cmd + "   (каталог: " + cwd + ")");
-        const out = await runTerminalCommand(cmd, cwd, timeoutMs);
+        termAgentEcho("$ " + cmd + "   (каталог: " + cwd + (shellName ? ", оболочка: " + shellName : "") + ")");
+        const out = await runTerminalCommand(cmd, cwd, timeoutMs, shellName);
         termAgentEcho(out);
         let out2 = out;
         if (out.includes("кодом таймаут") && SERVER_CMD_RE.test(cmd)) {
@@ -1718,9 +1900,15 @@ async function executeTool(name, args, settings) {
       case "startBackground": {
         const cmd = String(args.command || "").trim();
         if (!cmd) return "Ошибка: укажи command";
+        const shellRaw = String(args.shell == null ? "" : args.shell).trim();
+        const shellName = normalizeShell(shellRaw);
+        if (shellRaw && !shellName) {
+          return "Ошибка: неизвестная оболочка «" + shellRaw + "». Доступно: cmd, powershell, pwsh, bash, sh.";
+        }
         const cwd = args.cwd ? resolvePath(args.cwd, settings) : agentWorkDir(settings);
-        const rec = bgSpawn(cmd, { name: args.name, cwd });
-        termAgentEcho("$ " + cmd + "   (фоновый процесс " + rec.id + ", каталог: " + cwd + ")");
+        const bgShell = resolveShell(cmd, shellName);
+        const rec = bgSpawn(cmd, { name: args.name, cwd, shell: bgShell.shell, shellArgs: bgShell.args });
+        termAgentEcho("$ " + cmd + "   (фоновый процесс " + rec.id + ", каталог: " + cwd + (shellName ? ", оболочка: " + shellName : "") + ")");
         return "OK — фоновый процесс запущен:\nid: " + rec.id + "\nкоманда: " + cmd + "\nPID: " + rec.child.pid + "\n\nДальше: backgroundOutput(id) — логи, sendInput(id, текст) — ввод в процесс, stopBackground(id) — остановить, checkUrl/checkPort — проверить готовность сервера.";
       }
       case "listBackground": {
@@ -1981,29 +2169,39 @@ async function executeTool(name, args, settings) {
           return "Ошибка: имя переменной должно быть вида DATABASE_URL (латиница, цифры, подчёркивание)";
         }
         const value = String(args.value ?? "");
-        agentEnv[key] = value;
         const s = loadSettings();
-        s.agentEnv = { ...agentEnv };
+        userAgentEnv[key] = value;
+        s.agentEnv = { ...userAgentEnv };
         saveSettings(s);
+        applyAgentEnv(s);
         return "OK — переменная " + key + " задана. Она доступна во всех следующих командах (runCommand, startBackground, shell, git, docker). Значение в чат не выводится.";
       }
       case "envList": {
         const keys = Object.keys(agentEnv);
         if (!keys.length) return "Переменные окружения агента не заданы. Задай через envSet(key, value).";
-        return "Заданные переменные (" + keys.length + "):\n" +
+        const auto = ycAutoEnv(loadSettings());
+        return "Доступные переменные (" + keys.length + "):\n" +
           keys.map((k) => {
             const v = String(agentEnv[k] || "");
-            return "• " + k + " — установлена (" + v.length + " симв.)";
+            return "• " + k + " — установлена (" + v.length + " симв.)" + (k in auto ? " [авто: Yandex Cloud]" : "");
           }).join("\n") +
           "\n\nЗначения скрыты — они подмешиваются в команды автоматически.";
       }
       case "envUnset": {
         const key = String(args.key || "").trim();
-        if (!key || !(key in agentEnv)) return "Переменная «" + key + "» не задана.";
-        delete agentEnv[key];
+        if (!key) return "Ошибка: укажи key";
+        const auto = ycAutoEnv(loadSettings());
+        if (!(key in userAgentEnv)) {
+          if (key in auto) {
+            return "Переменная " + key + " подставляется автоматически из настроек Yandex Cloud (Настройки → Yandex Cloud) — вручную её убрать нельзя.";
+          }
+          return "Переменная «" + key + "» не задана.";
+        }
         const s = loadSettings();
-        s.agentEnv = { ...agentEnv };
+        delete userAgentEnv[key];
+        s.agentEnv = { ...userAgentEnv };
         saveSettings(s);
+        applyAgentEnv(s);
         return "OK — переменная " + key + " удалена.";
       }
       case "writeFile": {
@@ -2029,8 +2227,15 @@ async function executeTool(name, args, settings) {
         return await webFetchPage(args.url);
       }
       // Браузерные инструменты (Playwright): видимое окно Chromium, которым агент управляет сам.
+      // browserConnect — переключение на СВОЙ Chrome пользователя через порт отладки (CDP).
+      case "browserConnect": {
+        return await browserTools.connect(args);
+      }
       case "browserOpen": {
         return await browserTools.open(args);
+      }
+      case "browserSnapshot": {
+        return await browserTools.snapshot(args);
       }
       case "browserFill": {
         return await browserTools.fill(args);
@@ -2065,17 +2270,17 @@ async function executeTool(name, args, settings) {
       // Менеджер паролей: список сайтов (без паролей) и подстановка входа в форму.
       // Пароль идёт напрямую в браузер и никогда не попадает в текст ответа.
       case "vaultList": {
-        return vault.listText(settings.sitePasswords);
+        return vault.listText(loadSettings().sitePasswords);
       }
       case "vaultFill": {
         const site = args.site || args.name || args.url || "";
-        const entry = vault.findEntry(settings.sitePasswords, site);
-        if (!entry) return vault.notFoundText(settings.sitePasswords, site);
+        const entry = vault.findEntry(loadSettings().sitePasswords, site);
+        if (!entry) return vault.notFoundText(loadSettings().sitePasswords, site);
         return await vault.fillLogin(entry, args, browserTools);
       }
       // Почта: отправка писем (КП клиентам) и чтение входящих (коды подтверждения).
       case "mailSend": {
-        const cfg = mailConfig(settings);
+        const cfg = mailConfig(loadSettings());
         if (!cfg.allowSend) {
           return "⛔ Отправка писем агентом ЗАПРЕЩЕНА. Скажи пользователю включить Настройки → «✉️ Почта» → чекбокс «Разрешить агенту отправлять письма».";
         }
@@ -2090,7 +2295,7 @@ async function executeTool(name, args, settings) {
         return "OK — письмо отправлено: " + (Array.isArray(r.to) ? r.to.join(", ") : r.to) + ". Тема: " + String(args.subject || "").slice(0, 120);
       }
       case "mailList": {
-        const cfg = mailConfig(settings);
+        const cfg = mailConfig(loadSettings());
         if (!cfg.address || !cfg.password || !cfg.imapHost) return "Почта не настроена — Настройки → «✉️ Почта».";
         const r = await mail.listRecent(
           { host: cfg.imapHost, port: cfg.imapPort, user: cfg.user, password: cfg.password, secure: true },
@@ -2106,7 +2311,7 @@ async function executeTool(name, args, settings) {
         return "Последние письма (" + r.messages.length + " из " + r.total + "):\n\n" + rows.join("\n\n") + "\n\nОтправить письмо: mailSend(to, subject, text).";
       }
       case "mailCode": {
-        const cfg = mailConfig(settings);
+        const cfg = mailConfig(loadSettings());
         if (!cfg.address || !cfg.password || !cfg.imapHost) return "Почта не настроена — Настройки → «✉️ Почта».";
         const r = await mail.listRecent(
           { host: cfg.imapHost, port: cfg.imapPort, user: cfg.user, password: cfg.password, secure: true },
@@ -2320,6 +2525,30 @@ async function executeTool(name, args, settings) {
           );
         }
         const cwdP = args.directory ? resolvePath(args.directory, settings) : agentWorkDir(settings);
+        // Не-GitHub хостинг (GitLab, Bitbucket, свой сервер): создание репозитория
+        // делается на сайте хостинга, а мы сами прописываем remote и пушим ветку —
+        // без GitHub API и без ручных команд в терминале.
+        const remoteUrl = String(args.remoteUrl || "").trim();
+        if (remoteUrl) {
+          if (!/^(https?:\/\/|git@|ssh:\/\/)/i.test(remoteUrl)) {
+            return "Ошибка: remoteUrl должен быть git-адресом — https://gitlab.com/you/repo.git или git@bitbucket.org:you/repo.git.";
+          }
+          const remoteName = String(args.remoteName || "origin").trim() || "origin";
+          const existR = await runGit(cwdP, ["remote"], settings);
+          const hasRemote = String(existR.out || "").split("\n").map((x) => x.trim()).includes(remoteName);
+          const setR = await runGit(cwdP, hasRemote ? ["remote", "set-url", remoteName, remoteUrl] : ["remote", "add", remoteName, remoteUrl], settings);
+          if (!setR.ok) return "Ошибка git remote: " + setR.err;
+          const brR = await runGit(cwdP, ["rev-parse", "--abbrev-ref", "HEAD"], settings);
+          const branch = String(brR.out || "").trim() || "main";
+          const pushR = await runGit(cwdP, ["push", "-u", remoteName, branch], settings);
+          if (!pushR.ok) {
+            return (
+              "Remote «" + remoteName + "» → " + remoteUrl + " прописан, но push не прошёл:\n" + pushR.err +
+              "\n\nЧастые причины: репозиторий ещё не создан на сайте хостинга; нужен токен (для GitLab/Bitbucket — personal access token в адресе вида https://oauth2:TOKEN@host/…) или у аккаунта нет прав на запись."
+            );
+          }
+          return "✅ Отправлено на «" + remoteName + "» (" + remoteUrl + "), ветка " + branch + ".\n" + (pushR.out || "Готово (без вывода).");
+        }
         const resP = await publishLocalToGithub(cwdP, settings, {
           name: args.name,
           description: args.description,
@@ -3085,27 +3314,69 @@ async function executeTool(name, args, settings) {
       case "installExe": {
         const url = String(args.url || "").trim();
         const name = String(args.name || "").trim();
-        if (!/^https?:\/\//i.test(url)) return "Ошибка: укажи прямой URL установщика .exe (https://...).";
-        const silent = String(args.silentArgs || "").trim() || "/S";
+        if (!/^https?:\/\//i.test(url)) {
+          return "Ошибка: укажи прямой URL установщика — .exe, .msi или .zip (https://...).";
+        }
         const tmpDir = path.join(os.tmpdir(), "ai-agent-install");
         try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) { return "Ошибка: не удалось создать временную папку: " + (e.message || String(e)); }
-        const base = (name || "installer").replace(/[^A-Za-z0-9._-]/g, "_") + ".exe";
-        const dest = path.join(tmpDir, base);
-        let res;
-        try {
-          res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "AI-Developer-Agent" } });
-        } catch (e) {
-          return "Ошибка загрузки " + url + ": " + (e.message || String(e));
+        // Расширение берём из URL без строки запроса и #якоря. Имя файла больше
+        // НЕ форсируется в .exe — иначе .msi и .zip скачивались как «installer.exe».
+        const pathOnly = url.split("#")[0].split("?")[0];
+        const ext = (path.extname(pathOnly) || "").toLowerCase();
+        const rawBase = (name || path.basename(pathOnly) || "installer").replace(/[^A-Za-z0-9._-]/g, "_").replace(/\.+$/, "") || "installer";
+        const withExt = /\.(exe|msi|zip|msix|appx)$/i.test(rawBase) ? rawBase : rawBase + (ext || ".exe");
+
+        // .zip — не установщик, а архив (portable-сборки): распаковываем и ищем
+        // внутри .exe/.msi, чтобы сразу предложить (или выполнить) установку.
+        if (ext === ".zip") {
+          const destDir = path.join(tmpDir, withExt.replace(/\.zip$/i, "") + "-files");
+          const res0 = await downloadAndExtractTo(url, destDir);
+          if (/^Ошибка/.test(res0)) return res0;
+          const found = findInstallersIn(destDir);
+          if (!found.length) {
+            return "Архив распакован: " + destDir + "\nУстановщика (.exe/.msi/.bat/.cmd) внутри не нашлось — это portable-сборка, запускай файлы прямо оттуда.\n" + res0;
+          }
+          const first = found[0];
+          if (args.run !== true) {
+            return (
+              "Архив распакован: " + destDir + "\nНайдены установщики:\n" +
+              found.slice(0, 10).map((f, i) => "  " + (i + 1) + ") " + f).join("\n") +
+              "\n\nЗапустить первый: installExe({ url: ..., run: true }) — или запусти нужный файл сам через runCommand."
+            );
+          }
+          const outZ = await runTerminalCommand('"' + first + '"', os.homedir(), 300000);
+          return "Архив распакован: " + destDir + "\n$ \"" + first + "\"\n\n" + outZ;
         }
-        if (!res.ok) return "Ошибка HTTP " + res.status + " при загрузке " + url;
-        const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length > 500 * 1024 * 1024) return "Установщик слишком большой (>500 МБ).";
-        fs.writeFileSync(dest, buf);
+
+        // .msi ставится только msiexec (прямой запуск даёт «не является приложением»).
+        if (ext === ".msi") {
+          if (process.platform !== "win32") return "Ошибка: .msi ставится только в Windows (msiexec). Возьми .zip или сборку для этой ОС.";
+          const destMsi = path.join(tmpDir, withExt);
+          const dl = await downloadFileTo(url, destMsi);
+          if (!dl.ok) return dl.error;
+          const silentMsi = String(args.silentArgs || "").trim() || "/passive /norestart";
+          const cmdMsi = "msiexec /i \"" + destMsi + "\" " + silentMsi;
+          const outM = await runTerminalCommand(cmdMsi, os.homedir(), 300000, "cmd");
+          const looksFailedM = /кодом (?!0$)[0-9]+|Access is denied|отказано в доступе|требуется повышение|administrator|1603|1722/i.test(outM);
+          return (
+            "Установщик скачан: " + destMsi + " (" + Math.round(dl.size / 1024 / 1024) + " МБ)\n" +
+            "$ " + cmdMsi + "\n\n" + outM +
+            (looksFailedM
+              ? "\n\nmsiexec вернул ошибку (1603/1722 — установка не прошла). Часто нужны права администратора: runCommandAsAdmin(\"" + cmdMsi.replace(/"/g, "") + "\")."
+              : "\n\nПроверь: checkInstalledProgram(\"" + (name || "программа") + "\").")
+          );
+        }
+
+        // .exe и всё остальное — как раньше: скачать и запустить с тихими ключами.
+        const silent = String(args.silentArgs || "").trim() || "/S";
+        const dest = path.join(tmpDir, withExt);
+        const dlx = await downloadFileTo(url, dest);
+        if (!dlx.ok) return dlx.error;
         const cmd = '"' + dest + '" ' + silent;
         const out = await runTerminalCommand(cmd, os.homedir(), 300000);
         const looksFailed = /кодом [0-9]+|Access is denied|отказано в доступе|требуется повышение|administrator/i.test(out);
         return (
-          "Установщик скачан: " + dest + " (" + Math.round(buf.length / 1024 / 1024) + " МБ)\n" +
+          "Установщик скачан: " + dest + " (" + Math.round(dlx.size / 1024 / 1024) + " МБ)\n" +
           "$ " + cmd + "\n\n" + out +
           (looksFailed
             ? "\n\nЕсли установка требует прав администратора — повтори через runCommandAsAdmin(\"" + cmd.replace(/"/g, "") + "\")."
@@ -3276,7 +3547,7 @@ async function executeTool(name, args, settings) {
       }
       // ── Yandex Cloud (REST API): инструменты агента ──
       case "ycStatus": {
-        const cfg = ycConfig(settings);
+        const cfg = ycConfig(loadSettings());
         if (!cfg.oauth) {
           return "Yandex Cloud не подключён. Скажи пользователю: Настройки → «☁️ Yandex Cloud» → получить OAuth-токен и вставить его. После авторизации инструмент заработает.";
         }
@@ -3296,7 +3567,7 @@ async function executeTool(name, args, settings) {
         }
       }
       case "ycList": {
-        const cfg = ycConfig(settings);
+        const cfg = ycConfig(loadSettings());
         if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
         if (!cfg.folderId) return "Не выбран каталог — Настройки → Yandex Cloud.";
         const serviceKey = String(args.service || args.key || "").trim();
@@ -3315,7 +3586,7 @@ async function executeTool(name, args, settings) {
         }
       }
       case "ycCreate": {
-        const cfg = ycConfig(settings);
+        const cfg = ycConfig(loadSettings());
         if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
         if (!cfg.folderId) return "Не выбран каталог — Настройки → Yandex Cloud.";
         if (!cfg.allowCreate) {
@@ -3332,7 +3603,7 @@ async function executeTool(name, args, settings) {
         }
       }
       case "ycDelete": {
-        const cfg = ycConfig(settings);
+        const cfg = ycConfig(loadSettings());
         if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
         if (!cfg.allowDelete) {
           return "⛔ Удаление ресурсов в Yandex Cloud агентом ЗАПРЕЩЕНО. Скажи пользователю включить в Настройках → «☁️ Yandex Cloud» чекбокс «Разрешить агенту удалять ресурсы».";
@@ -3348,7 +3619,7 @@ async function executeTool(name, args, settings) {
         }
       }
       case "ycDeploy": {
-        const cfg = ycConfig(settings);
+        const cfg = ycConfig(loadSettings());
         if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
         if (!cfg.folderId) return "Не выбран каталог — Настройки → Yandex Cloud.";
         const dir = args.directory ? resolvePath(args.directory, settings) : agentWorkDir(settings);
@@ -3358,7 +3629,7 @@ async function executeTool(name, args, settings) {
           return "⛔ Деплой создаёт ресурсы в Yandex Cloud (реестр, контейнер, SA). Скажи пользователю включить в Настройках → «☁️ Yandex Cloud» чекбокс «Разрешить агенту создавать ресурсы». Деплой платный (Serverless Containers).";
         }
         // Прямой вызов общей логики деплоя (как кнопка «🚀 Задеплоить»)
-        const cfg2 = ycConfig(settings);
+        const cfg2 = ycConfig(loadSettings());
         const steps = [];
         const step = (t) => steps.push(t);
         try {
@@ -3424,35 +3695,31 @@ async function executeTool(name, args, settings) {
         }
       }
       case "ycLogs": {
-        const cfg = ycConfig(settings);
+        const cfg = ycConfig(loadSettings());
         if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
+        if (!cfg.folderId) return "Ошибка: выбери каталог (folder) в Настройках → Yandex Cloud.";
         const id = String(args.id || args.resourceId || "").trim();
         if (!id) return "Ошибка: укажи id ресурса (виден в ycList).";
-        const yc = findProgram("yc");
-        if (!yc.found) {
-          return "Чтение логов требует yc CLI: установи (winget install Yandex.Cloud) и авторизуйся (yc init). Либо смотри логи в консоли Yandex Cloud.";
+        try {
+          return await readYcLogsText(cfg, String(args.service || "").trim(), id, args);
+        } catch (e) {
+          return "Логи (" + (args.service || "ресурс") + "): " + ((e && e.message) || String(e));
+        }
+      }
+      case "ycInstall": {
+        const cfg = ycConfig(loadSettings());
+        if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
+        const st = ycCliStatus();
+        if (st.installed && !args.force) {
+          return "yc CLI уже встроен: " + st.path + " — доступен всем командам как «yc». Токен и каталог подставляются автоматически (yc init не нужен). Переустановить: ycInstall(force: true).";
         }
         try {
-          const cmd = "yc logging read --folder-id=" + cfg.folderId + " --resource-ids=" + id + " --since=3h --limit=100 --format=json";
-          const out = await runTerminalCommand(cmd, os.homedir(), 90000);
-          const txt = String(out || "").trim();
-          let logs = [];
-          try {
-            const j = JSON.parse(txt);
-            const arr = Array.isArray(j) ? j : (j.entries || []);
-            logs = arr.map((e) => {
-              const msg = e.message || (typeof e.jsonPayload === "string" ? e.jsonPayload : e.jsonPayload ? JSON.stringify(e.jsonPayload) : "");
-              const ts = e.timestamp ? String(e.timestamp).replace("T", " ").slice(0, 19) : "";
-              return (ts ? ts + "  " : "") + (e.level || "").toUpperCase().padEnd(5) + " " + String(msg || "").slice(0, 600);
-            });
-          } catch {}
-          if (!logs.length) {
-            if (/error|failed|permission|denied/i.test(txt)) return "yc logging read: " + truncateText(txt, 600);
-            return "Логов за последние 3 часа нет.";
-          }
-          return "Последние логи (" + logs.length + " записей, за 3 часа):\n" + logs.slice(-50).join("\n");
+          const r = await ycCliInstall();
+          if (!r.ok) return "Не удалось установить yc CLI: " + r.error;
+          return "yc CLI установлен: " + r.path + " (версия " + r.version + ", " + r.os + "/" + r.arch + ", " + r.sizeMb + " МБ).\n" +
+            "Папка добавлена в PATH всех команд агента — вызывай просто «yc ...». YC_TOKEN и YC_FOLDER_ID подставляются из настроек, yc init не нужен. Проверка: yc config list";
         } catch (e) {
-          return "yc logging read: " + ((e && e.message) || String(e));
+          return "Не удалось установить yc CLI: " + ((e && e.message) || String(e));
         }
       }
       default:
@@ -4137,14 +4404,12 @@ ipcMain.handle("settings:set", (_e, s) => {
       if (pr) pr.dir = merged.workingDir;
     }
   }
-  agentEnv = (merged.agentEnv && typeof merged.agentEnv === "object") ? merged.agentEnv : {};
+  applyAgentEnv(merged);
   // Мобильный доступ: при включении без PIN — генерируем его, затем применяем к мосту.
   if (merged.mobileEnabled && !merged.mobilePin) {
     merged.mobilePin = String(Math.floor(100000 + Math.random() * 900000));
   }
-  try {
-    browserTools.setProfileDir(merged.browserProfile === false ? "" : path.join(app.getPath("userData"), "browser-profile"));
-  } catch {}
+  applyBrowserSettings(merged);
   saveSettings(merged);
   mobileBridge.applySettings(merged);
   return merged;
@@ -4152,6 +4417,19 @@ ipcMain.handle("settings:set", (_e, s) => {
 
 // ─────────────────────────── Браузер агента (постоянный профиль) ───────────────────────────
 // Сессии ВК и других сайтов хранятся в userData/browser-profile — вход переживает перезапуск.
+// Единая точка применения браузерных настроек: своя папка профиля и режим «свой Chrome» (CDP).
+function applyBrowserSettings(s) {
+  const dir = path.join(app.getPath("userData"), "browser-profile");
+  try {
+    browserTools.setProfileDir(s && s.browserProfile === false ? "" : dir);
+    browserTools.setConnectMode({
+      enabled: !!(s && s.browserConnect === true),
+      port: s && s.browserConnectPort,
+      dataDir: dir,
+    });
+  } catch {}
+}
+
 ipcMain.handle("browser:profileInfo", () => {
   const s = loadSettings();
   const dir = browserTools.profilePath();
@@ -4163,6 +4441,12 @@ ipcMain.handle("browser:clearProfile", async () => {
   const message = await browserTools.clearProfile();
   return { ok: !/^Не удалось/.test(message), message };
 });
+// Подключение к своему Chrome по CDP (кнопка в Настройках и инструмент агента).
+ipcMain.handle("browser:connect", async (_e, opts) => {
+  const message = await browserTools.connect(opts || {});
+  return { ok: !/^Ошибка/.test(message), message, info: browserTools.connectInfo() };
+});
+ipcMain.handle("browser:connectInfo", () => browserTools.connectInfo());
 
 // ─────────────────────────── Почта (SMTP/IMAP) ───────────────────────────
 // Проверка входа IMAP — кнопка «Проверить связь» в настройках. Письма не отправляются.
@@ -5292,6 +5576,65 @@ function ycConfig(s) {
   };
 }
 
+// Ключ сервиса → тип ресурса Cloud Logging (нужен только как фильтр; по id точнее).
+const YC_RESOURCE_TYPES = {
+  apiGateway: "serverless.apigateway",
+  certificateManager: "certificate-manager.certificate",
+  cdn: "cdn.resource",
+  dns: "dns.zone",
+  iam: "iam.serviceAccount",
+  lockbox: "lockbox.secret",
+  logging: "logging.logGroup",
+  containerRegistry: "container-registry.registry",
+  storage: "storage.bucket",
+  serverlessContainers: "serverless.container",
+  vpc: "vpc.network",
+  ydb: "ydb.database",
+};
+
+// Чтение логов Cloud Logging ВНУТРЕННИМ API приложения — внешний yc CLI не нужен.
+// Лог-группы перечисляются по REST, записи читаются по gRPC: у LogReadingService
+// нет HTTP-привязки, поэтому «POST /logging/v1/logs/read» не существует.
+async function readYcLogsText(cfg, serviceKey, resourceId, args) {
+  const a = args || {};
+  if (!cfg.folderId) throw new Error("не выбран каталог (Настройки → Yandex Cloud).");
+  const iam = await yandexCloud.getIamToken(cfg.oauth);
+  const base = (await yandexCloud.endpoint("logging")) || "https://logging.api.cloud.yandex.net";
+  const limit = Math.max(1, Math.min(parseInt(a.limit, 10) || 100, 500));
+  const sinceHours = Math.max(1, Math.min(parseInt(a.sinceHours, 10) || 3, 168));
+  const type = YC_RESOURCE_TYPES[serviceKey] || (a.type ? String(a.type) : "");
+  const res = await ycLogs.readLogs({
+    iamToken: iam,
+    baseUrl: base,
+    folderId: cfg.folderId,
+    resourceIds: resourceId ? [resourceId] : [],
+    resourceTypes: type ? [type] : [],
+    sinceHours,
+    limit,
+    logGroupId: a.logGroupId ? String(a.logGroupId) : "",
+    filter: a.filter ? String(a.filter) : "",
+  });
+  const entries = res.entries || [];
+  const group = res.logGroupName || res.logGroupId || "—";
+  if (!entries.length) {
+    return "Логов за последние " + sinceHours + " ч нет (лог-группа «" + group + "»" + (resourceId ? ", ресурс " + resourceId : "") + ").";
+  }
+  return "Логи за последние " + sinceHours + " ч — " + entries.length + " записей, группа «" + group + "»:\n" + ycLogs.formatEntries(entries, { max: 50 }).join("\n");
+}
+
+// Встроенный yc CLI: он лежит в папке приложения, системных прав не требует.
+function ycCliStatus() {
+  const userData = app.getPath("userData");
+  const p = ycCli.installed(userData);
+  return { installed: !!p, path: p || "", dir: ycCli.binDir(userData) };
+}
+
+async function ycCliInstall() {
+  const r = await ycCli.install({ userData: app.getPath("userData") });
+  if (r && r.ok) ycEnsurePath();
+  return r;
+}
+
 // Почта: собирает рабочую конфигурацию из настроек. Пустые серверы берутся из
 // пресета провайдера (Gmail/Яндекс/Mail.ru/Outlook/Rambler), иначе — imap.<домен>.
 function mailConfig(s) {
@@ -5630,7 +5973,7 @@ ipcMain.handle("yc:deploy", async (_e, folderDir, appName, opts) => {
   }
 });
 
-// Логи контейнера через yc CLI (Logging REST не существует — только gRPC/CLI).
+// Логи ресурса — внутренним API Cloud Logging (REST для лог-групп + gRPC для записей).
 ipcMain.handle("yc:logs", async (_e, serviceKey, resourceId) => {
   const cfg = ycConfig();
   try {
@@ -5641,37 +5984,28 @@ ipcMain.handle("yc:logs", async (_e, serviceKey, resourceId) => {
   if (!cfg.folderId) return { ok: false, error: "Не выбран каталог (folder)." };
   const id = String(resourceId || "").trim();
   if (!id) return { ok: false, error: "Не указан id ресурса." };
-  const yc = findProgram("yc");
-  if (!yc.found) {
-    return {
-      ok: false,
-      error:
-        "Чтение логов требует yc CLI (Yandex Cloud): установи его (winget install Yandex.Cloud) и авторизуйся (yc init). " +
-        "Либо смотри логи ресурса в консоли Yandex Cloud.",
-    };
-  }
   try {
-    const cmd =
-      "yc logging read --folder-id=" + cfg.folderId + " --resource-ids=" + id + " --since=3h --limit=100 --format=json";
-    const out = await runTerminalCommand(cmd, os.homedir(), 90000);
-    const txt = String(out || "").trim();
-    let logs = [];
-    try {
-      const j = JSON.parse(txt);
-      const arr = Array.isArray(j) ? j : (j.entries || []);
-      logs = arr.map((e) => {
-        const msg = e.message || (typeof e.jsonPayload === "string" ? e.jsonPayload : e.jsonPayload ? JSON.stringify(e.jsonPayload) : "");
-        const ts = e.timestamp ? String(e.timestamp).replace("T", " ").slice(0, 19) : "";
-        return (ts ? ts + "  " : "") + (e.level || "").toUpperCase().padEnd(5) + " " + String(msg || "").slice(0, 600);
-      });
-    } catch {}
-    if (!logs.length && /error|failed|permission|denied/i.test(txt)) {
-      return { ok: false, error: "yc logging read: " + truncateText(txt, 800) };
-    }
-    return { ok: true, logs: logs.slice(-100), raw: truncateText(txt, 4000) };
+    const text = await readYcLogsText(cfg, String(serviceKey || "").trim(), id, { limit: 100, sinceHours: 3 });
+    return { ok: true, logs: text.split("\n").slice(1), raw: text };
   } catch (e) {
-    return { ok: false, error: "yc logging read: " + ((e && e.message) || String(e)) };
+    return { ok: false, error: "Логи: " + ((e && e.message) || String(e)) };
   }
+});
+
+// Встроенный yc CLI: статус (стоит ли и где) и установка внутрь приложения.
+ipcMain.handle("yc:cliStatus", () => ycCliStatus());
+ipcMain.handle("yc:installCli", async () => {
+  const cfg = ycConfig();
+  try {
+    ycRequireAuth(cfg);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+  const st = ycCliStatus();
+  if (st.installed) return { ok: true, already: true, installed: true, path: st.path, dir: st.dir, version: "" };
+  const r = await ycCliInstall();
+  if (!r || !r.ok) return { ok: false, error: (r && r.error) || "не удалось установить yc CLI" };
+  return { ok: true, installed: true, path: r.path, dir: r.dir, version: r.version, sizeMb: r.sizeMb };
 });
 
 

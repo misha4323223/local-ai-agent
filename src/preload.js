@@ -105,6 +105,8 @@ contextBridge.exposeInMainWorld("api", {
   // Браузер агента: постоянный профиль (сессии сайтов) — статус и очистка
   browserProfileInfo: () => ipcRenderer.invoke("browser:profileInfo"),
   browserClearProfile: () => ipcRenderer.invoke("browser:clearProfile"),
+  browserConnect: (opts) => ipcRenderer.invoke("browser:connect", opts),
+  browserConnectInfo: () => ipcRenderer.invoke("browser:connectInfo"),
 
   // Почта (SMTP/IMAP): проверка входа, последние письма, тестовое письмо себе
   mailTest: () => ipcRenderer.invoke("mail:test"),
@@ -123,6 +125,8 @@ contextBridge.exposeInMainWorld("api", {
   ycDelete: (serviceKey, resourceId) => ipcRenderer.invoke("yc:delete", serviceKey, resourceId),
   ycDeploy: (folderDir, appName, opts) => ipcRenderer.invoke("yc:deploy", folderDir, appName, opts || {}),
   ycLogs: (serviceKey, resourceId) => ipcRenderer.invoke("yc:logs", serviceKey, resourceId),
+  ycCliStatus: () => ipcRenderer.invoke("yc:cliStatus"),
+  ycInstallCli: () => ipcRenderer.invoke("yc:installCli"),
 
   // Локальный self-update (OTA): статус, проверка, откат, открыть папку
   otaStatus: () => ipcRenderer.invoke("ota:status"),

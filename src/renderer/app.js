@@ -2885,6 +2885,11 @@
     $("s-agent-auto-commit").checked = settings.agentAutoCommit !== false;
     $("s-browser-profile").checked = settings.browserProfile !== false;
     renderBrowserProfileInfo();
+    if ($("s-browser-connect")) {
+      $("s-browser-connect").checked = settings.browserConnect === true;
+      $("s-browser-connect-port").value = settings.browserConnectPort || 9222;
+      renderBrowserConnectInfo();
+    }
     $("s-mobile-enabled").checked = !!settings.mobileEnabled;
     $("s-mobile-port").value = settings.mobilePort || 9090;
     renderMobileStatus();
@@ -2931,6 +2936,10 @@
     settings.allowAgentPush = !!$("s-allow-agent-push").checked;
     settings.agentAutoCommit = !!$("s-agent-auto-commit").checked;
     settings.browserProfile = !!$("s-browser-profile").checked;
+    if ($("s-browser-connect")) {
+      settings.browserConnect = !!$("s-browser-connect").checked;
+      settings.browserConnectPort = parseInt($("s-browser-connect-port").value, 10) || 9222;
+    }
     settings.mobileEnabled = !!$("s-mobile-enabled").checked;
     settings.mobilePort = parseInt($("s-mobile-port").value, 10) || 9090;
     settings.visionEnabled = !!$("s-vision-enabled").checked;
@@ -3347,6 +3356,33 @@
     }
   }
 
+  // Режим «свой Chrome по CDP»: включён ли и подключены ли мы прямо сейчас.
+  async function renderBrowserConnectInfo() {
+    const el = $("browser-connect-info");
+    if (!el) return;
+    const box = $("s-browser-connect");
+    if (box && !box.checked) {
+      el.textContent = "Режим выключен: агент работает в отдельном окне Chromium (постоянный профиль выше).";
+      return;
+    }
+    if (!isElectron || !api.browserConnectInfo) {
+      el.textContent = "Подключение к своему Chrome работает в desktop-приложении.";
+      return;
+    }
+    try {
+      const info = await api.browserConnectInfo();
+      el.textContent =
+        "Режим включён, порт " +
+        ((info && info.port) || 9222) +
+        " · " +
+        (info && info.active
+          ? "подключено: работаем в вашем Chrome"
+          : "пока не подключено — нажмите «Подключиться» или попросите агента открыть сайт");
+    } catch {
+      el.textContent = "Не удалось прочитать состояние подключения.";
+    }
+  }
+
   function saveSettingsUI() {
     updateModelNeeded();
     collectSettingsFromUI();
@@ -3499,9 +3535,25 @@
           o.textContent = f.name || f.id;
           sel.appendChild(o);
         }
+        if (!(st.folders || []).length) {
+          const o = document.createElement("option");
+          o.value = "";
+          o.textContent =
+            "⚠️ Каталоги не загрузились" + (st.error ? " — " + String(st.error).slice(0, 80) : "") + " (нажми ↻)";
+          sel.appendChild(o);
+        }
         if (st.folderId) sel.value = st.folderId;
         $("s-yc-allow-create").checked = !!st.allowCreate;
         $("s-yc-allow-delete").checked = !!st.allowDelete;
+        // Встроенный yc CLI: показываем, стоит ли он (и где) — настройка живёт в папке приложения.
+        if (isElectron && api.ycCliStatus) {
+          api.ycCliStatus()
+            .then((cl) => {
+              const el = $("yc-cli-status");
+              if (el) el.textContent = cl && cl.installed ? "встроен: " + cl.path : "не установлен";
+            })
+            .catch(() => {});
+        }
       } else {
         $("yc-conn-status").textContent = "Не подключено" + (st.error ? " — " + st.error : "");
         $("yc-conn-status").classList.remove("ok");
@@ -3608,6 +3660,10 @@
     };
     sum.appendChild(mk("🧮 Ресурсов: " + (total == null ? "—" : total)));
     sum.appendChild(mk("Сервисов с ресурсами: " + (active == null ? "—" : active)));
+    const failed = (ycServicesCache || []).filter((s) => !s.ok);
+    if (failed.length) {
+      sum.appendChild(mk("⚠️ Не ответили: " + failed.length + " — " + failed.map((s) => s.title).slice(0, 3).join(", ")));
+    }
   }
 
   function ycRenderDash() {
@@ -3636,8 +3692,14 @@
       body.className = "yc-card-body";
       const count = document.createElement("div");
       count.className = "yc-card-count" + (s.ok ? "" : " err");
-      count.textContent = s.ok ? ycNounPlural(s.key, s.count) : "n/a";
+      count.textContent = s.ok ? ycNounPlural(s.key, s.count) : "⚠ ошибка API";
       body.appendChild(count);
+      if (!s.ok) {
+        const err = document.createElement("div");
+        err.className = "yc-card-err";
+        err.textContent = String(s.error || "API недоступно").slice(0, 200);
+        body.appendChild(err);
+      }
       if (s.ok && YC_CREATABLE.includes(s.key)) {
         const add = document.createElement("button");
         add.type = "button";
@@ -3838,9 +3900,14 @@
     });
   };
   $("btn-yc-refresh-folders").onclick = async () => {
+    const sel0 = $("s-yc-folder");
+    if (sel0) sel0.innerHTML = '<option value="">⏳ Загрузка каталогов…</option>';
     const r = await api.ycFolders();
     if (!r || !r.ok) {
-      toast("❌ " + ((r && r.error) || "Не удалось загрузить каталоги"));
+      const msg = (r && r.error) || "Не удалось загрузить каталоги";
+      // Раньше список просто оставался пустым (и «висел» без объяснения причины).
+      if (sel0) sel0.innerHTML = '<option value="">⚠️ ' + String(msg).slice(0, 120) + ' — повтори ↻</option>';
+      toast("❌ " + msg);
       return;
     }
     const sel = $("s-yc-folder");
@@ -3871,6 +3938,32 @@
     api.ycSetPermissions($("s-yc-allow-create").checked, $("s-yc-allow-delete").checked);
     toast($("s-yc-allow-delete").checked ? "Агенту разрешено удалять ресурсы" : "Удаление агентом выключено");
   };
+  if ($("btn-yc-install-cli")) {
+    $("btn-yc-install-cli").onclick = async () => {
+      if (!isElectron || !api.ycInstallCli) {
+        toast("yc CLI ставится в desktop-приложении");
+        return;
+      }
+      const btn = $("btn-yc-install-cli");
+      const stEl = $("yc-cli-status");
+      btn.disabled = true;
+      if (stEl) stEl.textContent = "скачиваю официальный yc CLI…";
+      try {
+        const r = await api.ycInstallCli();
+        if (r && r.ok) {
+          if (stEl) stEl.textContent = "встроен: " + (r.path || "");
+          toast(r.already ? "yc CLI уже установлен" : "✅ yc CLI установлен" + (r.version ? " (версия " + r.version + ")" : ""));
+        } else {
+          if (stEl) stEl.textContent = "не установлен";
+          toast("❌ " + ((r && r.error) || "не удалось установить yc CLI"));
+        }
+      } catch (e) {
+        if (stEl) stEl.textContent = "не установлен";
+        toast("❌ " + ((e && e.message) || String(e)));
+      }
+      btn.disabled = false;
+    };
+  }
   $("btn-yc-dash-refresh").onclick = () => {
     ycServicesCache = null;
     ycLoadDashboard(true);
@@ -4126,6 +4219,26 @@
     };
   }
   if ($("s-browser-profile")) $("s-browser-profile").onchange = renderBrowserProfileInfo;
+
+  // «Свой Chrome» (CDP): подключение по кнопке и подпись состояния.
+  if ($("s-browser-connect")) $("s-browser-connect").onchange = renderBrowserConnectInfo;
+  if ($("s-browser-connect-port")) $("s-browser-connect-port").onchange = renderBrowserConnectInfo;
+  if ($("btn-browser-connect")) {
+    $("btn-browser-connect").onclick = async () => {
+      if (!isElectron || !api.browserConnect) {
+        toast("Подключение к своему Chrome доступно в desktop-приложении");
+        return;
+      }
+      const el = $("browser-connect-info");
+      if (el) el.textContent = "⏳ Подключаюсь к Chrome… (если он не запущен с отладкой, приложение запустит его само)";
+      const port = parseInt($("s-browser-connect-port").value, 10) || 9222;
+      const r = await api.browserConnect({ port });
+      const msg = (r && r.message) || "Не удалось подключиться";
+      if (el) el.textContent = msg.split("\n").slice(0, 2).join(" ");
+      toast(r && r.ok ? "Подключено к вашему Chrome" : "Не подключилось — смотрите подсказку ниже");
+      renderBrowserConnectInfo();
+    };
+  }
 
   // ─────────────── Панель проекта: файлы + коммиты ───────────────
   let panelTab = "files";

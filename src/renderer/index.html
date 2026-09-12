@@ -776,6 +776,21 @@
                 <button id="btn-browser-profile-clear" class="btn btn-ghost btn-small" title="Закрыть браузер агента и стереть куки и сессии всех сайтов. Обычный браузер пользователя не затрагивается.">🧹 Очистить профиль (выйти со всех сайтов)</button>
               </div>
             </div>
+            <div class="field">
+              <label class="check-row" title="Агент подключается к вашему Chrome по порту отладки (CDP) и работает в ваших вкладках — с вашими входами в ВК, почту и личные кабинеты. Это отдельное окно Chrome со своим профилем: ваш обычный браузер не затрагивается. Chrome 136+ запрещает порт отладки на стандартном профиле (защита от кражи куки), поэтому приложение запускает Chrome со своим профилем — войдите в него один раз, и сессии сохранятся.">
+                <input id="s-browser-connect" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Подключаться к моему Chrome (порт отладки, CDP)</b>
+                  <small>Включено — все браузерные инструменты агента (карта страницы, клик, ввод, текст) работают в Chrome с вашими входами на сайты, а не в отдельном окне. Открытые вкладки агент подхватывает и не закрывает. Выключено — как раньше: отдельное окно Chromium агента с постоянным профилем выше.</small>
+                </span>
+              </label>
+              <label>Порт отладки <span class="hint">(по умолчанию 9222)</span></label>
+              <div class="input-row">
+                <input id="s-browser-connect-port" type="number" min="1024" max="65535" step="1" placeholder="9222" />
+                <button id="btn-browser-connect" class="btn btn-ghost" title="Подключиться к своему Chrome (или запустить его с портом отладки) и показать, сколько ваших вкладок подхвачено.">🔌 Подключиться</button>
+              </div>
+              <div class="hint-block" id="browser-connect-info">Режим выключен: агент работает в отдельном окне Chromium.</div>
+            </div>
           </div>
         </div>
 
@@ -892,7 +907,7 @@
               </div>
             </div>
             <div class="field yc-perms hidden" id="yc-perms">
-              <label>Разрешения агента <span class="hint">(ИИ может управлять облаком прямо из чата)</span></label>
+              <label>Разрешения агента <span class="hint">(галочка = РАЗРЕШЕНО, пусто = запрещено; ИИ управляет облаком прямо из чата)</span></label>
               <label class="check-row" title="Агент сможет вызывать ycCreate — создание баз, бакетов, контейнеров и т.д. Платные ресурсы — только по твоей явной просьбе.">
                 <input id="s-yc-allow-create" type="checkbox" />
                 <span class="check-row-text">
@@ -907,6 +922,11 @@
                   <small>Необратимо, может стереть данные. Выключено по умолчанию.</small>
                 </span>
               </label>
+              <div class="yc-cli-row">
+                <button id="btn-yc-install-cli" class="btn btn-ghost btn-small" title="Скачать официальный yc CLI прямо в папку приложения (системных прав не требует) и добавить в PATH всех команд агента">⬇️ Установить yc CLI</button>
+                <span id="yc-cli-status" class="hint">не проверено</span>
+              </div>
+              <div class="hint-block" style="margin-top:6px">Токен и каталог подставляются в команды агента автоматически (YC_TOKEN, YC_CLOUD_ID, YC_FOLDER_ID) — <b>yc init не нужен</b>. Логи (<b>ycLogs</b>) читаются внутренним API, yc CLI для них не требуется.</div>
             </div>
             <div id="yc-settings-msg" class="hint-block"></div>
           </div>

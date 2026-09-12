@@ -37,20 +37,20 @@
 17. Запуск проекта: запускай проект ТОЛЬКО через встроенный терминал приложения (инструменты runCommand / startBackground / shellStart) — не проси пользователя запускать проект вручную и не открывай внешние терминалы. Dev-сервер по умолчанию запускай на порту 5000 (http://localhost:5000), если в конфиге проекта явно не задан другой порт (проверь package.json / .env / конфиги). После запуска проверь готовность через проверь через checkUrl/checkPort и сообщи пользователю адрес.
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
-20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), тихая установка скачанного установщика .exe — installExe (спросит подтверждение). ВАЖНО: команды по умолчанию выполняются в cmd.exe на Windows — если нужны командлеты PowerShell (Get-Process, Get-Service, Get-NetIPAddress и т.п.), напиши внутри runCommand: powershell -NoProfile -Command "...".
-21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url), управляй страницей через browserClick / browserFill / browserSelect / browserPress, читай содержимое через browserText, список вкладок — browserStatus, скриншот — browserScreenshot. Селекторы: CSS (#id, .class, input[name="..."]) или text=Текст кнопки, xpath=//button. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
-22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — прочитать, что сейчас видно в окне (вкладка, кнопки, поля, номера [N]), appClick — кликнуть по тексту/селектору/номеру, appFill — ввести текст в поле, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
+20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), установка скачанного установщика — installExe (умеет .exe, .msi и .zip; спросит подтверждение). ВАЖНО про оболочку: по умолчанию на Windows команды идут в cmd.exe, на macOS/Linux — в sh. Для PowerShell и bash есть параметр shell у runCommand и startBackground: shell: "powershell" — настоящий PowerShell с включённым UTF-8 (кириллица, $, кавычки и 2>$null работают как в консоли, обёртка powershell -Command не нужна), shell: "bash" — bash (на Windows это Git Bash).
+21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url) и СРАЗУ зови browserSnapshot — это карта кнопок и полей: ref (e1, e2…), роль и видимое имя (filter сужает список). Дальше действуй по ref, а НЕ перебирай селекторы: browserClick { ref: "e2" }, browserFill { ref: "e4", text: "..." }, browserSelect { ref: "e5", value: "..." }. Можно и словами: browserClick { name: "Войти" } (видимый текст кнопки), role+name («button» + «Войти»), для полей — label/placeholder; selector (CSS #id/.class, text=Текст, xpath=//...) тоже работает. Если элемент не найден, инструмент НЕ молчит, а вернёт похожие элементы с их ref — кликай по ним и не угадывай селекторы вслепую. После перехода на другую страницу ref устаревают — сделай browserSnapshot заново. Клавиши — browserPress (Enter), текст страницы — browserText, вкладки — browserStatus, скриншот — browserScreenshot. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Если нужны СВОИ входы пользователя (его ВК, его почта, его кабинеты) — начни с browserConnect: приложение подключится к его Chrome по порту отладки и подхватит открытые вкладки, дальше те же browserSnapshot/browserClick/browserFill работают в них, а браузер пользователя не закрывается (browserClose с tabId: "all" лишь отключает агента). Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
+22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — карта окна: кнопки/вкладки/поля со СТАБИЛЬНЫМ ref (e12), ролью и видимым именем, appClick — кликнуть по ref (или по видимому тексту: text «Сохранить»), appFill — ввести текст в поле по ref/label, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать элемента по ref/тексту, appScreenshot — скриншот окна (разбирается vision-моделью). ВАЖНО: номер [N] устаревает при любой перерисовке окна (после «↻ обновить», смены вкладки клик уходил в чужой элемент) — всегда бери ref из appRead и не полагайся на номер. Если действие не нашло элемент, инструмент сам вернёт свежую карту с ref — просто повтори по ней. appSelect/appPress — выбрать из списка/нажать клавишу, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
 23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
 25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
 26. Семантический поиск: semanticSearch(query) ищет по коду проекта по смыслу (стебли слов, camelCase/snake_case, BM25-ранжирование) и показывает сниппеты с номерами строк. Используй его для поиска «где находится X» и «как устроен Y» — быстрее и точнее, чем читать файлы подряд. Точный регулярный поиск — searchFile/searchProject.
 24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList).
 27. Самоизменения и OTA: перед любой правкой собственного кода (src/, assets/) сначала создай точку отката checkpointSave(label — «перед самоизменением …»). Файлы src/bootstrap.js и src/ota.js и папка применённого OTA-бандла физически заблокированы: writeFile/editFile/applyPatch вернут ошибку — не пытайся их обойти. После сборки бандла (node scripts/make-ota.js) вызови otaStatus (видно ли обновление) и otaCheck (применить); после применения — validateProject; если после обновления что-то сломалось — otaRollback.
-28. Yandex Cloud: инструменты ycStatus / ycList / ycCreate / ycDelete / ycDeploy / ycLogs. Начни с ycStatus — авторизация (Настройки → «☁️ Yandex Cloud»), каталог, разрешения агента. Создание/удаление ресурсов — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Создать можно: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc. Деплой — ycDeploy (directory, name, public): Docker-образ → Container Registry → Serverless Container → URL (нужен Docker). Логи — ycLogs (service, id). Результат проверяй через ycList.
+28. Yandex Cloud: инструменты ycStatus / ycList / ycCreate / ycDelete / ycDeploy / ycLogs / ycInstall. Начни с ycStatus — авторизация (Настройки → «☁️ Yandex Cloud»), каталог, разрешения агента. Создание/удаление ресурсов — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Создать можно: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc. Деплой — ycDeploy (directory, name, public): Docker-образ → Container Registry → Serverless Container → URL (нужен Docker). Логи — ycLogs (id, service необязателен): читаются внутренним API Cloud Logging, внешний yc CLI НЕ нужен. Если в песочнице нужен сам yc CLI (например, команда yc в терминале) — вызови ycInstall: он скачает официальный бинарь в папку приложения и добавит в PATH. Токен и каталог уже подставляются автоматически (YC_TOKEN / YC_CLOUD_ID / YC_FOLDER_ID), yc init не нужен. Результат проверяй через ycList.
 29. ВКонтакте (vk.com/vk.ru — домены взаимозаменяемы): браузерные инструменты. Поле ввода — contenteditable, селектор [role=textbox]: browserClick по полю → browserFill(selector: [role=textbox], text: ...) → отправка browserPress(key: Enter) (Shift+Enter — перенос строки). Страницы грузятся лениво — после открытия жди 2–5 секунд и перечитывай browserText; проверка отправки — текст сообщения в конце переписки. Работай в СУЩЕСТВУЮЩЕЙ вкладке браузера (новые открываются без сессии); состояние читай через browserText, а не скриншоты (ВК их обрезает); текст приходит вместе с левым меню — фильтруй по именам/датам. Вход/сессия — только руками пользователя, не обходи. Маршруты, селекторы, сценарии и известные контакты — в гайде, прочитай перед работой: readFile(path: agent-guide:vk).
 30. Анализ переписок (ВК, чаты, письма, файлы): определи КТО человек по уликам в тексте (работа/задачи → коллега; семейное/личное → родственник/друг; услуги/цены/заказы → клиент/поставщик; «Вы» и официальный тон → деловой контакт), выдели СУТЬ (2–4 предложения: о чём разговор, что решено, что ждёт ответа, срочность) и оформи ТАБЛИЦЕЙ: «Человек (профиль) | Кто он | Суть переписки | Важность | Следующий шаг». Для КЛИЕНТОВ дополнительно: профиль (потребность его словами, что обсуждали, бюджет/сроки если видно, возражения, тон) + фундамент для КП (2–4 пункта, что включить в предложение, и следующий логичный шаг). Не выдумывай: чего нет в тексте — «не определено». Длинную историю читай частями (PageUp + browserText). Полная методология — readFile(path: agent-guide:chat-analysis).
 31. Почта (SMTP/IMAP, Настройки → «✉️ Почта»): mailList — прочитать последние письма (отправитель, тема, дата, найденный код), mailCode — вытащить код подтверждения (from — фильтр по отправителю, например «yandex»), mailSend — отправить письмо (КП клиенту, ответ на запрос). Начни с mailList: если почта не настроена или нет разрешения на отправку, инструмент вернёт подсказку — передай её пользователю. Письма уходят с его ящика, поэтому перед отправкой клиенту покажи готовый текст и спроси подтверждение, если пользователь не просил отправить сразу. Пароль приложения не показывай и не проси в чате. Если письмо с кодом ещё не пришло — повтори mailCode через 10–20 секунд (письмо доходит не мгновенно).
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserOpen, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -151,7 +151,7 @@
       type: "function",
       function: {
         name: "gitPublish",
-        description: "Создать НОВЫЙ репозиторий на GitHub и выгрузить в него текущую папку проекта (git init, если нужно, первый коммит и push). Требует включённой настройки «Разрешить агенту git push».",
+        description: "Выгрузить папку проекта в удалённый репозиторий. По умолчанию создаёт НОВЫЙ репозиторий на GitHub (git init при необходимости, первый коммит и push). Для GitLab, Bitbucket или своего сервера передай remoteUrl (https://gitlab.com/you/repo.git или git@bitbucket.org:you/repo.git) — репозиторий создаётся на сайте хостинга, инструмент сам пропишет remote и отправит ветку. Требует включённой настройки «Разрешить агенту git push».",
         parameters: {
           type: "object",
           properties: {
@@ -160,6 +160,8 @@
             private: { type: "boolean", description: "Приватный репозиторий? По умолчанию true." },
             message: { type: "string", description: "Сообщение первого коммита (по умолчанию Initial commit)." },
             directory: { type: "string", description: "Папка проекта (по умолчанию — рабочая папка агента)." },
+            remoteUrl: { type: "string", description: "git-адрес не-GitHub хостинга (GitLab, Bitbucket, свой сервер). Если задан — инструмент прописывает remote и отправляет ветку вместо создания репозитория на GitHub." },
+            remoteName: { type: "string", description: "Имя remote (по умолчанию origin)." },
           },
         },
       },
@@ -249,7 +251,11 @@
         description: "Выполнить команду в терминале внутри рабочей директории приложения (например npm test, npm run build, node script.js, ls, git log). Вывод обрезается до 6000 символов. Команда не должна требовать интерактивного ввода; таймаут 120 секунд. Для длительных серверов и фоновых задач используй startBackground — процесс продолжит работать после завершения вызова. Если команда похожа на dev-сервер (expo start, npm run dev, vite) и не завершилась за таймаут — приложение вернёт подсказку: серверы запускай ТОЛЬКО через startBackground (+ checkUrl/checkPort/stopBackground), а не через runCommand. Для серии команд с сохранением состояния терминала используй shellStart/shellSend.",
         parameters: {
           type: "object",
-          properties: { command: { type: "string", description: "Команда для выполнения в терминале" } },
+          properties: {
+            command: { type: "string", description: "Команда для выполнения в терминале" },
+            shell: { type: "string", description: "Оболочка: cmd (по умолчанию на Windows), powershell, pwsh, bash, sh. Выбирай powershell для командлетов и объектов PowerShell — кавычки, $ и 2>$null работают как в обычной консоли." },
+            timeoutMs: { type: "integer", description: "Таймаут в миллисекундах (по умолчанию 120000, максимум 300000)" },
+          },
           required: ["command"],
         },
       },
@@ -281,8 +287,39 @@
     {
       type: "function",
       function: {
+        name: "browserSnapshot",
+        description: "Карта страницы: список интерактивных элементов (кнопки, ссылки, поля, чекбоксы) с коротким ref (e1, e2…), ролью и видимым именем. ВЫЗЫВАЙ ПЕРЕД первым действием на странице — вместо угадывания селекторов возьми ref нужной кнопки: browserClick { ref: \"e2\" }, browserFill { ref: \"e4\", text: \"...\" }. filter — сузить список (часть имени или роли, например «войти»); limit — сколько строк показать (по умолчанию 60).",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            filter: { type: "string", description: "Показать только элементы, где встречается этот текст (имя, роль, id)" },
+            limit: { type: "integer", description: "Максимум строк (5–200, по умолчанию 60)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserConnect",
+        description: "Подключиться к СВОЕМУ Chrome пользователя через порт отладки (CDP) — тогда все браузерные инструменты работают в его вкладках с его входами на сайты (ВК, почта, кабинеты), а не в отдельном окне агента. Если Chrome с портом отладки не запущен, приложение само запустит его со своим профилем (входы сохранятся). Уже открытые вкладки пользователя подхватываются — работай в них; агент их не закрывает. Отключиться: browserClose с tabId: \"all\" — Chrome пользователя продолжит работать.",
+        parameters: {
+          type: "object",
+          properties: {
+            port: { type: "integer", description: "Порт отладки Chrome (по умолчанию 9222)" },
+            launch: { type: "boolean", description: "Запустить Chrome, если он не запущен с отладкой (по умолчанию да)" },
+            browser: { type: "string", description: "Какой браузер запускать: chrome или edge" },
+            url: { type: "string", description: "Сразу открыть этот адрес после подключения" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "browserOpen",
-        description: "Открыть сайт в видимом окне Chromium (агент управляет браузером, пользователь видит всё). url — полный адрес страницы; newTab — true, чтобы открыть новую вкладку вместо активной. Возвращает id вкладки (tabId). Браузер запускается при первом вызове.",
+        description: "Открыть сайт в видимом окне Chromium агента (пользователь видит всё). url — полный адрес страницы; newTab — true, чтобы открыть новую вкладку вместо активной. Возвращает id вкладки (tabId). Если нужны входы пользователя — сначала browserConnect (свой Chrome по CDP).",
         parameters: {
           type: "object",
           properties: {
@@ -297,15 +334,20 @@
       type: "function",
       function: {
         name: "browserFill",
-        description: "Заполнить текстовое поле на открытой странице. tabId — id вкладки из browserOpen (по умолчанию активная); selector — CSS-селектор (#id, .class, input[name=...]) или text=/xpath=; text — вводимое значение.",
+        description: "Заполнить текстовое поле. Поле указывай ОДНИМ способом: ref из browserSnapshot (ref: \"e4\" — самый надёжный), label/placeholder (видимая подпись или подсказка поля), name (то же, что label), role+name или selector (CSS #id/.class, text=..., xpath=...). Поддерживаются обычные поля и contenteditable (ВК).",
         parameters: {
           type: "object",
           properties: {
             tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            ref: { type: "string", description: "ref элемента из browserSnapshot, например e4" },
             selector: { type: "string", description: "Селектор поля: #id, .class, input[name=...], text=..., xpath=..." },
+            label: { type: "string", description: "Видимая подпись поля (label) или aria-label" },
+            placeholder: { type: "string", description: "Подсказка внутри поля (placeholder)" },
+            name: { type: "string", description: "Название поля или его id/name" },
+            role: { type: "string", description: "Роль поля: textbox, searchbox, combobox" },
             text: { type: "string", description: "Значение для ввода" },
           },
-          required: ["selector", "text"],
+          required: ["text"],
         },
       },
     },
@@ -313,15 +355,18 @@
       type: "function",
       function: {
         name: "browserClick",
-        description: "Кликнуть по элементу (кнопка, ссылка, чекбокс) на открытой странице. tabId — id вкладки; selector — CSS или text=Текст кнопки / xpath=...; waitLoad — false, если после клика не нужно ждать загрузки страницы (по умолчанию true).",
+        description: "Кликнуть по элементу (кнопка, ссылка, чекбокс, пункт меню). Указывай ОДИН способ: ref из browserSnapshot (ref: \"e2\" — самый надёжный), name (видимый текст, например name: \"Войти\"), role+name (role: \"button\", name: \"Войти\"), text (то же, что name) или selector (CSS #id, text=Кнопка, xpath=...). Если элемент не найден — вернёт похожие элементы с ref (по ним и кликай, не перебирай селекторы). waitLoad: false — не ждать загрузки после клика.",
         parameters: {
           type: "object",
           properties: {
             tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            ref: { type: "string", description: "ref элемента из browserSnapshot, например e2" },
+            name: { type: "string", description: "Видимый текст кнопки/ссылки, например «Войти»" },
+            role: { type: "string", description: "Роль элемента: button, link, checkbox, radio, tab, menuitem" },
+            text: { type: "string", description: "Текст элемента (то же, что name)" },
             selector: { type: "string", description: "Селектор элемента: #id, .class, text=Кнопка, xpath=..." },
             waitLoad: { type: "boolean", description: "Ждать загрузку страницы после клика (по умолчанию true)" },
           },
-          required: ["selector"],
         },
       },
     },
@@ -329,15 +374,17 @@
       type: "function",
       function: {
         name: "browserSelect",
-        description: "Выбрать вариант в выпадающем списке (<select>) на открытой странице. tabId — id вкладки; selector — селектор списка; value — значение варианта (атрибут value).",
+        description: "Выбрать вариант в выпадающем списке (<select>). Список указывай через ref из browserSnapshot, label (видимая подпись) или selector; value — значение варианта. Если варианта нет, вернёт реальные варианты списка.",
         parameters: {
           type: "object",
           properties: {
             tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            ref: { type: "string", description: "ref списка из browserSnapshot" },
             selector: { type: "string", description: "Селектор списка" },
-            value: { type: "string", description: "Значение варианта (value атрибут)" },
+            label: { type: "string", description: "Видимая подпись списка" },
+            value: { type: "string", description: "Значение варианта (атрибут value)" },
           },
-          required: ["selector", "value"],
+          required: ["value"],
         },
       },
     },
@@ -388,15 +435,18 @@
       type: "function",
       function: {
         name: "browserWait",
-        description: "Ждать появления элемента на странице (загрузка после логина, капча, кнопка). tabId — id вкладки; selector — селектор; timeout — мс ожидания (по умолчанию 10000, максимум 60000).",
+        description: "Ждать появления элемента (загрузка после входа, капча, кнопка). Элемент можно описать словами: name/text (видимый текст), ref из browserSnapshot или selector. timeout — мс ожидания (по умолчанию 10000, максимум 60000).",
         parameters: {
           type: "object",
           properties: {
             tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            name: { type: "string", description: "Видимый текст ожидаемого элемента" },
+            text: { type: "string", description: "То же, что name" },
+            ref: { type: "string", description: "ref элемента из browserSnapshot" },
+            role: { type: "string", description: "Роль: button, link, textbox, checkbox…" },
             selector: { type: "string", description: "Селектор ожидаемого элемента" },
             timeout: { type: "integer", description: "Таймаут в мс (по умолчанию 10000)" },
           },
-          required: ["selector"],
         },
       },
     },
@@ -507,7 +557,7 @@
       type: "function",
       function: {
         name: "appRead",
-        description: "Прочитать состояние собственного окна приложения, в котором ты работаешь: заголовок, открытые панели/оверлеи, список видимых кнопок/полей/вкладок (с текстом, id, селектором и номером [N]), фрагмент видимого текста. Без аргументов. Используй перед каждым действием в UI и после него — так ты знаешь, что реально видно, а не по памяти.",
+        description: "Карта собственного окна приложения: видимые кнопки, вкладки, поля и списки — каждая строка это ref (e12), роль, видимое имя, id/класс; плюс открытые панели и фрагмент текста. Без аргументов. Вызывай перед действием в UI и после него. ref стабильны, пока элемент жив; после перерисовки окна (обновление списков, смена вкладки) сделай appRead заново. Ищи нужную строку глазами по имени кнопки — и кликай по её ref.",
         parameters: { type: "object", properties: {} },
       },
     },
@@ -515,13 +565,15 @@
       type: "function",
       function: {
         name: "appClick",
-        description: "Кликнуть по элементу в собственном окне приложения. text — видимый текст кнопки/вкладки («Настройки», «Сохранить»); selector — CSS-селектор (#id, .class); index — номер [N] из appRead. Клики по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») заблокированы — для них спроси пользователя через askUser. После клика проверяй результат через appRead.",
+        description: "Кликнуть по элементу в собственном окне приложения. Указывай ОДИН способ: ref из appRead (ref: \"e12\" — самый надёжный), text — видимый текст («Настройки», «Сохранить»), role+text, или selector (#id/.class). Поле index (номер [N]) принимается только для совместимости: номер ломается при перерисовке окна, поэтому он не рекомендуется. Клики по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») заблокированы — для них спроси пользователя через askUser. Если элемент не найден, вернётся свежая карта с ref — кликай по ней. После клика проверяй результат через appRead.",
         parameters: {
           type: "object",
           properties: {
+            ref: { type: "string", description: "ref элемента из appRead, например e12" },
             text: { type: "string", description: "Видимый текст элемента (кнопка, вкладка, пункт меню)" },
+            role: { type: "string", description: "Роль: button, link, tab, checkbox (необязательно)" },
             selector: { type: "string", description: "CSS-селектор: #id или .class" },
-            index: { type: "integer", description: "Номер [N] элемента из appRead" },
+            index: { type: "integer", description: "Устарело: номер [N] из appRead (ненадёжен при перерисовке)" },
           },
         },
       },
@@ -530,14 +582,17 @@
       type: "function",
       function: {
         name: "appFill",
-        description: "Ввести текст в поле ввода в собственном окне приложения (URL провайдера, API-ключ, модель, путь и т.п.). selector — CSS-селектор поля (#id, .class, input[name=...]); text — вводимое значение. Работает с обычными и React-управляемыми полями. Значения бери ТОЛЬКО из настроек или от пользователя, не выдумывай.",
+        description: "Ввести текст в поле ввода в собственном окне приложения (URL провайдера, модель, путь и т.п.). Поле указывай через ref из appRead (ref: \"e4\" — надёжнее всего), label/placeholder (видимая подпись или подсказка) или selector (#id/.class). text — вводимое значение. Работает с обычными и React-управляемыми полями. Значения бери ТОЛЬКО из настроек или от пользователя; значения секретных полей (пароли, токены) в ответ не выводятся.",
         parameters: {
           type: "object",
           properties: {
+            ref: { type: "string", description: "ref поля из appRead, например e4" },
             selector: { type: "string", description: "Селектор поля: #id, .class, input[name=...]" },
+            label: { type: "string", description: "Видимая подпись поля (label)" },
+            placeholder: { type: "string", description: "Подсказка внутри поля" },
             text: { type: "string", description: "Значение для ввода" },
           },
-          required: ["selector", "text"],
+          required: ["text"],
         },
       },
     },
@@ -545,15 +600,16 @@
       type: "function",
       function: {
         name: "appSelect",
-        description: "Выбрать вариант в выпадающем списке (<select>) в собственном окне приложения. selector — селектор списка; value — атрибут value варианта или text — видимый текст варианта.",
+        description: "Выбрать вариант в выпадающем списке (<select>) в собственном окне приложения. Список указывай через ref из appRead, label (видимая подпись) или selector; value — атрибут value варианта, text — видимый текст варианта. Если варианта нет, вернёт реальный список вариантов.",
         parameters: {
           type: "object",
           properties: {
+            ref: { type: "string", description: "ref списка из appRead" },
             selector: { type: "string", description: "Селектор списка" },
+            label: { type: "string", description: "Видимая подпись списка" },
             value: { type: "string", description: "Значение варианта (атрибут value)" },
             text: { type: "string", description: "Или видимый текст варианта" },
           },
-          required: ["selector"],
         },
       },
     },
@@ -573,10 +629,11 @@
       type: "function",
       function: {
         name: "appWait",
-        description: "Ждать появления элемента в собственном окне приложения (после открытия панели, загрузки списка, действий пользователя). text — видимый текст или selector — CSS-селектор; timeout — миллисекунды ожидания (по умолчанию 20000).",
+        description: "Ждать появления элемента в собственном окне приложения (после открытия панели, загрузки списка, действий пользователя). Указывай ref из appRead, видимый text или selector; timeout — миллисекунды ожидания (по умолчанию 20000).",
         parameters: {
           type: "object",
           properties: {
+            ref: { type: "string", description: "ref ожидаемого элемента из appRead" },
             text: { type: "string", description: "Видимый текст ожидаемого элемента" },
             selector: { type: "string", description: "CSS-селектор ожидаемого элемента" },
             timeout: { type: "integer", description: "Таймаут в миллисекундах (по умолчанию 20000)" },
@@ -665,6 +722,7 @@
             command: { type: "string", description: "Команда для запуска в фоне" },
             name: { type: "string", description: "Короткое имя процесса (необязательно)" },
             cwd: { type: "string", description: "Рабочая папка процесса (необязательно)" },
+            shell: { type: "string", description: "Оболочка: cmd, powershell, pwsh, bash, sh (по умолчанию cmd на Windows, sh на macOS/Linux)" },
           },
           required: ["command"],
         },
@@ -1474,7 +1532,7 @@
       type: "function",
       function: {
         name: "installExe",
-        description: "Скачать установщик .exe по прямой ссылке и запустить его ТИХО (ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ). url — прямая ссылка на .exe; name — имя программы (для проверки после установки); silentArgs — аргументы тихой установки (по умолчанию /S). Если установка требует прав администратора — приложение подскажет runCommandAsAdmin.",
+        description: "Скачать установщик по прямой ссылке и запустить его (ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ). Поддерживаются .exe (запуск), .msi (через msiexec) и .zip (распаковка + поиск установщика внутри). url — прямая ссылка; name — имя программы (для проверки после установки); silentArgs — аргументы тихой установки (для .exe по умолчанию /S, для .msi — /passive /norestart); run: true — сразу запустить найденный в архиве установщик. Если установка требует прав администратора — приложение подскажет runCommandAsAdmin.",
         parameters: {
           type: "object",
           properties: { url: { type: "string", description: "Прямая ссылка на установщик .exe (https://...)" }, name: { type: "string", description: "Имя программы (необязательно)" }, silentArgs: { type: "string", description: "Аргументы тихой установки (по умолчанию /S)" } },
@@ -1741,14 +1799,29 @@
       type: "function",
       function: {
         name: "ycLogs",
-        description: "Yandex Cloud: показать логи ресурса (контейнера) за последние 3 часа. Требует установленного и авторизованного yc CLI (иначе подскажет, как это сделать). service — ключ сервиса, id — id ресурса (из ycList).",
+        description: "Yandex Cloud: показать логи ресурса за последние 3 часа. Читаются внутренним API приложения (Cloud Logging: лог-группы по REST, записи по gRPC) — внешний yc CLI не нужен, ycInstall для логов не требуется. id — id ресурса (из ycList); service — ключ сервиса (необязателен, сужает фильтр по типу ресурса); sinceHours — окно в часах (по умолчанию 3), limit — сколько записей (по умолчанию 100).",
         parameters: {
           type: "object",
           properties: {
-            service: { type: "string", description: "Ключ сервиса (serverlessContainers и др.)" },
+            service: { type: "string", description: "Ключ сервиса (необязательно): serverlessContainers | apiGateway | ydb | storage | dns | iam | lockbox | cdn | certificateManager | containerRegistry | logging | vpc" },
             id: { type: "string", description: "id ресурса (из ycList)" },
+            sinceHours: { type: "integer", description: "За сколько часов читать (1–168, по умолчанию 3)" },
+            limit: { type: "integer", description: "Сколько записей вернуть (1–500, по умолчанию 100)" },
           },
-          required: ["service", "id"],
+          required: ["id"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "ycInstall",
+        description: "Yandex Cloud: установить официальный yc CLI внутрь приложения (папка userData/bin, системных прав не требует) и добавить его в PATH всех команд агента. Нужен, только если в песочнице требуется сама команда yc (логи через ycLogs работают и без него). Токен и каталог подставляются автоматически (YC_TOKEN / YC_CLOUD_ID / YC_FOLDER_ID), поэтому yc init не нужен. force=true — переустановить поверх имеющегося.",
+        parameters: {
+          type: "object",
+          properties: {
+            force: { type: "boolean", description: "Переустановить, даже если yc CLI уже встроен" },
+          },
         },
       },
     },
@@ -2178,6 +2251,11 @@
     run_command: "runCommand",
     runcommand: "runCommand",
     browser_open: "browserOpen",
+    browser_snapshot: "browserSnapshot",
+    browsersnapshot: "browserSnapshot",
+    snapshot: "browserSnapshot",
+    dom: "browserSnapshot",
+    page_map: "browserSnapshot",
     browser_fill: "browserFill",
     browser_click: "browserClick",
     browser_select: "browserSelect",
@@ -2189,6 +2267,11 @@
     browser_status: "browserStatus",
     browser_clear_profile: "browserClearProfile",
     browserclearprofile: "browserClearProfile",
+    browser_connect: "browserConnect",
+    browserconnect: "browserConnect",
+    cdp: "browserConnect",
+    my_chrome: "browserConnect",
+    mychrome: "browserConnect",
     vault_list: "vaultList",
     vaultlist: "vaultList",
     vault_fill: "vaultFill",

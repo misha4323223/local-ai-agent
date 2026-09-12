@@ -39,7 +39,7 @@ const KNOWN_ENDPOINTS = {
   "cdn": "https://cdn.api.cloud.yandex.net",
   "logging": "https://logging.api.cloud.yandex.net",
   "vpc": "https://vpc.api.cloud.yandex.net",
-  "postbox": "https://postbox.api.cloud.yandex.net",
+  "postbox": "https://postbox.cloud.yandex.net",
 };
 
 let endpointsCache = null; // { serviceId: address }
@@ -94,6 +94,33 @@ function friendlyApiError(status, body, text) {
   if (body && body.code === 16) return "Недостаточно прав (16, UNAUTHENTICATED): " + (body.message || detail);
   if (body && body.code === 3) return "Неверный аргумент (3, INVALID_ARGUMENT): " + (body.message || detail);
   return prefix + detail;
+}
+
+// Сбои «запрос не дошёл» (сеть, таймаут, обрыв) — их имеет смысл повторить,
+// в отличие от ошибок API (401/403/404 — повтор ничего не изменит).
+function isNetworkError(e) {
+  const m = String((e && e.message) || e || "");
+  if (e && e.name === "AbortError") return true;
+  return /fetch failed|network|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|aborted|terminated/i.test(m);
+}
+
+function hostOf(url) {
+  try {
+    return new URL(String(url)).host;
+  } catch {
+    return String(url || "");
+  }
+}
+
+// Понятный текст ошибки сервиса + адрес, по которому стучались (видно сразу,
+// сетевой это сбой или ошибка API).
+function serviceError(e, base, path) {
+  const where = hostOf(base) + String(path || "");
+  if (e && e.name === "AbortError") return "Таймаут: " + where + " не ответил вовремя — повтори позже.";
+  if (isNetworkError(e)) {
+    return "Сеть: запрос к " + where + " не прошёл (" + String((e && e.message) || e).slice(0, 120) + ").";
+  }
+  return String((e && e.message) || e) + " [" + where + "]";
 }
 
 // ── Эндпоинты сервисов ──────────────────────────────────────────────────────
@@ -197,7 +224,7 @@ const SERVICES = [
   { key: "certificateManager", title: "Certificate Manager", icon: "🔐", svc: "certificate-manager", listPath: "/certificate-manager/v1/certificates", listKey: "certificates" },
   { key: "cdn", title: "Cloud CDN", icon: "🌍", svc: "cdn", listPath: "/cdn/v1/resources", listKey: "resources" },
   { key: "dns", title: "Cloud DNS", icon: "🌐", svc: "dns", listPath: "/dns/v1/zones", listKey: "zones" },
-  { key: "logging", title: "Cloud Logging", icon: "📜", svc: "logging", listPath: "/logging/v1/groups", listKey: "groups" },
+  { key: "logging", title: "Cloud Logging", icon: "📜", svc: "logging", listPath: "/logging/v1/logGroups", listKey: "groups" },
   { key: "postbox", title: "Cloud Postbox", icon: "📮", svc: "postbox", listPath: "/postbox/v1/addresses", listKey: "addresses" },
   { key: "containerRegistry", title: "Container Registry", icon: "📦", svc: "container-registry", listPath: "/container-registry/v1/registries", listKey: "registries" },
   { key: "iam", title: "Identity and Access Management", icon: "🗝️", svc: "iam", listPath: "/iam/v1/serviceAccounts", listKey: "serviceAccounts" },
@@ -213,33 +240,55 @@ function serviceByKey(key) {
 }
 
 // Список всех ресурсов каталога по одному сервису. Возвращает { count, items }.
-async function listService(oauthToken, folderId, svcDef) {
+async function listService(oauthToken, folderId, svcDef, opts) {
+  const o = opts || {};
   const token = await getIamToken(oauthToken);
   const base = await endpoint(svcDef.svc) || KNOWN_ENDPOINTS[svcDef.svc];
   if (!base) throw new Error("Эндпоинт сервиса «" + svcDef.title + "» не найден.");
   const q = folderId ? "folderId=" + encodeURIComponent(folderId) + "&pageSize=1000" : "pageSize=1000";
-  const j = await fetchJson(base + svcDef.listPath + "?" + q, {
-    headers: { Authorization: "Bearer " + token },
-  }, 20000);
-  const items = Array.isArray(j && j[svcDef.listKey]) ? j[svcDef.listKey] : [];
-  return { count: items.length, items };
+  const url = base + svcDef.listPath + "?" + q;
+  const tries = Math.max(1, o.retries == null ? 2 : parseInt(o.retries, 10) || 1);
+  let lastErr = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const j = await fetchJson(url, { headers: { Authorization: "Bearer " + token } }, o.timeoutMs || 25000);
+      const items = Array.isArray(j && j[svcDef.listKey]) ? j[svcDef.listKey] : [];
+      return { count: items.length, items };
+    } catch (e) {
+      lastErr = e;
+      // Повторяем только то, что может пройти со второй попытки.
+      const retriable = isNetworkError(e) || (e && e.status >= 500) || (e && e.status === 429);
+      if (!retriable || i === tries - 1) break;
+      await new Promise((r) => setTimeout(r, 700 * (i + 1)));
+    }
+  }
+  throw new Error(serviceError(lastErr, base, svcDef.listPath));
 }
 
 // Дашборд: все сервисы разом (каждый независимо). Возвращает массив
 // { key, title, icon, ok, count, error }.
-async function resourcesStatus(oauthToken, folderId) {
-  const token = await getIamToken(oauthToken);
-  const results = await Promise.allSettled(
-    SERVICES.map(async (svcDef) => {
-      try {
-        const r = await listService(oauthToken, folderId, svcDef);
-        return { key: svcDef.key, title: svcDef.title, icon: svcDef.icon, ok: true, count: r.count, items: r.items, error: "" };
-      } catch (e) {
-        return { key: svcDef.key, title: svcDef.title, icon: svcDef.icon, ok: false, count: 0, items: [], error: (e && e.message) || String(e) };
-      }
-    })
-  );
-  return results.map((r) => (r.status === "fulfilled" ? r.value : { ok: false, error: String(r.reason) }));
+async function resourcesStatus(oauthToken, folderId, opts) {
+  const o = opts || {};
+  // Раньше все 13 сервисов опрашивались залпом: поодиночке каждый отвечает,
+  // а вместе — таймауты. Идём небольшими пачками (по умолчанию 3).
+  const batch = Math.max(1, Math.min(parseInt(o.batch, 10) || 3, SERVICES.length));
+  await getIamToken(oauthToken); // обмен токена — один раз до опроса
+  const out = [];
+  for (let i = 0; i < SERVICES.length; i += batch) {
+    const chunk = SERVICES.slice(i, i + batch);
+    const res = await Promise.all(
+      chunk.map(async (svcDef) => {
+        try {
+          const r = await listService(oauthToken, folderId, svcDef, o);
+          return { key: svcDef.key, title: svcDef.title, icon: svcDef.icon, ok: true, count: r.count, items: r.items, error: "" };
+        } catch (e) {
+          return { key: svcDef.key, title: svcDef.title, icon: svcDef.icon, ok: false, count: 0, items: [], error: (e && e.message) || String(e) };
+        }
+      })
+    );
+    out.push(...res);
+  }
+  return out;
 }
 
 // ── Создание и удаление ресурсов ────────────────────────────────────────────
@@ -508,6 +557,9 @@ module.exports = {
   listFolders,
   listService,
   resourcesStatus,
+  isNetworkError,
+  hostOf,
+  serviceError,
   createResource,
   deleteResource,
   waitOperation,
