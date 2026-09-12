@@ -3288,7 +3288,6 @@ body { display: flex; flex-direction: column; }
 
 .plan-body { display: none; padding: 6px 11px 9px; }
 .plan-group.expanded .plan-body { display: block; }
-.plan-hint { font-size: 10.5px; color: var(--text-faint); margin-bottom: 5px; font-style: italic; }
 
 .plan-item {
   display: flex; align-items: flex-start; gap: 7px;

@@ -3517,7 +3517,7 @@ async function testPlanPanel() {
   const AgentCore = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
 
   // ── Срез блока плана: чистые функции + отрисовка (без остального приложения) ──
-  const p0 = appSrc.indexOf("  // ─────────── План работ:");
+  const p0 = appSrc.indexOf("  // ─────────── План работ (todoWrite):");
   const p1 = appSrc.indexOf("  // ─────────────── Рендер ───────────────", p0);
   assert.ok(p0 > 0 && p1 > p0, "не нашёл блок плана в app.js (маркеры съехали)");
   const planSrc = appSrc.slice(p0, p1);
@@ -3578,7 +3578,7 @@ async function testPlanPanel() {
   const mod = new Function(
     ...Object.keys(deps),
     planSrc +
-      "\nreturn { planProgress, planArchive, planFromModel, planAutoStep, planAutoResult, planRotate, planPending, renderPlanPanel, PLAN_ARCHIVE_LIMIT };"
+      "\nreturn { planProgress, planArchive, planFromModel, planToolOutcome, planRotate, planPending, renderPlanPanel, PLAN_ARCHIVE_LIMIT };"
   )(...Object.values(deps));
 
   await test("план: инструмент todoWrite есть в ядре, с алиасами и правилом промпта", () => {
@@ -3595,6 +3595,8 @@ async function testPlanPanel() {
     assert.ok(AgentCore.selectTools(8000).some((t) => t.function.name === "todoWrite"), "todoWrite отсутствует в ядре инструментов");
     // Правило промпта и список доступных инструментов.
     assert.ok(/^32\. План работ \(todoWrite\)/m.test(AgentCore.SYSTEM_PROMPT), "нет правила 32 про план");
+    assert.ok(/САМЫМ ПЕРВЫМ вызывай todoWrite/.test(AgentCore.SYSTEM_PROMPT), "правило 32 не требует план до первого инструмента");
+    assert.ok(/План НЕ нужен только для одного короткого действия/.test(AgentCore.SYSTEM_PROMPT), "правило 32 не оговаривает исключение для одношаговых задач");
     assert.ok(/todoWrite, checkpointSave/.test(AgentCore.SYSTEM_PROMPT), "todoWrite нет в списке доступных инструментов");
   });
 
@@ -3616,7 +3618,7 @@ async function testPlanPanel() {
     assert.strictEqual(AgentCore.normalizePlanTasks(["a", "a", "A"]).length, 1, "дубликаты не схлопнуты");
   });
 
-  await test("план модели: принимается, заменяется через историю, авто-шаги не мешают", () => {
+  await test("план модели: принимается и заменяется через историю (авто-шагов больше нет)", () => {
     const chat = { id: "c1", messages: [] };
     assert.strictEqual(mod.planFromModel(chat, { tasks: [{ text: "Разобрать", status: "done" }, { text: "Починить", status: "in_progress" }], title: "Задача" }), true);
     assert.strictEqual(chat.plan.source, "model");
@@ -3626,10 +3628,14 @@ async function testPlanPanel() {
     const junk = { id: "c-junk", messages: [] };
     assert.strictEqual(mod.planFromModel(junk, { tasks: [] }), false);
     assert.strictEqual(junk.plan, undefined);
-    // Пока план ведёт модель, авто-шаги не подменяют нумерацию.
-    assert.strictEqual(mod.planAutoStep(chat, { name: "runCommand" }), false);
+    // Вызовы инструментов панель больше не наполняют: её питает только todoWrite.
+    assert.strictEqual(mod.planToolOutcome(chat, { name: "runCommand" }, true), false, "успех инструмента тронул план модели");
     assert.strictEqual(chat.plan.source, "model");
-    assert.strictEqual(chat.plan.items.length, 2, "авто-шаг влез в план модели");
+    assert.strictEqual(chat.plan.items.length, 2, "план модели изменился от вызова инструмента");
+    // И чат без плана от работы инструментов плана не получает.
+    const bare = { id: "c-bare", messages: [] };
+    assert.strictEqual(mod.planToolOutcome(bare, { name: "runCommand" }, false), false);
+    assert.strictEqual(bare.plan, undefined, "инструмент создал план без todoWrite");
     // Новый план модели вытесняет прежний — но не теряет его.
     assert.strictEqual(mod.planFromModel(chat, { tasks: ["Только один"] }), true);
     assert.strictEqual(chat.plan.items.length, 1);
@@ -3642,42 +3648,40 @@ async function testPlanPanel() {
 
   await test("план модели: упавший шаг помечается ⚠️, успешный статус модели не трогает", () => {
     const chat = { id: "c", messages: [], plan: { source: "model", items: [{ id: "t1", text: "Починить", status: "in_progress", note: "" }] } };
-    assert.strictEqual(mod.planAutoResult(chat, { name: "runCommand" }, false), true, "падение шага не отмечено");
+    assert.strictEqual(mod.planToolOutcome(chat, { name: "runCommand" }, false), true, "падение шага не отмечено");
     assert.strictEqual(chat.plan.items[0].status, "failed");
     assert.ok(/не удал/i.test(chat.plan.items[0].note), "нет пояснения к провалу");
     chat.plan.items[0].status = "in_progress";
-    assert.strictEqual(mod.planAutoResult(chat, { name: "runCommand" }, true), false, "успех инструмента правит план модели");
+    assert.strictEqual(mod.planToolOutcome(chat, { name: "runCommand" }, true), false, "успех инструмента правит план модели");
     assert.strictEqual(chat.plan.items[0].status, "in_progress", "статус модели переписан");
   });
 
-  await test("авто-шаги: новый шаг закрывает предыдущий, результат ставит ✅ или ⚠️", () => {
+  await test("панель плана не наполняется из вызовов инструментов (авто-шагов больше нет)", () => {
     const chat = { id: "c2", messages: [] };
-    assert.strictEqual(mod.planAutoStep(chat, { name: "readFile" }), true);
-    assert.strictEqual(chat.plan.source, "auto");
-    assert.strictEqual(chat.plan.items[0].text, "Чтение файла", "нет человеческого названия шага");
-    mod.planAutoStep(chat, { name: "runCommand" });
-    assert.strictEqual(chat.plan.items[0].status, "done", "предыдущий шаг остался «в работе»");
-    assert.strictEqual(chat.plan.items[1].status, "in_progress");
-    mod.planAutoResult(chat, { name: "runCommand" }, true);
-    assert.strictEqual(chat.plan.items[1].status, "done");
-    // Ошибка инструмента — честный ⚠️, а не «готово».
-    mod.planAutoStep(chat, { name: "writeFile" });
-    mod.planAutoResult(chat, { name: "writeFile" }, false);
-    assert.strictEqual(chat.plan.items[2].status, "failed");
-    assert.ok(/ошибк/i.test(chat.plan.items[2].note));
-    // Прогресс считает и «в работе», и провалы.
-    const pr = mod.planProgress(chat.plan.items);
+    assert.strictEqual(mod.planToolOutcome(chat, { name: "readFile" }, true), false, "результат инструмента создал план");
+    assert.strictEqual(mod.planToolOutcome(chat, { name: "runCommand" }, false), false);
+    assert.strictEqual(chat.plan, undefined, "план появился без todoWrite");
+    // Прогресс по-прежнему считает и готовое, и провалы — но уже по плану модели.
+    const items = [
+      { id: "1", text: "Чтение файла", status: "done" },
+      { id: "2", text: "Команда в терминале", status: "done" },
+      { id: "3", text: "Изменение файла", status: "failed", note: "инструмент вернул ошибку" },
+    ];
+    const pr = mod.planProgress(items);
     assert.strictEqual(pr.total, 3);
     assert.strictEqual(pr.done, 2);
     assert.strictEqual(pr.failed, 1);
     assert.strictEqual(pr.percent, 100);
     assert.strictEqual(pr.finished, true);
+    // Следов авто-режима в интерфейсе не осталось.
+    assert.ok(!/planAuto/.test(appSrc), "в app.js остались авто-шаги");
+    assert.ok(appSrc.indexOf("план не задан") === -1, "осталась подпись «план не задан»");
+    assert.ok(appSrc.indexOf("PLAN_AUTO_MAX") === -1, "остался лимит авто-шагов");
+    assert.ok(appSrc.indexOf("plan-hint") === -1, "остался стиль подписи про не заданный план");
+    assert.ok(cssSrc.indexOf(".plan-hint") === -1, "мёртвый стиль .plan-hint остался в styles.css");
   });
 
   await test("поворот плана: завершённый уходит в историю, незавершённый остаётся", () => {
-    const auto = { messages: [], plan: { source: "auto", items: [{ id: "a1", text: "x", status: "done" }] } };
-    assert.strictEqual(mod.planRotate(auto), true, "авто-шаги не сброшены на новом запросе");
-    assert.strictEqual(auto.plan, null);
     const model = { messages: [] };
     mod.planFromModel(model, { tasks: [{ text: "A", status: "done" }, { text: "B", status: "pending" }] });
     assert.strictEqual(mod.planRotate(model), false, "незавершённый план сброшен");
@@ -3712,11 +3716,12 @@ async function testPlanPanel() {
     // Клик по заголовку сворачивает.
     host.children[0].children[0].onclick({ stopPropagation() {} });
     assert.ok(!hosts["plan-panel"].children[0].classList.contains("expanded"), "клик не свернул панель");
-    // Авто-план честно подписан как «не план».
+    // Старый авто-план из chats.json (source «auto») панелью не показывается вовсе:
+    // панель существует только для плана модели, иначе дублировала бы панель действий.
     activeChat = { id: "c4", messages: [], plan: { source: "auto", items: [{ id: "a1", text: "Команда в терминале", status: "in_progress", note: "" }] } };
     mod.renderPlanPanel();
-    assert.ok(nodeText(hosts["plan-panel"]).indexOf("план не задан") !== -1, "нет пометки, что план не задан");
-    assert.ok(nodeText(hosts["plan-panel"]).indexOf("Ход работы") !== -1, "нет заголовка «Ход работы»");
+    assert.ok(hosts["plan-panel"].classList.contains("hidden"), "авто-план всё ещё рисуется панелью");
+    assert.strictEqual(hosts["plan-panel"].children.length, 0, "в панели остались строки авто-плана");
   });
 
   await test("панель: «▶ Выполнить» только для плана из режима плана, «✕» уводит план в историю", () => {
@@ -3745,8 +3750,8 @@ async function testPlanPanel() {
     assert.ok(/normalizePlanTasks,\n  planSummary,/.test(mainSrc), "нормализатор не импортирован в main.js");
     assert.ok(/case "plan": \{/.test(appSrc), "интерфейс не обрабатывает событие plan");
     assert.ok(/planFromModel\(chat, ev\)/.test(appSrc), "событие plan не доходит до состояния");
-    assert.ok(/if \(planAutoStep\(chat, ev\)\) renderPlanPanel\(\);/.test(appSrc), "tool_start не питает авто-шаги");
-    assert.ok(/if \(planAutoResult\(chat, ev, toolOk\)\) renderPlanPanel\(\);/.test(appSrc), "tool_result не закрывает шаги");
+    assert.ok(/if \(planToolOutcome\(chat, ev, toolOk\)\) renderPlanPanel\(\);/.test(appSrc), "tool_result не проверяет фактический провал шага модели");
+    assert.ok(/source: "auto"/.test(appSrc) === false, "в app.js осталось создание авто-плана из вызовов инструментов");
     assert.ok(/if \(planRotate\(getActiveChat\(\)\)\) renderPlanPanel\(\);/.test(appSrc), "новый запрос не поворачивает план");
     assert.ok(/renderPlanPanel\(\);\n    const chat = getActiveChat\(\);|renderPlanPanel\(\);/.test(appSrc), "панель не перерисовывается вместе с чатом");
     // Веб-режим: todoWrite работает как структура, а не «недоступно в веб-версии».
@@ -3767,6 +3772,21 @@ async function testPlanPanel() {
     assert.ok(/if \(c\.plan !== undefined\)/.test(appSrc), "sanitizeChats не проверяет план");
     assert.ok(/Array\.isArray\(c\.plan\.items\)/.test(appSrc), "sanitizeChats не отвергает повреждённый план");
     assert.ok(/c\.planHistory = c\.planHistory\.slice\(0, PLAN_ARCHIVE_LIMIT\)/.test(appSrc), "история планов не ограничивается при загрузке");
+  });
+
+  await test("План-режим: модель получает ровно todoWrite, остальные вызовы не выполняются", () => {
+    // Раньше в этом режиме список инструментов был пуст — прислать план структурой
+    // модель физически не могла, и панель оставалась пустой до кнопки «▶ Выполнить».
+    assert.strictEqual(AgentCore.PLAN_MODE_TOOL_DEFINITIONS.length, 1, "в План-режиме не ровно один инструмент");
+    assert.strictEqual(AgentCore.PLAN_MODE_TOOL_DEFINITIONS[0].function.name, "todoWrite", "в План-режиме нет todoWrite");
+    assert.ok(/const activeTools = planMode \? PLAN_MODE_TOOL_DEFINITIONS : selectTools\(budget\);/.test(mainSrc), "План-режим не получает набор с todoWrite");
+    assert.ok(/tools: activeTools,/.test(mainSrc), "в запрос уходит не activeTools");
+    assert.ok(mainSrc.indexOf("tools: planMode ? [] : activeTools") === -1, "осталось старое обнуление инструментов");
+    // Исполнение: в этом режиме выполняется только todoWrite, остальное — честный отказ.
+    assert.ok(/if \(planMode && c\.name !== "todoWrite"\)/.test(mainSrc), "нет запрета выполнять инструменты в План-режиме");
+    assert.ok(/canonical\.push\(\{ role: "tool", tool_call_id: c\.id, content: blocked \}\)/.test(mainSrc), "отказ не возвращается модели");
+    assert.ok(/доступен только todoWrite/.test(mainSrc), "режимный текст промпта не обновлён");
+    assert.ok(/единственный доступный там инструмент/.test(AgentCore.SYSTEM_PROMPT), "правило 32 не знает про набор План-режима");
   });
 
   await test("план: битый план в chats.json не мешает запуску (sanitizeChats)", () => {
@@ -3790,6 +3810,7 @@ async function testPlanPanel() {
         { id: "c1", messages: [], plan: { source: "model", title: "T", items: [{ text: "A", status: "done" }, { text: "" }] }, planHistory: [{ items: [1, 2, 3, 4, 5, 6, 7] }, {}, {}, {}, {}, {}, {}] },
         { id: "c2", messages: [], plan: { items: "не массив" } },
         { id: "c3", messages: [] },
+        { id: "c4", messages: [], plan: { source: "auto", title: "Ход работы", items: [{ text: "A", status: "done" }] } },
       ],
     });
     assert.strictEqual(out.chats[0].plan.items.length, 1, "нормализация плана не сработала: " + JSON.stringify(out.chats[0].plan));
@@ -3797,6 +3818,428 @@ async function testPlanPanel() {
     assert.strictEqual(out.chats[0].planHistory.length, AgentCore.PLAN_MAX_ITEMS, "история не обрезана");
     assert.strictEqual(out.chats[1].plan, null, "битый план не сброшен");
     assert.strictEqual(out.chats[2].plan, undefined, "чату без плана добавили поле plan");
+    assert.strictEqual(out.chats[3].plan, null, "legacy-план «auto» не убран при загрузке");
+  });
+}
+
+// ── 1d. Слои поверх страницы: диалоги, force-клик, JS на странице ───────────
+// Повод — консоль Google Cloud: чекбокс согласия и «Agree and continue» лежали в
+// .cdk-overlay-container, не попадали в карту (диалог дописан в конец <body> и
+// отрезался лимитом строк), а клик падал на проверке «элемент под курсором».
+// Здесь проверяем поведенчески: карта видит диалог, клик повторяется, JS и HTML
+// доступны, помехи закрываются, а юридические согласия сами не подтверждаются.
+async function testBrowserOverlays() {
+  const bt = require(path.join(ROOT, "src", "browser-tools.js"));
+  const dom = require(path.join(ROOT, "src", "dom-map.js"));
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+  const AgentCore = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+
+  // ── Мини-DOM с диалогом поверх страницы ──
+  const mkEl = (tag, attrs, opts) => {
+    const a = Object.assign({}, attrs || {});
+    const o = opts || {};
+    return {
+      tagName: String(tag).toUpperCase(),
+      id: a.id || "",
+      className: a.class || "",
+      innerText: a.__text || "",
+      textContent: a.__text || "",
+      isContentEditable: false,
+      onclick: null,
+      disabled: false,
+      checked: !!a.__checked,
+      shadowRoot: o.shadowRoot || null,
+      labels: [],
+      __style: o.style || null,
+      getAttribute: (n) => (n in a ? a[n] : null),
+      setAttribute: (n, v) => { a[n] = v; },
+      getBoundingClientRect: () => o.rect || { top: 120, left: 120, bottom: 150, right: 320, width: 200, height: 30 },
+      closest: (sel) => (o.closest ? o.closest(String(sel)) : null),
+      querySelector: () => null,
+      querySelectorAll: () => [],
+    };
+  };
+  const transparent = { visibility: "visible", display: "block", opacity: "0", pointerEvents: "auto" };
+  const visible = { visibility: "visible", display: "block", opacity: "1", pointerEvents: "auto" };
+
+  // Диалог: контейнер + внутри прозрачная галочка и кнопка согласия.
+  const dialogHost = mkEl(
+    "div",
+    {
+      class: "cdk-overlay-pane",
+      "aria-label": "Welcome Misha Pimashin",
+      __text:
+        "Welcome Misha Pimashin! Create and manage your Google Cloud instances. " +
+        "You must accept these terms of service to continue. I agree to the Google Cloud Platform Terms of Service",
+    },
+    {}
+  );
+  // closest умеет искать по селектору, как настоящий DOM: панель диалога
+  // возвращается только на overlay-селектор, на "label" — null (иначе подпись
+  // кнопки подменилась бы текстом всего диалога).
+  const OVERLAY_RE = /cdk-overlay|\[role=dialog\]|\[role=alertdialog\]|aria-modal|modal|goog-te|skiptranslate/i;
+  const inDialog = (sel) => (OVERLAY_RE.test(String(sel || "")) ? dialogHost : null);
+  const checkbox = mkEl("input", { type: "checkbox", "aria-label": "I agree to the Terms of Service" }, { style: transparent, closest: inDialog });
+  const agreeBtn = mkEl("button", { __text: "Agree and continue" }, { style: visible, closest: inDialog });
+  const pageButtons = [];
+  for (let i = 0; i < 70; i++) pageButtons.push(mkEl("button", { __text: "Обычная кнопка " + i }, { style: visible }));
+  // Кнопка внутри shadow DOM: обычный querySelectorAll её не видит.
+  const shadowInner = mkEl("button", { __text: "Внутри веб-компонента" }, { style: visible });
+  const shadowHost = mkEl("my-widget", {}, { shadowRoot: { querySelectorAll: () => [shadowInner] }, style: visible });
+  const nodes = pageButtons.concat([shadowHost, checkbox, agreeBtn]);
+
+  global.window = {
+    __aiAgentRefSeq: 0,
+    innerHeight: 900,
+    innerWidth: 1400,
+    getComputedStyle: (el) => (el && el.__style) || visible,
+  };
+  global.document = { title: "Google Cloud", querySelectorAll: () => nodes, getElementById: () => null };
+  global.location = { href: "https://console.cloud.google.com/" };
+  let map = null;
+  try {
+    await test("карта: диалог поверх страницы виден, помечен и не режется лимитом", async () => {
+      map = await bt.collectMap({ evaluate: (fn) => Promise.resolve(fn()) });
+      const dlg = map.items.filter((i) => i.inDialog);
+      assert.ok(dlg.length >= 2, "элементы диалога не попали в карту: " + JSON.stringify(map.items.slice(0, 3)));
+      assert.strictEqual(map.items[0].inDialog, true, "диалог не первым в карте");
+      assert.ok(/Welcome Misha/.test(map.items[0].dialogName), "имя диалога не подхвачено: " + map.items[0].dialogName);
+      const box = map.items.find((i) => i.type === "checkbox");
+      assert.ok(box, "прозрачный чекбокс согласия не найден");
+      assert.strictEqual(box.hiddenInput, true, "чекбокс не помечен как скрытый ввод");
+      assert.ok(/terms of service/i.test(box.name || ""), "нет имени чекбокса: " + box.name);
+      assert.ok(map.items.some((i) => /Agree and continue/.test(i.name || "")), "кнопки согласия нет в карте");
+      // Тень: элемент из shadow-root тоже попал в карту.
+      assert.ok(map.items.some((i) => /Внутри веб-компонента/.test(i.name || "")), "shadow DOM не обойдён");
+      // Сводка слоёв и классификация.
+      assert.ok(map.overlays.length >= 1, "нет сводки слоёв");
+      assert.strictEqual(bt.overlayKind(map.overlays[0]), "terms", "диалог согласия распознан неверно");
+      // Карта для агента: диалог первым, с предупреждением и подсказками.
+      const text = dom.formatSnapshot({ items: map.items, url: map.url, title: map.title, limit: 5, filter: "" });
+      assert.ok(/Поверх страницы открыт диалог/.test(text), "нет предупреждения о диалоге поверх страницы");
+      assert.ok(/скрытый ввод/.test(text), "нет пометки про скрытый ввод");
+      const firstRows = text.split("\n").filter((l) => /\be\d+\b/.test(l));
+      assert.ok(/Agree and continue/.test(firstRows.slice(0, 4).join(" ")), "кнопка согласия не в начале списка: " + firstRows.slice(0, 4).join(" | "));
+    });
+
+    await test("слои: классификация terms / translate / cookie / dialog", () => {
+      const cases = [
+        [{ name: "Welcome", cls: "cdk-overlay-pane", text: "You must accept these terms of service to continue" }, "terms"],
+        [{ name: "", cls: "goog-te-banner-frame skiptranslate", text: "Перевести страницу? Не сейчас" }, "translate"],
+        [{ name: "", cls: "", text: "Мы используем cookie. Принять все" }, "cookie"],
+        [{ name: "Оплата", cls: "", text: "Введите данные карты" }, "dialog"],
+        [{ name: "", cls: "notice", text: "Понятно, закрыть" }, "noise"],
+      ];
+      for (const [o, want] of cases) {
+        assert.strictEqual(bt.overlayKind(o), want, JSON.stringify(o) + " → " + bt.overlayKind(o));
+      }
+    });
+
+    await test("помехи: закрываются перевод и «Не сейчас», юридическое — нет", () => {
+      const clicked = [];
+      const trIframe = mkEl("iframe", { class: "goog-te-banner-frame" }, { style: visible });
+      trIframe.style = { display: "" };
+      const notNow = mkEl("button", { __text: "Не сейчас" }, { style: visible, closest: () => dialogHost });
+      const acceptAll = mkEl("button", { __text: "Принять все" }, { style: visible, closest: () => dialogHost });
+      const outsideSafe = mkEl("button", { __text: "Закрыть" }, { style: visible, closest: () => null });
+      notNow.click = () => clicked.push("Не сейчас");
+      acceptAll.click = () => clicked.push("Принять все");
+      outsideSafe.click = () => clicked.push("Закрыть-вне-слоя");
+      const all = [trIframe, notNow, acceptAll, outsideSafe];
+      global.document = {
+        title: "T",
+        querySelectorAll: (sel) => (String(sel).indexOf("button") >= 0 || String(sel).indexOf("div") >= 0 ? all : trIframe === null ? [] : [trIframe]),
+        getElementById: () => null,
+      };
+      const report = bt.cleanupInPage();
+      assert.ok(clicked.indexOf("Не сейчас") >= 0, "безопасная кнопка слоя не нажата: " + JSON.stringify(clicked));
+      assert.strictEqual(clicked.indexOf("Принять все"), -1, "нажата юридическая кнопка «Принять все»!");
+      assert.strictEqual(clicked.indexOf("Закрыть-вне-слоя"), -1, "нажата кнопка вне слоя поверх страницы");
+      assert.ok(/перевода/.test(report.join(" ")), "окно перевода не скрыто: " + report.join("; "));
+      assert.ok(trIframe.style.display === "none", "iframe перевода не скрыт");
+    });
+
+    await test("подтверждение согласия: отмечает галочку и жмёт кнопку согласия", () => {
+      const acted = [];
+      const box = mkEl("input", { type: "checkbox" }, { style: transparent, closest: () => dialogHost });
+      box.click = () => acted.push("галочка");
+      const agree = mkEl("button", { __text: "Agree and continue" }, { style: visible, closest: () => dialogHost });
+      agree.click = () => acted.push("agree");
+      const disagree = mkEl("button", { __text: "Не согласен" }, { style: visible, closest: () => dialogHost });
+      disagree.click = () => acted.push("disagree");
+      const outside = mkEl("button", { __text: "Agree" }, { style: visible, closest: () => null });
+      outside.click = () => acted.push("outside");
+      const boxes = [box];
+      const btns = [disagree, agree, outside];
+      global.document = {
+        title: "T",
+        querySelectorAll: (sel) => (String(sel).indexOf("checkbox") >= 0 ? boxes : btns),
+        getElementById: () => null,
+      };
+      const report = bt.acceptTermsInPage();
+      assert.ok(acted.indexOf("галочка") >= 0, "галочка согласия не отмечена: " + JSON.stringify(acted));
+      assert.ok(acted.indexOf("agree") >= 0, "кнопка согласия не нажата: " + JSON.stringify(acted));
+      assert.strictEqual(acted.indexOf("disagree"), -1, "нажата кнопка «Не согласен»");
+      assert.strictEqual(acted.indexOf("outside"), -1, "нажата кнопка вне слоя");
+      assert.ok(report.length >= 2, "отчёт пуст: " + JSON.stringify(report));
+    });
+  } finally {
+    delete global.window;
+    delete global.document;
+    delete global.location;
+  }
+
+  // ── Клик: перекрытый элемент всё равно нажимается ──
+  const mkClickPage = (mode) => {
+    const log = { plain: 0, force: 0, dom: 0, mouse: 0 };
+    const locator = {
+      first() { return this; },
+      async count() { return 1; },
+      async isVisible() { return true; },
+      async scrollIntoViewIfNeeded() {},
+      async click(opts) {
+        const force = !!(opts && opts.force);
+        if (mode === "plain") { log.plain++; return; }
+        if (mode === "force") {
+          if (!force) { log.plain++; throw new Error('div.cdk-overlay-backdrop intercepts pointer events'); }
+          log.force++;
+          return;
+        }
+        if (mode === "dom") { log.plain++; throw new Error("timeout: element is not stable"); }
+        throw new Error("совсем не нажимается");
+      },
+      async evaluate() {
+        if (mode === "mouse") throw new Error("element is not attached to the DOM");
+        return "div.cdk-overlay-backdrop «Войти»";
+      },
+      async boundingBox() { return { x: 100, y: 200, width: 80, height: 20 }; },
+    };
+    const page = {
+      url: () => "https://console.cloud.google.com/",
+      async title() { return "Console"; },
+      locator: () => locator,
+      getByRole: () => locator,
+      getByText: () => locator,
+      getByLabel: () => locator,
+      getByPlaceholder: () => locator,
+      on() {},
+      async goto() {},
+      async waitForTimeout() {},
+      keyboard: { async press() {}, async insertText() {} },
+      mouse: { async click(x, y) { log.mouse++; log.mouseAt = [x, y]; } },
+    };
+    return { page, log };
+  };
+  const Module_ = require("module");
+  const origRequire = Module_.prototype.require;
+  const useFake = (page) => {
+    Module_.prototype.require = function (id) {
+      if (id === "playwright") {
+        return {
+          chromium: {
+            executablePath: () => "",
+            async launch() {
+              return { isConnected: () => true, on() {}, async newPage() { return page; }, async close() {} };
+            },
+            async launchPersistentContext() {
+              return { pages: () => [page], on() {}, async newPage() { return page; }, async close() {} };
+            },
+          },
+        };
+      }
+      return origRequire.apply(this, arguments);
+    };
+  };
+  try {
+    bt.setProfileDir("");
+    for (const [mode, expect] of [["plain", /обычный клик/], ["force", /force-клик/], ["dom", /клик из DOM/], ["mouse", /клик мышью/]]) {
+      const { page, log } = mkClickPage(mode);
+      useFake(page);
+      bt.setPlaywright(null);
+      await bt.stop().catch(() => {});
+      const open = await bt.open({ url: "https://console.cloud.google.com/" });
+      assert.ok(/открыта/.test(open), "вкладка не открылась: " + open.slice(0, 80));
+      await test("клик (" + mode + "): перекрытый элемент всё равно нажимается", async () => {
+        const r = await bt.click({ ref: "e1" });
+        assert.ok(expect.test(r), "способ не сработал: " + r.slice(0, 120));
+        if (mode === "force") {
+          assert.strictEqual(log.force, 1, "force-клик не вызван");
+          assert.ok(/cdk-overlay-backdrop/.test(r), "слой-перекрытие не назван: " + r);
+        }
+        if (mode === "mouse") assert.ok(log.mouse >= 1, "клик мышью по координатам не сделан");
+      });
+      await bt.close({ tabId: "all" }).catch(() => {});
+    }
+  } finally {
+    Module_.prototype.require = origRequire;
+    await bt.stop().catch(() => {});
+    bt.setPlaywright(null);
+  }
+
+  // ── JS и HTML на странице ──
+  const mkEvalPage = (handler) => ({
+    url: () => "https://x.ru/",
+    async title() { return "T"; },
+    locator: () => ({ first() { return this; }, async count() { return 1; }, async isVisible() { return true; }, async click() {}, async evaluate() { return ""; } }),
+    getByRole: () => ({ first() { return this; }, async count() { return 1; }, async isVisible() { return true; }, async click() {} }),
+    on() {},
+    async goto() {},
+    evaluate: handler,
+  });
+  try {
+    const { page, log } = (() => {
+      const calls = [];
+      return { page: mkEvalPage(async (fn, arg) => { calls.push({ fn, arg }); return "ЗАГОЛОВОК"; }), log: calls };
+    })();
+    useFake(page);
+    bt.setPlaywright(null);
+    await bt.stop().catch(() => {});
+    await bt.open({ url: "https://x.ru/" });
+    await test("browserEval: выражение оборачивается в return, результат отдаётся текстом", async () => {
+      const r = await bt.evalJs({ script: "document.title" });
+      assert.ok(/ЗАГОЛОВОК/.test(r), "результат не вернулся: " + r);
+      assert.ok(/return \(document\.title\);/.test(String(log[log.length - 1].fn)), "выражение не обёрнуто в return: " + log[log.length - 1].fn);
+      const code = await bt.evalJs({ script: "const a = 1; return a + 1;" });
+      assert.ok(/return a \+ 1;/.test(String(log[log.length - 1].fn)), "код со своим return переписан: " + log[log.length - 1].fn);
+      assert.ok(!/return \(const/.test(String(log[log.length - 1].fn)), "код со своим return обёрнут повторно");
+      assert.ok(/укажи script/.test(await bt.evalJs({})), "пустой script не объяснён");
+    });
+    await test("browserDOM: HTML элемента, лимит и «не найдено»", async () => {
+      useFake(mkEvalPage(async (fn, arg) => {
+        global.document = {
+          querySelector: (s) => (s === ".cdk-overlay-pane" ? { outerHTML: "<div class=\"cdk-overlay-pane\">x</div>", innerText: "Диалог", tagName: "DIV" } : null),
+          querySelectorAll: () => [{}, {}],
+        };
+        try {
+          return fn(arg);
+        } finally {
+          delete global.document;
+        }
+      }));
+      bt.setPlaywright(null);
+      await bt.stop().catch(() => {});
+      await bt.open({ url: "https://x.ru/" });
+      const r = await bt.domHtml({ selector: ".cdk-overlay-pane", limit: 500 });
+      assert.ok(/cdk-overlay-pane/.test(r) && /Диалог/.test(r), "HTML не вернулся: " + r.slice(0, 120));
+      assert.ok(/совпадений на странице: 2/.test(r), "нет количества совпадений: " + r.slice(0, 160));
+      const miss = await bt.domHtml({ selector: ".нет-такого" });
+      assert.ok(/ничего не нашлось/.test(miss), "промах не объяснён: " + miss);
+      assert.ok(/укажи selector/.test(await bt.domHtml({})), "пустой аргумент не объяснён");
+      // shadow DOM: обычный querySelector не находит, поиск уходит внутрь корня
+      useFake(mkEvalPage(async (fn, arg) => {
+        const inner = { outerHTML: "<button>В тени</button>", tagName: "BUTTON", innerText: "В тени" };
+        const host = { shadowRoot: { querySelector: (s) => (s === ".in-shadow" ? inner : null), querySelectorAll: () => [] } };
+        global.document = {
+          querySelector: () => null,
+          querySelectorAll: (s) => (s === "*" ? [host] : []),
+        };
+        try {
+          return fn(arg);
+        } finally {
+          delete global.document;
+        }
+      }));
+      bt.setPlaywright(null);
+      await bt.stop().catch(() => {});
+      await bt.open({ url: "https://x.ru/" });
+      const shadow = await bt.domHtml({ selector: ".in-shadow" });
+      assert.ok(/В тени/.test(shadow), "shadow DOM не обойдён: " + shadow.slice(0, 140));
+    });
+    await test("browserOverlays: согласие не подтверждается само, помехи — по флагу", async () => {
+      const cleanupCalls = [];
+      useFake(mkEvalPage(async (fn) => {
+        if (String(fn.name).indexOf("cleanup") >= 0) { cleanupCalls.push(1); return ["нажато «не сейчас»"]; }
+        if (String(fn.name).indexOf("acceptTerms") >= 0) { cleanupCalls.push(2); return ["отмечена галочка"]; }
+        return {
+          url: "https://console.cloud.google.com/",
+          title: "Console",
+          items: [
+            { ref: "e1", tag: "input", type: "checkbox", roleAttr: "", text: "", ariaLabel: "I agree to the Terms of Service", checked: false, inDialog: true, dialogName: "Welcome", hiddenInput: true, inViewport: true, cls: "cdk-overlay-pane-input" },
+          ],
+          overlays: [{ name: "Welcome", text: "You must accept these terms of service to continue", cls: "cdk-overlay-pane", tag: "div" }],
+        };
+      }));
+      bt.setPlaywright(null);
+      await bt.stop().catch(() => {});
+      await bt.open({ url: "https://console.cloud.google.com/" });
+      const plain = await bt.overlays({});
+      assert.ok(/юридическое согласие/i.test(plain), "нет предупреждения про юридическое согласие: " + plain.slice(0, 200));
+      assert.ok(cleanupCalls.indexOf(1) === -1, "помехи закрыты без флага dismiss");
+      assert.ok(cleanupCalls.indexOf(2) === -1 && !/Подтверждение согласия/.test(plain), "согласие подтверждено само!");
+      const dismissed = await bt.overlays({ dismiss: true });
+      assert.ok(cleanupCalls.indexOf(1) >= 0, "dismiss не вызвал очистку помех");
+      assert.ok(/Закрытие помех/.test(dismissed), "нет отчёта о закрытии помех: " + dismissed.slice(0, 200));
+      const accepted = await bt.overlays({ acceptTerms: true });
+      assert.ok(cleanupCalls.indexOf(2) >= 0, "acceptTerms не сработал");
+      assert.ok(/Подтверждение согласия/.test(accepted), "нет отчёта о подтверждении: " + accepted.slice(0, 200));
+    });
+    await test("карта: помехи и юридическое согласие видны даже без элементов в слое", async () => {
+      useFake(mkEvalPage(async () => ({
+        url: "https://console.cloud.google.com/",
+        title: "Console",
+        items: [],
+        overlays: [
+          { name: "", cls: "goog-te-banner-frame skiptranslate", text: "Перевести страницу? Не сейчас", tag: "iframe" },
+          { name: "Welcome", cls: "cdk-overlay-pane", text: "You must accept these terms of service to continue", tag: "div" },
+        ],
+      })));
+      bt.setPlaywright(null);
+      await bt.stop().catch(() => {});
+      await bt.open({ url: "https://console.cloud.google.com/" });
+      const text = await bt.snapshot({});
+      assert.ok(/Поверх страницы помехи: окно перевода Google/.test(text), "нет предупреждения о помехе: " + text.slice(0, 220));
+      assert.ok(/browserOverlays \{ dismiss: true \}/.test(text), "нет подсказки убрать помеху");
+      assert.ok(/юридического согласия/.test(text), "нет предупреждения о согласии: " + text.slice(0, 260));
+      assert.ok(/acceptTerms: true/.test(text), "нет подсказки пройти согласие осознанно");
+    });
+
+    await test("browserScreenshot: файл на диске + путь агенту, data URL только по запросу", async () => {
+      const png = Buffer.from("89504e470d0a1a0a", "hex");
+      const page = mkEvalPage(async () => null);
+      page.screenshot = async () => png;
+      useFake(page);
+      bt.setPlaywright(null);
+      await bt.stop().catch(() => {});
+      await bt.open({ url: "https://x.ru/" });
+      const dir = path.join(tmpdir("agent-shots-"), "shots");
+      const r = await bt.screenshot({ dir });
+      assert.ok(/скриншот сохранён/.test(r), "нет подтверждения сохранения: " + r.slice(0, 120));
+      const m = r.match(/сохранён в файл: (.+\.png)/);
+      assert.ok(m && fs.existsSync(m[1]), "файла нет на диске: " + r.slice(0, 160));
+      assert.ok(fs.readFileSync(m[1]).equals(png), "содержимое файла не совпало");
+      assert.ok(/analyzeImage/.test(r), "нет подсказки про разбор");
+      const data = await bt.screenshot({ dir, dataUrl: true });
+      assert.ok(/^data:image\/png;base64,/.test(data), "data URL не вернулся по запросу");
+    });
+  } finally {
+    Module_.prototype.require = origRequire;
+    await bt.stop().catch(() => {});
+    bt.setPlaywright(null);
+  }
+
+  await test("слои поверх страницы: инструменты, промпт и main.js согласованы", () => {
+    for (const t of ["browserEval", "browserDOM", "browserOverlays"]) {
+      assert.ok(new RegExp('case "' + t + '": \\{').test(mainSrc), "в main.js нет обработчика " + t);
+      assert.ok(coreSrc.indexOf('name: "' + t + '"') !== -1, "нет определения " + t + " в ядре");
+      assert.ok(AgentCore.SYSTEM_PROMPT.indexOf(t) !== -1, t + " нет в списке доступных инструментов");
+    }
+    assert.ok(/browserOverlays \{ dismiss: true \}/.test(AgentCore.SYSTEM_PROMPT), "промпт не учит закрывать помехи");
+    assert.ok(/terms of service\) молча не подтверждай/.test(AgentCore.SYSTEM_PROMPT), "промпт не запрещает молчаливое согласие");
+    assert.ok(/screenshotFile\(Object\.assign\(\{\}, args, \{ dir: shotDir \}\)\)/.test(mainSrc), "скриншот не сохраняется файлом");
+    assert.ok(/Vision-модель не ответила/.test(mainSrc), "нет честного сообщения, когда зрение не ответило");
+    assert.ok(/activeEmit\(\{ type: "image", path: shot\.path/.test(mainSrc), "скриншот не показывается пользователю");
+    for (const a of ["browser_eval", "run_js", "browser_dom", "browser_overlays", "overlays", "dismiss_overlays"]) {
+      assert.ok(AgentCore.normalizeToolName(a).indexOf("browser") === 0, "алиас " + a + " не ведёт к браузерному инструменту");
+    }
+    // Карта не должна терять диалог: сортировка в collectMap + защита в formatSnapshot.
+    const btSrc = fs.readFileSync(path.join(ROOT, "src", "browser-tools.js"), "utf8");
+    assert.ok(/items\.sort\(\(a, b\) => \(b\.inDialog \? 1 : 0\)/.test(btSrc), "collectMap не поднимает диалог наверх");
+    const domSrc = fs.readFileSync(path.join(ROOT, "src", "dom-map.js"), "utf8");
+    assert.ok(/const dialogItems = shown\.filter\(\(it\) => it\.inDialog\);/.test(domSrc), "formatSnapshot не защищает диалог от обрезки");
+    assert.strictEqual(/app\.js/.test("app.js"), true);
+    assert.ok(appSrc.length > 0, "app.js не прочитан");
   });
 }
 
@@ -3813,6 +4256,7 @@ async function testPlanPanel() {
   await testOta();
   await testBrowserTools();
   await testBrowserBrain();
+  await testBrowserOverlays();
   await testHighlight();
   await testMobileBridge();
   await testChatPersistence();

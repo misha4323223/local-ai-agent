@@ -38,7 +38,7 @@
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
 20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), установка скачанного установщика — installExe (умеет .exe, .msi и .zip; спросит подтверждение). ВАЖНО про оболочку: по умолчанию на Windows команды идут в cmd.exe, на macOS/Linux — в sh. Для PowerShell и bash есть параметр shell у runCommand и startBackground: shell: "powershell" — настоящий PowerShell с включённым UTF-8 (кириллица, $, кавычки и 2>$null работают как в консоли, обёртка powershell -Command не нужна), shell: "bash" — bash (на Windows это Git Bash, ставится вместе с Git for Windows), sh ищется там же. Если не знаешь, какие оболочки есть на машине, вызови shellsStatus — он покажет доступные с путями и подсказкой, что установить; не выясняй это методом проб (bash/sh на Windows без Git for Windows отсутствуют).
-21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url) и СРАЗУ зови browserSnapshot — это карта кнопок и полей: ref (e1, e2…), роль и видимое имя (filter сужает список). Дальше действуй по ref, а НЕ перебирай селекторы: browserClick { ref: "e2" }, browserFill { ref: "e4", text: "..." }, browserSelect { ref: "e5", value: "..." }. Можно и словами: browserClick { name: "Войти" } (видимый текст кнопки), role+name («button» + «Войти»), для полей — label/placeholder; selector (CSS #id/.class, text=Текст, xpath=//...) тоже работает. Если элемент не найден, инструмент НЕ молчит, а вернёт похожие элементы с их ref — кликай по ним и не угадывай селекторы вслепую. После перехода на другую страницу ref устаревают — сделай browserSnapshot заново. Клавиши — browserPress (Enter), текст страницы — browserText, вкладки — browserStatus, скриншот — browserScreenshot. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Если нужны СВОИ входы пользователя (его ВК, его почта, его кабинеты) — начни с browserConnect: приложение подключится к его Chrome по порту отладки и подхватит открытые вкладки, дальше те же browserSnapshot/browserClick/browserFill работают в них, а браузер пользователя не закрывается (browserClose с tabId: "all" лишь отключает агента). Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
+21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url) и СРАЗУ зови browserSnapshot — это карта кнопок и полей: ref (e1, e2…), роль и видимое имя (filter сужает список). Дальше действуй по ref, а НЕ перебирай селекторы: browserClick { ref: "e2" }, browserFill { ref: "e4", text: "..." }, browserSelect { ref: "e5", value: "..." }. Можно и словами: browserClick { name: "Войти" } (видимый текст кнопки), role+name («button» + «Войти»), для полей — label/placeholder; selector (CSS #id/.class, text=Текст, xpath=//...) тоже работает. Если элемент не найден, инструмент НЕ молчит, а вернёт похожие элементы с их ref — кликай по ним и не угадывай селекторы вслепую. После перехода на другую страницу ref устаревают — сделай browserSnapshot заново. Клавиши — browserPress (Enter), текст страницы — browserText, вкладки — browserStatus, скриншот — browserScreenshot. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Если нужны СВОИ входы пользователя (его ВК, его почта, его кабинеты) — начни с browserConnect: приложение подключится к его Chrome по порту отладки и подхватит открытые вкладки, дальше те же browserSnapshot/browserClick/browserFill работают в них, а браузер пользователя не закрывается (browserClose с tabId: "all" лишь отключает агента). Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». Если элемент не видно в карте или клик не проходит — это НЕ тупик. Диалоги и слои поверх страницы (Angular CDK, модальные окна, баннер перевода Google) теперь помечены в карте как «в диалоге» и показаны ПЕРВЫМИ: сначала работай с ними, остальная страница перекрыта. browserClick сам повторяет действие (обычный клик → force → клик из DOM → клик мышью по координатам) и называет слой, который перекрывал элемент. Если и это не помогло: browserOverlays — список слоёв с ref и закрытие помех (browserOverlays { dismiss: true } убирает окно перевода и cookie-баннеры), browserDOM { selector } — HTML слоя, browserEval { script } — JS на странице (нажать перекрытую кнопку, отметить галочку, прочитать значение). Юридические согласия (terms of service) молча не подтверждай — скажи пользователю и пройди экран только по его просьбе (browserOverlays { acceptTerms: true } или browserClick по ref), затем проверь результат через browserSnapshot. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
 22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — карта окна: кнопки/вкладки/поля со СТАБИЛЬНЫМ ref (e12), ролью и видимым именем, appClick — кликнуть по ref (или по видимому тексту: text «Сохранить»), appFill — ввести текст в поле по ref/label, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать элемента по ref/тексту, appScreenshot — скриншот окна (разбирается vision-моделью). ВАЖНО: номер [N] устаревает при любой перерисовке окна (после «↻ обновить», смены вкладки клик уходил в чужой элемент) — всегда бери ref из appRead и не полагайся на номер. Если действие не нашло элемент, инструмент сам вернёт свежую карту с ref — просто повтори по ней. appSelect/appPress — выбрать из списка/нажать клавишу, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
 23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
 25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
@@ -49,9 +49,9 @@
 29. ВКонтакте (vk.com/vk.ru — домены взаимозаменяемы): браузерные инструменты. Поле ввода — contenteditable, селектор [role=textbox]: browserClick по полю → browserFill(selector: [role=textbox], text: ...) → отправка browserPress(key: Enter) (Shift+Enter — перенос строки). Страницы грузятся лениво — после открытия жди 2–5 секунд и перечитывай browserText; проверка отправки — текст сообщения в конце переписки. Работай в СУЩЕСТВУЮЩЕЙ вкладке браузера (новые открываются без сессии); состояние читай через browserText, а не скриншоты (ВК их обрезает); текст приходит вместе с левым меню — фильтруй по именам/датам. Вход/сессия — только руками пользователя, не обходи. Маршруты, селекторы, сценарии и известные контакты — в гайде, прочитай перед работой: readFile(path: agent-guide:vk).
 30. Анализ переписок (ВК, чаты, письма, файлы): определи КТО человек по уликам в тексте (работа/задачи → коллега; семейное/личное → родственник/друг; услуги/цены/заказы → клиент/поставщик; «Вы» и официальный тон → деловой контакт), выдели СУТЬ (2–4 предложения: о чём разговор, что решено, что ждёт ответа, срочность) и оформи ТАБЛИЦЕЙ: «Человек (профиль) | Кто он | Суть переписки | Важность | Следующий шаг». Для КЛИЕНТОВ дополнительно: профиль (потребность его словами, что обсуждали, бюджет/сроки если видно, возражения, тон) + фундамент для КП (2–4 пункта, что включить в предложение, и следующий логичный шаг). Не выдумывай: чего нет в тексте — «не определено». Длинную историю читай частями (PageUp + browserText). Полная методология — readFile(path: agent-guide:chat-analysis).
 31. Почта (SMTP/IMAP, Настройки → «✉️ Почта»): mailList — прочитать последние письма (отправитель, тема, дата, найденный код), mailCode — вытащить код подтверждения (from — фильтр по отправителю, например «yandex»), mailSend — отправить письмо (КП клиенту, ответ на запрос). Начни с mailList: если почта не настроена или нет разрешения на отправку, инструмент вернёт подсказку — передай её пользователю. Письма уходят с его ящика, поэтому перед отправкой клиенту покажи готовый текст и спроси подтверждение, если пользователь не просил отправить сразу. Пароль приложения не показывай и не проси в чате. Если письмо с кодом ещё не пришло — повтори mailCode через 10–20 секунд (письмо доходит не мгновенно).
-32. План работ (todoWrite): многошаговую задачу (от 3 шагов: «собери/починь/проверь», рефакторинг, диагностика) начинай с todoWrite — составь план из 3–7 коротких пунктов. Он показывается пользователю панелью-чеклистом с прогрессом, поэтому не дублируй его в тексте ответа. После КАЖДОГО выполненного пункта вызывай todoWrite снова, присылая полный список: текущий пункт — in_progress, сделанные — done, сорвавшийся — failed с пометкой note (по какой причине). Работай строго по плану и не расширяй объём самовольно; если по ходу выясняется, что план неверен — перепиши его тем же инструментом. Когда все пункты done — коротко подведи итог. В режиме плана («📋 План-режим») todoWrite обязателен: сначала покажи план и жди команды пользователя.
+32. План работ (todoWrite) — ОБЯЗАТЕЛЬНЫЙ первый шаг многошаговой задачи. Если для задачи нужно ДВА и более действий (правка+проверка, диагностика, рефакторинг, «собери/починь/проверь», разбор нескольких файлов), то САМЫМ ПЕРВЫМ вызывай todoWrite и только потом остальные инструменты: план из 3–7 коротких пунктов. Не начинай с чтения файлов и команд — без плана пользователь не видит структуру задачи, а панель плана остаётся пустой. План показывается пользователю панелью-чеклистом с прогрессом, поэтому не дублируй его в тексте ответа. После КАЖДОГО выполненного пункта вызывай todoWrite снова, присылая ПОЛНЫЙ список: текущий пункт — in_progress, сделанные — done, сорвавшийся — failed с пометкой note (по какой причине). Работай строго по плану и не расширяй объём самовольно; если план оказался неверен — перепиши его тем же инструментом. Когда все пункты done — коротко подведи итог. План НЕ нужен только для одного короткого действия или ответа без инструментов (прочитать файл, ответить на вопрос, отправить письмо). В режиме плана («📋 План-режим») todoWrite обязателен ВСЕГДА: это единственный доступный там инструмент — составь план и жди команды пользователя.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserEval, browserDOM, browserOverlays, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -297,7 +297,7 @@
       type: "function",
       function: {
         name: "browserSnapshot",
-        description: "Карта страницы: список интерактивных элементов (кнопки, ссылки, поля, чекбоксы) с коротким ref (e1, e2…), ролью и видимым именем. ВЫЗЫВАЙ ПЕРЕД первым действием на странице — вместо угадывания селекторов возьми ref нужной кнопки: browserClick { ref: \"e2\" }, browserFill { ref: \"e4\", text: \"...\" }. filter — сузить список (часть имени или роли, например «войти»); limit — сколько строк показать (по умолчанию 60).",
+        description: "Карта страницы: список интерактивных элементов (кнопки, ссылки, поля, чекбоксы) с коротким ref (e1, e2…), ролью и видимым именем. Элементы диалогов и слоёв поверх страницы помечены «в диалоге» и показаны ПЕРВЫМИ (они перекрывают страницу), а о помехах (окно перевода Google, cookie-баннеры) карта предупреждает отдельной строкой. ВЫЗЫВАЙ ПЕРЕД первым действием на странице — вместо угадывания селекторов возьми ref нужной кнопки: browserClick { ref: \"e2\" }, browserFill { ref: \"e4\", text: \"...\" }. filter — сузить список (часть имени или роли, например «войти»); limit — сколько строк показать (по умолчанию 60).",
         parameters: {
           type: "object",
           properties: {
@@ -430,12 +430,71 @@
       type: "function",
       function: {
         name: "browserScreenshot",
-        description: "Сделать скриншот открытой страницы (PNG data URL). fullPage — true, чтобы захватить всю длину страницы. Результат можно передать в analyzeImage (разбор глазами vision-модели) или показать пользователю через showImage. tabId — id вкладки.",
+        description: "Скриншот открытой страницы: сохраняется В ФАЙЛ, путь возвращается (файл сразу показывается пользователю в чате). Если настроена вспомогательная модель — она автоматически описывает, что видно (analyze: false отключает разбор). Зрение может не ответить — это не блокер, работай по DOM (browserSnapshot / browserDOM / browserEval). fullPage — вся длина страницы.",
         parameters: {
           type: "object",
           properties: {
             tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
             fullPage: { type: "boolean", description: "Скриншот всей страницы (по умолчанию только видимая часть)" },
+            analyze: { type: "boolean", description: "Разобрать скриншот vision-моделью (по умолчанию да, если она настроена)" },
+            question: { type: "string", description: "Что именно спросить у vision-модели (необязательно)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserEval",
+        description:
+          "Выполнить JavaScript на открытой странице и получить результат. Самый надёжный путь через любые слои: " +
+          "нажать перекрытую кнопку (el.click()), отметить скрытую галочку (нужно сначала выставить checked, затем dispatchEvent change), " +
+          "прочитать значение из JS-состояния, разобрать структуру. script — выражение или код (можно свои return); " +
+          "результат возвращается текстом (объект — JSON), поэтому проси примитивы: outerHTML, textContent, length, Array.from(...).map(...).",
+        parameters: {
+          type: "object",
+          properties: {
+            script: { type: "string", description: "JS-код или выражение, например: document.querySelector('input[type=checkbox]').click()" },
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            maxChars: { type: "integer", description: "Сколько символов результата вернуть (по умолчанию 2000)" },
+          },
+          required: ["script"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserDOM",
+        description:
+          "Показать HTML вокруг элемента (outerHTML, до 30000 символов) вместе с его текстом — чтобы понять структуру незнакомого окна/слоя: " +
+          "классы, aria-атрибуты, вложенность. Ищет и внутри shadow DOM. Укажи selector (CSS) или ref из browserSnapshot.",
+        parameters: {
+          type: "object",
+          properties: {
+            selector: { type: "string", description: "CSS-селектор элемента или слоя (например .cdk-overlay-pane)" },
+            ref: { type: "string", description: "ref элемента из browserSnapshot (альтернатива selector)" },
+            limit: { type: "integer", description: "Максимум символов HTML (по умолчанию 3000)" },
+            tabId: { type: "string", description: "id вкладки (необязательно)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserOverlays",
+        description:
+          "Что открыто ПОВЕРХ страницы: диалоги (Angular CDK, модальные окна), баннеры cookie, окно перевода Google — с элементами и ref. " +
+          "dismiss: true — закрыть ПОМЕХИ (окно перевода, cookie-баннеры, «Понятно/Dismiss/✕»); юридические согласия сам не подтверждаю. " +
+          "acceptTerms: true — осознанно отметить галочку согласия и нажать «Agree/Принять/Продолжить» (только если пользователь просил пройти этот экран). " +
+          "Если диалог перекрывает кнопки на странице — сначала посмотри сюда.",
+        parameters: {
+          type: "object",
+          properties: {
+            dismiss: { type: "boolean", description: "Закрыть помехи: окно перевода Google, cookie-баннеры, «Понятно/Не сейчас/Dismiss»" },
+            acceptTerms: { type: "boolean", description: "Отметить галочку и нажать кнопку согласия (terms of service) — только по просьбе пользователя" },
+            tabId: { type: "string", description: "id вкладки (необязательно)" },
           },
         },
       },
@@ -2435,6 +2494,19 @@
     browser_press: "browserPress",
     browser_text: "browserText",
     browser_screenshot: "browserScreenshot",
+    browser_eval: "browserEval",
+    browsereval: "browserEval",
+    eval_js: "browserEval",
+    run_js: "browserEval",
+    execute_js: "browserEval",
+    browser_dom: "browserDOM",
+    browserdom: "browserDOM",
+    dom_html: "browserDOM",
+    browser_overlays: "browserOverlays",
+    browseroverlays: "browserOverlays",
+    overlays: "browserOverlays",
+    dialogs: "browserOverlays",
+    dismiss_overlays: "browserOverlays",
     browser_wait: "browserWait",
     browser_close: "browserClose",
     browser_status: "browserStatus",
@@ -3453,6 +3525,9 @@
     "memoryList", "memorySearch", "todoWrite",
   ]);
   const CORE_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter((t) => CORE_TOOL_NAMES.has(t.function && t.function.name));
+  // План-режим: модель должна уметь составить план структурой, а не текстом,
+  // поэтому туда уходит ровно один инструмент — todoWrite.
+  const PLAN_MODE_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter((t) => t.function && t.function.name === "todoWrite");
   // Если окно контекста >= 26k — шлём все инструменты; иначе только ядро (~36 вместо 74).
   function selectTools(budget) {
     const b = budget || contextBudget("openai");
@@ -3710,6 +3785,7 @@
     sanitizeToolPairs,
     truncateText,
     selectTools,
+    PLAN_MODE_TOOL_DEFINITIONS,
     modelWindow,
     compactRemote,
     createContextManager,

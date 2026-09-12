@@ -291,6 +291,16 @@ function findMatches(items, query, limit) {
 
 // ── Формат ────────────────────────────────────────────────────────────────
 
+// Русские числительные: «2 элемента», «5 элементов» — иначе подпись читается криво.
+function plural(n, one, few, many) {
+  const v = Math.abs(parseInt(n, 10) || 0) % 100;
+  const d = v % 10;
+  if (v > 10 && v < 20) return many;
+  if (d === 1) return one;
+  if (d >= 2 && d <= 4) return few;
+  return many;
+}
+
 function pad(s, n) {
   const t = str(s);
   return t.length >= n ? t + " " : t + " ".repeat(n - t.length);
@@ -306,8 +316,12 @@ function formatItem(it) {
   if (!x.name && x.placeholder) extra.push('placeholder="' + cut(x.placeholder, 22) + '"');
   if (x.href) extra.push(cut(str(x.href).replace(/^https?:\/\/[^/]+/, ""), 28));
   const flags = [];
+  if (x.inDialog) flags.push("в диалоге");
   if (x.disabled) flags.push("недоступно");
   if (x.checked) flags.push("отмечено");
+  // Прозрачный ввод чекбокса (Angular Material): клик по нему проходит только
+  // «силой» — предупреждаем сразу, чтобы агент не считал элемент нерабочим.
+  if (x.hiddenInput) flags.push("скрытый ввод — клик с force");
   // Секретные поля (пароли, токены) в карте видны, а значения — нет.
   if (x.secret) flags.push("значение скрыто");
   if (x.inViewport === false) flags.push("вне экрана");
@@ -343,13 +357,27 @@ function formatSnapshot(o) {
   const filter = normText(src.filter);
   const limit = Math.max(5, Math.min(parseInt(src.limit, 10) || 60, 200));
   const shown = all.filter((it) => matchesFilter(it, filter));
-  const list = shown.slice(0, limit);
+  // Элементы диалога НЕ отрезаются лимитом: диалог перекрывает страницу, и без
+  // его галочки/кнопки агент «не видит» окно (так было в консоли Google Cloud,
+  // где оверлей дописывается в конец <body> и уезжал за 60-ю строку).
+  const dialogItems = shown.filter((it) => it.inDialog);
+  const plainItems = shown.filter((it) => !it.inDialog);
+  const dialogShown = dialogItems.slice(0, limit);
+  const list = dialogShown.concat(plainItems.slice(0, Math.max(0, limit - dialogShown.length)));
   const head =
     "Карта страницы: «" + (cut(src.title, 70) || "без заголовка") + "» — " + str(src.url || "—");
   const count =
     "Интерактивных элементов: " + all.length +
     (filter ? " (по фильтру «" + cut(src.filter, 30) + "» — " + shown.length + ")" : "") +
     (shown.length > list.length ? ", показано " + list.length : "");
+  const names = [];
+  for (const it of dialogShown) if (it.dialogName && names.indexOf(it.dialogName) < 0) names.push(it.dialogName);
+  const overlayLine = dialogItems.length
+    ? "⚠️ Поверх страницы открыт диалог" +
+      (names.length ? " («" + names.slice(0, 2).map((x) => cut(x, 34)).join("», «") + "»)" : "") +
+      " — " + dialogItems.length + " " + plural(dialogItems.length, "элемент", "элемента", "элементов") +
+      ", они показаны первыми: работай сначала с ним, остальная страница перекрыта."
+    : "";
   if (!list.length) {
     return (
       head + "\n" + count + "\n\nНичего не найдено." +
@@ -360,9 +388,19 @@ function formatSnapshot(o) {
   }
   const lines = list.map(formatItem);
   const offscreen = list.filter((it) => it.inViewport === false).length;
-  let out = head + "\n" + count + "\n\n" + lines.join("\n") + "\n\n" +
+  let out =
+    head + "\n" + count + (overlayLine ? "\n" + overlayLine : "") + "\n\n" + lines.join("\n") + "\n\n" +
     'Действия по ref: клик — browserClick { ref: "e2" } · ввод — browserFill { ref: "e4", text: "…" }' +
     (list[0] ? ' · например: ' + actionHint(list[0]) : "");
+  if (dialogItems.length) {
+    out +=
+      "\nДиалог поверх страницы: если клик не проходит — browserClick сам повторяет действие (force, клик из DOM, клик мышью по координатам)." +
+      "\nСлои и помехи (окно перевода Google, cookie-баннеры): browserOverlays · убрать помехи — browserOverlays { dismiss: true }." +
+      "\nСовсем упрямый элемент — JS на странице: browserEval { script: \"...\" }; структура слоя — browserDOM { selector: \"...\" }.";
+    if (dialogItems.some((it) => it.hiddenInput)) {
+      out += "\nВ диалоге есть скрытый ввод (галочка согласия) — кликай его через browserClick (force) или browserEval.";
+    }
+  }
   if (shown.length > list.length) out += "\nСписок сокращён — уточни через filter («войти», «логин»…).";
   if (offscreen) out += "\nЧасть элементов вне экрана (помечены) — прокрути страницу (browserPress PageDown) и вызови browserSnapshot снова.";
   out += "\nref живут до перезагрузки страницы: после перехода делай browserSnapshot заново.";

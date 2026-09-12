@@ -32,6 +32,7 @@ const {
   describeImageRemote,
   generateImageRemote,
   selectTools,
+  PLAN_MODE_TOOL_DEFINITIONS,
   modelWindow,
   // инструменты ОС (парсеры, whitelist)
   parseProcessesCsv,
@@ -2448,7 +2449,48 @@ async function executeTool(name, args, settings) {
         return await browserTools.text(args);
       }
       case "browserScreenshot": {
-        return await browserTools.screenshot(args);
+        // Скриншот сохраняем ФАЙЛОМ (data URL в контексте агента — это десятки
+        // тысяч токенов). Файл показываем пользователю и, если настроено зрение,
+        // разбираем vision-моделью. Модель может не ответить — тогда честно
+        // говорим об этом и оставляем агенту пути по DOM.
+        const shotDir = path.join(os.tmpdir(), "ai-agent-shots");
+        const shot = await browserTools.screenshotFile(Object.assign({}, args, { dir: shotDir }));
+        if (shot.error) return shot.error;
+        const shotData = "data:image/png;base64," + shot.buf.toString("base64");
+        if (activeEmit) activeEmit({ type: "image", path: shot.path, dataUrl: shotData });
+        let shotOut =
+          "OK — скриншот сохранён" + (shot.path ? ": " + shot.path : " (файл записать не удалось, картинка показана в чате)") +
+          "\nСтраница: " + (shot.url || "—") + (shot.title ? " («" + shot.title + "»)" : "");
+        const vcfg = auxConfig(settings);
+        if (args && args.analyze === false) {
+          shotOut += "\nДальше: analyzeImage { path: \"" + shot.path + "\" } при необходимости.";
+        } else if (vcfg.enabled && vcfg.visionModel) {
+          try {
+            const q =
+              args && args.question
+                ? String(args.question)
+                : "Опиши, что видно на странице: заголовки, кнопки, поля, диалоговые окна и их текст. Это описание пойдёт программисту, который работает со страницей без картинки.";
+            const desc = await describeImageRemote(vcfg, shotData, q, vcfg.visionModel);
+            shotOut += "\n\nЧто видно (vision-модель):\n" + (desc || "(пусто)");
+          } catch (e) {
+            shotOut +=
+              "\n\nVision-модель не ответила (" + String((e && e.message) || e).slice(0, 120) + ") — это не блокер: работай по DOM." +
+              "\nbrowserSnapshot (карта с ref) · browserDOM (HTML слоя) · browserEval (JS на странице) · browserOverlays (слои и помехи).";
+          }
+        } else {
+          shotOut +=
+            "\n\nЗрение не настроено — работай по DOM: browserSnapshot, browserDOM, browserEval, browserOverlays.";
+        }
+        return shotOut;
+      }
+      case "browserEval": {
+        return await browserTools.evalJs(args);
+      }
+      case "browserDOM": {
+        return await browserTools.domHtml(args);
+      }
+      case "browserOverlays": {
+        return await browserTools.overlays(args);
       }
       case "browserWait": {
         return await browserTools.wait(args);
@@ -4113,7 +4155,7 @@ async function runAi(settings, messages, win, opts) {
   let contextRetried = false; // при переполнении контекста пробуем ещё раз с меньшим бюджетом
   let reportRetried = false; // пустой финальный текст — один раз просим итоговый отчёт
   // Динамический список инструментов: при тесном контексте — только ядро файлов/терминала.
-  const activeTools = planMode ? [] : selectTools(budget);
+  const activeTools = planMode ? PLAN_MODE_TOOL_DEFINITIONS : selectTools(budget);
   const toolsWeight = activeTools.length ? estimateTokens(JSON.stringify(activeTools)) : 0;
   let histBudget = Math.max(1500, budget - toolsWeight); // бюджет истории без учёта схемы инструментов
   const ctxManager = createContextManager({
@@ -4209,7 +4251,7 @@ async function runAi(settings, messages, win, opts) {
   let canonical = [
     {
       role: "system",
-      content: SYSTEM_PROMPT + wdNote + briefNote + cloneNote + (planMode ? "\n\nРЕЖИМ ПЛАНА: сейчас НЕ выполняй инструменты и НЕ изменяй файлы. Составь пошаговый план работ и перечисли файлы, которые затронешь. Жди команды пользователя." : ""),
+      content: SYSTEM_PROMPT + wdNote + briefNote + cloneNote + (planMode ? "\n\nРЕЖИМ ПЛАНА: доступен только todoWrite — вызови его с планом работ (3–7 пунктов) и в тексте перечисли файлы, которые затронешь. НЕ изменяй файлы и НЕ выполняй другие инструменты. Жди команды пользователя." : ""),
     },
     ...sanitizeToolPairs(runHistory.map((m) => ({ role: m.role, content: m.content }))),
   ];
@@ -4257,7 +4299,7 @@ async function runAi(settings, messages, win, opts) {
     const req = buildChatRequest(settings, {
       model: settings.model,
       messages: canonical,
-      tools: planMode ? [] : activeTools,
+      tools: activeTools,
     });
     let res;
     try {
@@ -4427,6 +4469,14 @@ async function runAi(settings, messages, win, opts) {
     });
 
     for (const c of calls) {
+      // План-режим: выполняем только todoWrite. Если модель по привычке вызвала
+      // другой инструмент — не выполняем его и говорим об этом прямо.
+      if (planMode && c.name !== "todoWrite") {
+        const blocked =
+          "Режим плана: инструменты не выполняются. Составь план через todoWrite и дождись команды пользователя.";
+        canonical.push({ role: "tool", tool_call_id: c.id, content: blocked });
+        continue;
+      }
       emit({ type: "tool_start", name: c.name, args: c.args });
       let result;
       if (c.name === "askUser") {

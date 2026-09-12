@@ -418,7 +418,8 @@
         // (иначе каждый запуск перезаписывал бы весь файл истории).
         if (c.plan !== undefined) {
           const pi = c.plan && typeof c.plan === "object" && Array.isArray(c.plan.items) ? normalizePlanTasks(c.plan.items) : [];
-          if (pi.length) c.plan = { title: String(c.plan.title || ""), source: c.plan.source === "auto" ? "auto" : "model", items: pi, updatedAt: Number(c.plan.updatedAt) || Date.now() };
+          // legacy-планы со source "auto" отбрасываем — панель показывает только план модели.
+          if (pi.length && c.plan.source !== "auto") c.plan = { title: String(c.plan.title || ""), source: "model", items: pi, updatedAt: Number(c.plan.updatedAt) || Date.now() };
           else c.plan = null;
         }
         if (Array.isArray(c.planHistory)) c.planHistory = c.planHistory.slice(0, PLAN_ARCHIVE_LIMIT);
@@ -567,17 +568,16 @@
     persistChats();
   }
 
-  // ─────────── План работ: модель (todoWrite) + авто-шаги из инструментов ───────────
-  // Панель-чеклист над панелью действий. Источник пунктов бывает двух видов:
-  //  • source: "model" — план составила модель инструментом todoWrite (её статусы);
-  //  • source: "auto"  — модель плана не дала, показываем сами шаги инструментов.
-  // Поэтому прогресс виден всегда: «плана вперёд» нет только там, где его не дала модель.
+  // ─────────── План работ (todoWrite): панель-чеклист над панелью действий ───────────
+  // Панель показывает ТОЛЬКО план, составленный моделью инструментом todoWrite.
+  // Если модель плана не дала — панели нет вовсе: ход её действий и так виден в панели
+  // работы над полем ввода, а дублирующий чеклист «что уже сделано» только путал
+  // и выглядел ошибкой интерфейса.
   // Функции ниже чистые: они меняют только переданный объект чата и ничего не рисуют —
   // отрисовку и запись на диск делают вызывающие места (так это и тестируется).
   const PLAN_ICON = { pending: "⬜", in_progress: "🔄", done: "✅", failed: "⚠️" };
   const PLAN_TEXT = { pending: "ожидает", in_progress: "в работе", done: "готово", failed: "не удалось" };
   const PLAN_ARCHIVE_LIMIT = 5;
-  const PLAN_AUTO_MAX = 40;
 
   function planProgress(items) {
     const list = Array.isArray(items) ? items : [];
@@ -618,45 +618,10 @@
     return true;
   }
 
-  // Шаг из реального вызова инструмента. Работает, только когда модель своего
-  // плана не дала, — иначе получилась бы вторая, конфликтующая нумерация.
-  function planAutoStep(chat, ev) {
-    if (!chat) return false;
-    if (chat.plan && chat.plan.source === "model") return false;
-    const items = chat.plan && chat.plan.source === "auto" && Array.isArray(chat.plan.items) ? chat.plan.items.slice() : [];
-    // Начался новый шаг — значит предыдущий закончился.
-    for (const it of items) if (it.status === "in_progress") it.status = "done";
-    const name = String((ev && ev.name) || "шаг");
-    items.push({
-      id: "a" + (items.length + 1) + "-" + Date.now().toString(36),
-      text: (typeof TOOL_LABEL === "object" && TOOL_LABEL[name]) || name,
-      status: "in_progress",
-      note: "",
-      tool: name,
-    });
-    if (items.length > PLAN_AUTO_MAX) items.splice(0, items.length - PLAN_AUTO_MAX);
-    chat.plan = { title: "Ход работы", source: "auto", items, updatedAt: Date.now() };
-    return true;
-  }
-
-  // Результат шага: закрываем его фактическим итогом.
-  function planAutoResult(chat, ev, ok) {
+  // Результат инструмента. Статусы пунктов ведёт модель, но если её текущий шаг
+  // фактически упал — показываем ⚠️, а не «в работе»: слепо доверять плану нельзя.
+  function planToolOutcome(chat, ev, ok) {
     if (!chat || !chat.plan || !Array.isArray(chat.plan.items)) return false;
-    const name = String((ev && ev.name) || "");
-    if (chat.plan.source === "auto") {
-      for (let i = chat.plan.items.length - 1; i >= 0; i--) {
-        const it = chat.plan.items[i];
-        if (it.status !== "in_progress") continue;
-        if (it.tool && name && it.tool !== name) continue;
-        it.status = ok ? "done" : "failed";
-        it.note = ok ? "" : "инструмент вернул ошибку";
-        chat.plan.updatedAt = Date.now();
-        return true;
-      }
-      return false;
-    }
-    // План модели: статусы ведёт она. Но если её текущий шаг фактически упал —
-    // показываем ⚠️, а не «в работе»: слепо доверять плану нельзя.
     if (!ok) {
       for (let i = chat.plan.items.length - 1; i >= 0; i--) {
         const it = chat.plan.items[i];
@@ -671,10 +636,9 @@
   }
 
   // Новый запрос пользователя: завершённый план — в историю, незавершённый
-  // остаётся (агент продолжает работу), авто-шаги начинаются заново.
+  // остаётся (при «продолжай» агент видит, что осталось).
   function planRotate(chat) {
     if (!chat || !chat.plan) return false;
-    if (chat.plan.source === "auto") { chat.plan = null; return true; }
     if (planProgress(chat.plan.items).finished) { planArchive(chat, chat.plan); chat.plan = null; return true; }
     return false;
   }
@@ -686,7 +650,12 @@
     const host = $("plan-panel");
     if (!host) return;
     const chat = getActiveChat();
-    const plan = chat && chat.plan && Array.isArray(chat.plan.items) && chat.plan.items.length ? chat.plan : null;
+    // Панель только для плана модели. Старые авто-списки из chats.json (source "auto")
+    // не показываем: они и есть тот самый «ход работы», который дублировал панель действий.
+    const plan =
+      chat && chat.plan && chat.plan.source !== "auto" && Array.isArray(chat.plan.items) && chat.plan.items.length
+        ? chat.plan
+        : null;
     if (!plan) {
       host.classList.add("hidden");
       host.innerHTML = "";
@@ -710,7 +679,7 @@
     dot.className = "plan-dot";
     const title = document.createElement("span");
     title.className = "plan-title";
-    title.textContent = plan.source === "auto" ? "📋 Ход работы" : "📋 " + (plan.title || "План работ");
+    title.textContent = "📋 " + (plan.title || "План работ");
     const count = document.createElement("span");
     count.className = "plan-count";
     count.textContent = pr.done + "/" + pr.total + (pr.failed ? " ⚠" + pr.failed : "");
@@ -765,12 +734,6 @@
 
     const body = document.createElement("div");
     body.className = "plan-body";
-    if (plan.source === "auto") {
-      const hint = document.createElement("div");
-      hint.className = "plan-hint";
-      hint.textContent = "план не задан — показываю выполненные шаги";
-      body.appendChild(hint);
-    }
     for (const it of plan.items) {
       const row = document.createElement("div");
       row.className = "plan-item " + (PLAN_ICON[it.status] ? "st-" + it.status : "st-pending");
@@ -1626,7 +1589,6 @@
         const work = ensureWorkGroup();
         if (toolEl && toolEl.classList) toolEl.classList.add("in-work");
         work.body.appendChild(toolEl);
-        if (planAutoStep(chat, ev)) renderPlanPanel();
         planAdd(ev);
         scrollBottom();
         persistChatsSoon();
@@ -1645,7 +1607,7 @@
             break;
           }
         }
-        if (planAutoResult(chat, ev, toolOk)) renderPlanPanel();
+        if (planToolOutcome(chat, ev, toolOk)) renderPlanPanel();
         planSet(ev, toolOk);
         persistChatsSoon();
         // Агент изменил файлы или git — обновляем панель проекта

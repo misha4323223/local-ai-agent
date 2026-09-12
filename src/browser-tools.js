@@ -566,27 +566,98 @@ async function afterNavigation(page) {
 function collectInPage() {
   const SEL =
     "a[href],button,input,select,textarea,summary,[role],[contenteditable],[onclick],[tabindex]";
+  // Слои ПОВЕРХ страницы: диалоги Angular Material (консоль Google Cloud, банки),
+  // модальные окна, окно перевода Google. Раньше карта их не видела (диалог
+  // дописывается в конец <body> и отрезался лимитом строк), а клик падал на
+  // проверке «элемент под курсором». Теперь такие элементы идут ПЕРВЫМИ и
+  // помечены — с ними и надо работать, они перекрывают всю страницу.
+  const OVERLAY_SEL =
+    ".cdk-overlay-pane,.cdk-overlay-container,[role=dialog],[role=alertdialog],[aria-modal=true]," +
+    "dialog[open],mat-dialog-container,.mat-mdc-dialog-container,.modal,.modal-dialog," +
+    ".goog-te-banner-frame,#goog-gt-tt,.skiptranslate";
   const w = window;
   if (!w.__aiAgentRefSeq) w.__aiAgentRefSeq = 0;
-  const nodes = document.querySelectorAll(SEL);
+
+  // Дерево обходим с заходом в shadow DOM: сайты на веб-компонентах держат кнопки
+  // внутри shadow-root, и обычный querySelectorAll их не находит.
+  const roots = [{ root: document, depth: 0 }];
+  const nodes = [];
+  for (let ri = 0; ri < roots.length && roots.length < 40; ri++) {
+    const entry = roots[ri];
+    let found = [];
+    try { found = entry.root.querySelectorAll(SEL); } catch (e) { found = []; }
+    for (let k = 0; k < found.length; k++) {
+      const el = found[k];
+      nodes.push(el);
+      try {
+        if (entry.depth < 3 && el.shadowRoot) roots.push({ root: el.shadowRoot, depth: entry.depth + 1 });
+      } catch (e) {}
+    }
+  }
   const items = [];
+  const overlayHosts = [];
+
+  // Ближайший overlay-контейнер элемента + его человеческое имя («Welcome …»).
+  const overlayOf = (el) => {
+    let host = null;
+    try { host = el.closest ? el.closest(OVERLAY_SEL) : null; } catch (e) { host = null; }
+    if (!host) {
+      // Shadow DOM: closest не выходит за границу корня — идём по хостам вверх.
+      try {
+        let r = el.getRootNode ? el.getRootNode() : null;
+        let guard = 0;
+        while (r && r.host && !host && guard++ < 10) {
+          host = r.host.closest ? r.host.closest(OVERLAY_SEL) : null;
+          r = r.host.getRootNode ? r.host.getRootNode() : null;
+        }
+      } catch (e) {}
+    }
+    if (!host) return null;
+    let name = "";
+    try { name = host.getAttribute("aria-label") || ""; } catch (e) {}
+    if (!name) {
+      try {
+        const h = host.querySelector("[role=heading],h1,h2,h3,h4,h5,h6");
+        if (h) name = h.innerText || h.textContent || "";
+      } catch (e) {}
+    }
+    if (!name) {
+      try {
+        name = String(host.innerText || host.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80);
+      } catch (e) {}
+    }
+    if (overlayHosts.indexOf(host) < 0 && overlayHosts.length < 8) {
+      overlayHosts.push(host);
+      overlayHosts[host] = String(name).replace(/\s+/g, " ").trim().slice(0, 80);
+    }
+    return { host: host, name: String(name).replace(/\s+/g, " ").trim().slice(0, 80) };
+  };
+
   for (let i = 0; i < nodes.length; i++) {
     const el = nodes[i];
     const tag = (el.tagName || "").toLowerCase();
-    const type = (el.getAttribute("type") || "").toLowerCase();
+    const elAttr = (x) => { try { return el.getAttribute(x) || ""; } catch (e) { return ""; } };
+    const type = (elAttr("type") || "").toLowerCase();
     if (tag === "input" && type === "hidden") continue;
     let rect = null;
     try { rect = el.getBoundingClientRect(); } catch (e) { rect = null; }
-    if (!rect || rect.width < 1 || rect.height < 1) continue;
+    const tiny = !rect || rect.width < 1 || rect.height < 1;
     let style = null;
     try { style = w.getComputedStyle(el); } catch (e) {}
-    if (
-      style &&
-      (style.visibility === "hidden" || style.display === "none" ||
-        style.opacity === "0" || style.pointerEvents === "none")
-    ) {
-      continue;
-    }
+    const overlay = overlayOf(el);
+    const roleAttr0 = (elAttr("role") || "").toLowerCase();
+    // Галочка — это не «мусорный» элемент: у Angular Material настоящий <input
+    // type=checkbox> прозрачный (opacity: 0), а видно стилизованный квадратик.
+    // Такой ввод берём в карту, но помечаем: по нему нужен force-клик.
+    const isCheck =
+      (tag === "input" && (type === "checkbox" || type === "radio")) ||
+      roleAttr0 === "checkbox" || roleAttr0 === "radio" || roleAttr0 === "switch";
+    if (style && (style.visibility === "hidden" || style.display === "none")) continue;
+    if (tiny && !isCheck) continue;
+    if (style && style.opacity === "0" && !isCheck) continue;
+    const peNone = !!(style && style.pointerEvents === "none");
+    if (peNone && !(overlay && (isCheck || tag === "button" || tag === "a" || roleAttr0))) continue;
+    const hiddenInput = isCheck && !!style && (style.opacity === "0" || tiny);
     let ref = el.getAttribute("data-agent-ref");
     if (!ref) {
       w.__aiAgentRefSeq += 1;
@@ -621,6 +692,10 @@ function collectInPage() {
     try { text = el.innerText || el.textContent || ""; } catch (e) {}
     const cls = typeof el.className === "string" ? el.className : "";
     items.push({
+      inDialog: !!overlay,
+      dialogName: overlay ? overlay.name : "",
+      hiddenInput: hiddenInput,
+      peNone: peNone,
       ref,
       tag,
       type,
@@ -653,7 +728,51 @@ function collectInPage() {
     });
     if (items.length >= 400) break;
   }
-  return { url: location.href, title: document.title || "", items };
+  // Сводка по слоям: имя, класс и текст (по тексту классифицируем — согласие,
+  // cookie, окно перевода). Текст обрезаем: он уходит агенту в контекст.
+  const overlays = [];
+  for (let i = 0; i < overlayHosts.length; i++) {
+    const h = overlayHosts[i];
+    let text = "";
+    try { text = String(h.innerText || h.textContent || "").replace(/\s+/g, " ").trim().slice(0, 500); } catch (e) {}
+    let hcls = "";
+    try { hcls = typeof h.className === "string" ? h.className : ""; } catch (e) {}
+    overlays.push({
+      name: overlayHosts[h] || "",
+      text: text,
+      cls: hcls.replace(/\s+/g, " ").trim().slice(0, 120),
+      tag: (h.tagName || "").toLowerCase(),
+    });
+  }
+  return { url: location.href, title: document.title || "", items, overlays };
+}
+
+// Классификация слоя поверх страницы по имени/классу/тексту. Чистая функция —
+// используется и инструментом, и тестами.
+function overlayKind(o) {
+  const hay = ((o && o.name) || "") + " " + ((o && o.cls) || "") + " " + ((o && o.text) || "");
+  const s = String(hay).toLowerCase();
+  if (/goog-te|skiptranslate|goog-gt/.test(s)) return "translate";
+  if (/terms of service|terms and conditions|пользовательск|условия использования|i agree|я согласен|лицензионн|безопасност/.test(s)) return "terms";
+  if (/cookie|печень|куки|accept all|принять все/.test(s)) return "cookie";
+  if (/перевести|перевод страницы|translate this page|не сейчас|no thanks|never translate/.test(s)) return "translate";
+  if (/dismiss|закрыть|понятно|got it|позже|later|больше не показывать/.test(s)) return "noise";
+  return "dialog";
+}
+
+const OVERLAY_LABEL = {
+  translate: "окно перевода Google",
+  terms: "юридическое согласие (terms of service)",
+  cookie: "баннер cookie",
+  noise: "информационный баннер",
+  dialog: "диалоговое окно",
+};
+
+// Элементы диалога с человеческими пометками: что это (галочка/кнопка/поле),
+// как называется и как по нему действовать.
+function overlayItems(map, dialogName) {
+  const items = (map && map.items) || [];
+  return items.filter((it) => it.inDialog && (!dialogName || it.dialogName === dialogName));
 }
 
 // Собрать карту страницы и превратить её в элементы для агента (роли и имена — из dom-map).
@@ -678,10 +797,23 @@ async function collectMap(page) {
       checked: !!r.checked,
       secret: r.type === "password",
       inViewport: r.inViewport !== false,
+      inDialog: !!r.inDialog,
+      dialogName: r.dialogName || "",
+      hiddenInput: !!r.hiddenInput,
+      peNone: !!r.peNone,
       order,
     });
   }
-  return { url: (raw && raw.url) || "", title: (raw && raw.title) || "", items };
+  // Элементы открытого диалога — В НАЧАЛЕ карты: он перекрывает страницу,
+  // поэтому работать надо с ним, а обычные элементы подождут (сортировка
+  // стабильная, порядок внутри групп сохраняется).
+  items.sort((a, b) => (b.inDialog ? 1 : 0) - (a.inDialog ? 1 : 0));
+  return {
+    url: (raw && raw.url) || "",
+    title: (raw && raw.title) || "",
+    items,
+    overlays: (raw && raw.overlays) || [],
+  };
 }
 
 // Селектор может прийти как CSS, text=… или xpath=… — поддерживаем все виды.
@@ -907,23 +1039,63 @@ async function click(args) {
   }
   const target = await resolveTarget(t.tab.page, q, "click");
   if (!target) return missText(t.tab.page, "browserClick", q, "элемент не найден");
-  try {
-    try { await target.loc.scrollIntoViewIfNeeded({ timeout: 3000 }); } catch {}
-    await target.loc.click({ timeout: ACTION_TIMEOUT });
-  } catch (e) {
-    const msg = (e && e.message) || String(e);
-    if (/intercepts pointer events/i.test(msg)) {
-      return (
-        "Ошибка browserClick («" + target.desc + "»): элемент перекрыт другим слоем (баннер, окно cookie, модальное окно). " +
-        "Закрой перекрывающее окно и повтори.\n" +
-        (await missText(t.tab.page, "browserClick", q, "перекрыт другим элементом"))
-      );
+  try { await target.loc.scrollIntoViewIfNeeded({ timeout: 3000 }); } catch {}
+  // Клик не сдаётся с первого раза: если элемент перекрыт слоем (диалог, баннер,
+  // окно перевода) — повторяем силой, затем из DOM, затем мышью по координатам.
+  // Разница принципиальная: раньше агент получал «перекрыт» и упирался.
+  let via = "";
+  let blocker = "";
+  const firstErr = await (async () => {
+    try {
+      await target.loc.click({ timeout: ACTION_TIMEOUT });
+      via = "обычный клик";
+      return "";
+    } catch (e) {
+      return (e && e.message) || String(e);
     }
-    return missText(t.tab.page, "browserClick", q, msg.slice(0, 160));
+  })();
+  if (!via) {
+    try {
+      await target.loc.click({ timeout: ACTION_TIMEOUT, force: true });
+      via = "force-клик (проверка «под курсором» пропущена)";
+      blocker = await describeInterceptor(t.tab.page, target.loc);
+    } catch (e2) {}
+  }
+  if (!via) {
+    try {
+      const l = typeof target.loc.first === "function" ? target.loc.first() : target.loc;
+      await l.evaluate((el) => el.click());
+      via = "клик из DOM (el.click())";
+      blocker = await describeInterceptor(t.tab.page, target.loc);
+    } catch (e3) {}
+  }
+  if (!via) {
+    const box = await boxOf(target.loc);
+    if (box) {
+      try {
+        await t.tab.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        via = "клик мышью по координатам центра";
+      } catch (e4) {}
+    }
+  }
+  if (!via) {
+    const msg = /intercepts pointer events/i.test(firstErr)
+      ? "элемент перекрыт другим слоем (диалог, баннер, окно перевода)"
+      : String(firstErr || "не удалось").slice(0, 160);
+    return (
+      "Ошибка browserClick («" + target.desc + "»): " + msg + ".\n" +
+      (await missText(t.tab.page, "browserClick", q, msg))
+    );
   }
   if (args.waitLoad !== false) await afterNavigation(t.tab.page);
   const info = await pageInfo(t.tab.page);
-  return "OK — клик по «" + target.desc + "». Текущий URL: " + (info.url || "—");
+  let out = "OK — клик по «" + target.desc + "» (" + via + "). Текущий URL: " + (info.url || "—");
+  if (blocker) {
+    out +=
+      "\nВнимание: элемент был перекрыт слоем (" + blocker + "). Если действие не сработало — " +
+      "посмотри слои через browserOverlays и убери помеху (browserOverlays { dismiss: true }).";
+  }
+  return out;
 }
 
 // Выбрать значение в <select>: ref / selector / label. Если вариант не подошёл —
@@ -991,16 +1163,351 @@ async function text(args) {
   return "URL: " + (info.url || "—") + "\nЗаголовок: " + (info.title || "—") + "\n\n" + (shown || "(пустая страница)");
 }
 
-// Скриншот страницы (PNG, data URL). Можно передать в vision-модель или показать пользователю.
+// Скриншот страницы: сохраняем PNG В ФАЙЛ (data URL в контекст агента — это
+// десятки тысяч токенов на один вызов) и возвращаем путь. Файл можно отдать
+// vision-модели через analyzeImage или показать пользователю.
+async function screenshotFile(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return { error: t.error };
+  let buf;
+  try {
+    buf = await t.tab.page.screenshot({ type: "png", fullPage: args.fullPage === true });
+  } catch (e) {
+    return { error: "Ошибка browserScreenshot: " + String((e && e.message) || "").slice(0, 200) };
+  }
+  const dir = String(args.dir || path.join(os.tmpdir(), "ai-agent-shots"));
+  let file = "";
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    file = path.join(dir, "browser-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png");
+    fs.writeFileSync(file, buf);
+  } catch (e) {
+    file = "";
+  }
+  const info = await pageInfo(t.tab.page);
+  return { buf: buf, path: file, url: info.url, title: info.title };
+}
+
+// Текстовый ответ для агента: путь к файлу (data URL — только если попросили явно).
 async function screenshot(args) {
+  args = args || {};
+  const r = await screenshotFile(args);
+  if (r.error) return r.error;
+  if (args.dataUrl === true || args.asDataUrl === true) {
+    return "data:image/png;base64," + r.buf.toString("base64");
+  }
+  if (r.path) {
+    return (
+      "OK — скриншот сохранён в файл: " + r.path +
+      "\nСтраница: " + (r.url || "—") + (r.title ? " («" + r.title + "»)" : "") +
+      "\nДальше: analyzeImage { path: \"" + r.path + "\" } — разбор vision-моделью (если она настроена), " +
+      "или работай по DOM: browserSnapshot / browserDOM / browserEval."
+    );
+  }
+  return "data:image/png;base64," + r.buf.toString("base64");
+}
+
+// ── Инструменты поверх стандартных ─────────────────────────────────────────
+
+// Выполнить JS на странице и вернуть результат. Самый надёжный путь через любые
+// слои: перекрытый чекбокс, кнопка в диалоге, значение из JS-состояния страницы.
+async function evalJs(args) {
   args = args || {};
   const t = needTab(args.tabId || args.tab);
   if (t.error) return t.error;
+  const script = String(args.script || args.code || args.js || "").trim();
+  if (!script) {
+    return (
+      'Ошибка browserEval: укажи script — выражение или код на JS. Примеры: ' +
+      '"document.querySelector(\'input[type=checkbox]\').click()", "document.title", ' +
+      '"Array.from(document.querySelectorAll(\'[role=dialog] button\')).map(b=>b.innerText)"'
+    );
+  }
+  const max = Math.min(Math.max(parseInt(args.maxChars, 10) || 2000, 200), 20000);
+  // Голое выражение оборачиваем в return, код со своими return выполняем как есть.
+  const withReturn = /\breturn\b/.test(script);
+  let value;
+  let err = "";
   try {
-    const buf = await t.tab.page.screenshot({ type: "png", fullPage: args.fullPage === true });
-    return "data:image/png;base64," + buf.toString("base64");
+    value = await t.tab.page.evaluate("(async () => {\n" + (withReturn ? script : "return (" + script + ");") + "\n})()");
+  } catch (e1) {
+    try {
+      value = await t.tab.page.evaluate("(async () => {\n" + script + "\n})()");
+    } catch (e2) {
+      err = String((e2 && e2.message) || e1 || "").slice(0, 300);
+    }
+  }
+  if (err) return "Ошибка browserEval: " + err;
+  let text = "";
+  try {
+    text = value === undefined ? "(выражение ничего не вернуло)" : typeof value === "string" ? value : JSON.stringify(value);
   } catch (e) {
-    return "Ошибка browserScreenshot: " + ((e && e.message || "").slice(0, 200));
+    text = String(value);
+  }
+  if (text == null) text = "(выражение ничего не вернуло)";
+  const shown = text.length > max ? text.slice(0, max) + "\n… [обрезано, всего " + text.length + " символов]" : text;
+  const info = await pageInfo(t.tab.page);
+  return "browserEval выполнен. URL: " + (info.url || "—") + "\nРезультат: " + shown;
+}
+
+// HTML вокруг селектора (или ref из карты) — чтобы понять структуру незнакомого
+// слоя: имена классов диалога, aria-атрибуты, вложенность.
+async function domHtml(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return t.error;
+  const ref = dom.refName(args.ref || args.element);
+  const selector = String(args.selector || args.css || "").trim();
+  if (!ref && !selector) return "Ошибка browserDOM: укажи selector (CSS) или ref из browserSnapshot.";
+  const sel = ref ? dom.refSelector(ref) : selector;
+  const max = Math.min(Math.max(parseInt(args.limit, 10) || 3000, 300), 30000);
+  let res;
+  try {
+    res = await t.tab.page.evaluate(({ sel, max }) => {
+      // Ищем и в обычном дереве, и в shadow-root'ах веб-компонентов.
+      const deepFind = (s) => {
+        let direct = null;
+        try { direct = document.querySelector(s); } catch (e) { return null; }
+        if (direct) return direct;
+        const queue = [document];
+        let seen = 0;
+        while (queue.length && seen < 4000) {
+          const root = queue.shift();
+          let all = [];
+          try { all = root.querySelectorAll("*"); } catch (e) { all = []; }
+          for (let i = 0; i < all.length; i++) {
+            seen++;
+            const node = all[i];
+            if (!node.shadowRoot) continue;
+            let hit = null;
+            try { hit = node.shadowRoot.querySelector(s); } catch (e) {}
+            if (hit) return hit;
+            queue.push(node.shadowRoot);
+          }
+        }
+        return null;
+      };
+      const el = deepFind(sel);
+      if (!el) return { found: false };
+      const html = el.outerHTML || "";
+      let total = 0;
+      try { total = document.querySelectorAll(sel).length; } catch (e) { total = 0; }
+      return {
+        found: true,
+        tag: (el.tagName || "").toLowerCase(),
+        html: html.slice(0, max),
+        full: html.length,
+        text: String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 400),
+        count: total,
+      };
+    }, { sel: sel, max: max });
+  } catch (e) {
+    return "Ошибка browserDOM: " + String((e && e.message) || e).slice(0, 200);
+  }
+  if (!res || !res.found) {
+    return (
+      "browserDOM: по «" + sel + "» ничего не нашлось. Проверь селектор через browserSnapshot " +
+      "(там ref и классы элементов) или посмотри слои через browserOverlays."
+    );
+  }
+  return (
+    "Элемент «" + sel + "» — <" + res.tag + ">, совпадений на странице: " + res.count +
+    "\nТекст: " + (res.text || "(пусто)") +
+    "\nHTML" + (res.html.length < res.full ? " (обрезано до " + res.html.length + " из " + res.full + " символов)" : "") +
+    ":\n" + res.html
+  );
+}
+
+// Закрыть помехи поверх страницы и/или показать, что там открыто.
+// ВАЖНО: юридические согласия (terms of service) молча НЕ подтверждаются —
+// инструмент только показывает, какие ref нажать. Явное подтверждение —
+// acceptTerms: true (агент вызывает его осознанно, по просьбе пользователя).
+async function overlays(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return t.error;
+  let map;
+  try {
+    map = await collectMap(t.tab.page);
+  } catch (e) {
+    return "Ошибка browserOverlays: " + String((e && e.message) || e).slice(0, 200);
+  }
+  const found = (map.overlays || []).map((o) => Object.assign({}, o, { kind: overlayKind(o) }));
+  let out = "";
+  if (found.length) {
+    out += "Слоёв поверх страницы: " + found.length + "\n";
+    found.forEach((o, i) => {
+      const items = overlayItems(map, o.name);
+      out +=
+        "\n" + (i + 1) + ". " + (OVERLAY_LABEL[o.kind] || OVERLAY_LABEL.dialog) +
+        (o.name ? " — «" + o.name + "»" : "") +
+        " (" + items.length + " " + (items.length === 1 ? "элемент" : items.length < 5 ? "элемента" : "элементов") + ")" +
+        (o.text ? "\n   Текст: «" + o.text.slice(0, 220) + "»" : "");
+      if (items.length) {
+        out +=
+          "\n   Элементы: " +
+          items
+            .slice(0, 12)
+            .map((it) => it.ref + " (" + it.role + (it.name ? " «" + it.name.slice(0, 40) + "»" : "") + (it.hiddenInput ? ", скрытый ввод" : "") + (it.checked ? ", отмечено" : "") + ")")
+            .join(", ");
+        out += "\n   Действия: " + dom.actionHint(items[0]);
+      }
+    });
+  } else {
+    out += "Слоёв поверх страницы не видно.";
+  }
+
+  if (args.dismiss) {
+    let report = [];
+    try {
+      report = await t.tab.page.evaluate(cleanupInPage);
+    } catch (e) {
+      report = [];
+    }
+    out += "\n\nЗакрытие помех: " + (report && report.length ? report.join("; ") : "нечего закрывать (перевод и баннеры не найдены)");
+  }
+  if (args.acceptTerms) {
+    let report = [];
+    try {
+      report = await t.tab.page.evaluate(acceptTermsInPage);
+    } catch (e) {
+      report = [];
+    }
+    out += "\n\nПодтверждение согласия: " + (report && report.length ? report.join("; ") : "галочка/кнопка согласия не найдены — сделай browserSnapshot и действуй по ref");
+  }
+  if (found.some((o) => o.kind === "terms") && !args.acceptTerms) {
+    out +=
+      "\n\nЭто юридическое согласие: сам его не подтверждаю. Если пользователь просил продолжить — " +
+      "отметь галочку и нажми кнопку согласия (browserOverlays { acceptTerms: true } либо browserClick по ref), " +
+      "затем проверь результат: browserSnapshot.";
+  }
+  if (found.some((o) => o.kind === "translate")) {
+    out += "\n\nОкно перевода Google сдвигает страницу и перехватывает клики — убери его: browserOverlays { dismiss: true }.";
+  }
+  return out;
+}
+
+// Закрыть помехи: окно перевода Google, cookie-баннеры, «Понятно/Dismiss/позже».
+// Юридические формулировки («Принять все», «Я согласен») НЕ нажимаются никогда —
+// чтобы агент не подписывал за пользователя то, что не просили.
+function cleanupInPage() {
+  const report = [];
+  const hide = (el, why) => {
+    try {
+      el.style.display = "none";
+      el.setAttribute("data-agent-dismissed", "1");
+      report.push(why);
+    } catch (e) {}
+  };
+  const tr = document.querySelectorAll(
+    "iframe.goog-te-banner-frame,.goog-te-banner-frame,#goog-gt-tt,.goog-te-balloon-frame"
+  );
+  for (let i = 0; i < tr.length; i++) hide(tr[i], "скрыто: " + (tr[i].tagName || "элемент").toLowerCase() + " перевода");
+  try { document.body.style.top = "0"; } catch (e) {}
+  const SAFE = [
+    "не сейчас", "позже", "закрыть", "понятно", "хорошо", "ок", "пропустить", "больше не показывать",
+    "dismiss", "close", "not now", "no thanks", "maybe later", "got it", "ok", "skip",
+  ];
+  const LAYER =
+    ".cdk-overlay-pane,.cdk-overlay-container,[role=dialog],[role=alertdialog],[aria-modal=true]," +
+    ".modal,.modal-dialog,.goog-te-banner-frame,#goog-gt-tt,[class*=banner],[class*=cookie],[class*=consent],[class*=notice],[style*=fixed]";
+  const nodes = document.querySelectorAll("button,[role=button],a[href],span,div");
+  let seen = 0;
+  for (let i = 0; i < nodes.length && seen < 500; i++) {
+    const el = nodes[i];
+    const txt = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!txt || txt.length > 24) continue;
+    seen++;
+    if (SAFE.indexOf(txt) < 0) continue;
+    let host = null;
+    try { host = el.closest ? el.closest(LAYER) : null; } catch (e) {}
+    if (!host) continue;
+    try {
+      el.click();
+      report.push("нажато «" + txt + "»");
+    } catch (e) {}
+  }
+  const crosses = document.querySelectorAll("[data-dismiss],[aria-label*=закрыть],[class*=close]");
+  for (let i = 0; i < crosses.length && i < 6; i++) {
+    const el = crosses[i];
+    let host = null;
+    try { host = el.closest ? el.closest(LAYER) : null; } catch (e) {}
+    if (!host) continue;
+    try {
+      el.click();
+      report.push("нажат крестик закрытия");
+    } catch (e) {}
+  }
+  return report;
+}
+
+// Подтвердить юридическое согласие: отметить галочки в слое и нажать кнопку
+// согласия. Вызывается только осознанно (acceptTerms), сообщение попадает в чат.
+function acceptTermsInPage() {
+  const report = [];
+  const LAYER = ".cdk-overlay-pane,.cdk-overlay-container,[role=dialog],[role=alertdialog],[aria-modal=true],.modal,.modal-dialog";
+  const inLayer = (el) => {
+    try { return !!(el.closest && el.closest(LAYER)); } catch (e) { return false; }
+  };
+  const boxes = document.querySelectorAll("input[type=checkbox],[role=checkbox],[role=switch]");
+  for (let i = 0; i < boxes.length; i++) {
+    const el = boxes[i];
+    if (!inLayer(el)) continue;
+    const on = el.checked === true || (el.getAttribute && el.getAttribute("aria-checked") === "true");
+    if (on) continue;
+    try {
+      el.click();
+      report.push("отмечена галочка");
+    } catch (e) {}
+  }
+  const btns = document.querySelectorAll("button,[role=button],input[type=submit],a[href]");
+  for (let i = 0; i < btns.length; i++) {
+    const el = btns[i];
+    if (!inLayer(el)) continue;
+    const txt = String(el.innerText || el.textContent || el.value || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (!txt) continue;
+    if (txt.indexOf("не соглас") === 0 || txt.indexOf("disagree") === 0) continue;
+    const yes =
+      txt.indexOf("agree") >= 0 || txt.indexOf("соглас") >= 0 || txt.indexOf("принять") >= 0 ||
+      txt.indexOf("продолжить") >= 0 || txt.indexOf("accept") >= 0 || txt.indexOf("continue") >= 0;
+    if (!yes) continue;
+    try {
+      el.click();
+      report.push("нажата кнопка «" + txt.slice(0, 40) + "»");
+      break;
+    } catch (e) {}
+  }
+  return report;
+}
+
+// Координаты элемента — для клика мышью в обход проверки доступности.
+async function boxOf(loc) {
+  try {
+    const l = typeof loc.first === "function" ? loc.first() : loc;
+    return await l.boundingBox();
+  } catch (e) {
+    return null;
+  }
+}
+
+// Кто перекрывает элемент: настоящий клик мышью попал бы в этот слой. Агенту
+// нужен человеческий ответ («div.cdk-overlay-backdrop»), а не «intercepts events».
+async function describeInterceptor(page, loc) {
+  try {
+    const l = typeof loc.first === "function" ? loc.first() : loc;
+    const info = await l.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const top = document.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2));
+      if (!top || top === el || el.contains(top)) return "";
+      let cls = "";
+      try { cls = typeof top.className === "string" ? top.className.replace(/\s+/g, ".").slice(0, 60) : ""; } catch (e) {}
+      const txt = String(top.innerText || top.textContent || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      return (top.tagName || "").toLowerCase() + (cls ? "." + cls : "") + (txt ? " «" + txt + "»" : "");
+    });
+    return String(info || "").slice(0, 140);
+  } catch (e) {
+    return "";
   }
 }
 
@@ -1041,13 +1548,32 @@ async function snapshot(args) {
   } catch (e) {
     return "Ошибка browserSnapshot: " + String((e && e.message) || e).slice(0, 200);
   }
-  return dom.formatSnapshot({
+  let text = dom.formatSnapshot({
     items: map.items,
     url: map.url,
     title: map.title,
     filter: String(args.filter || "").trim(),
     limit: parseInt(args.limit, 10) || 60,
   });
+  // Слои бывают без интерактивных элементов (окно перевода — это iframe), поэтому
+  // о помехах и о юридических согласиях сообщаем прямо в карте: агент узнаёт об
+  // экране до того, как упрётся в него кликом.
+  const found = (map.overlays || []).map((o) => Object.assign({}, o, { kind: overlayKind(o) }));
+  const noise = found.filter((o) => o.kind === "translate" || o.kind === "cookie" || o.kind === "noise");
+  const terms = found.filter((o) => o.kind === "terms");
+  if (noise.length) {
+    const kinds = [];
+    for (const o of noise) if (kinds.indexOf(OVERLAY_LABEL[o.kind]) < 0) kinds.push(OVERLAY_LABEL[o.kind]);
+    text +=
+      "\n⚠️ Поверх страницы помехи: " + kinds.join(", ") +
+      " — убрать одним вызовом: browserOverlays { dismiss: true } (баннер перевода сдвигает страницу и перехватывает клики).";
+  }
+  if (terms.length) {
+    text +=
+      "\n⚠️ Открыт экран юридического согласия (" + (terms[0].name ? "«" + terms[0].name + "»" : "terms of service") +
+      ") — сам его не подтверждай: сообщи пользователю и пройди по его просьбе (browserOverlays { acceptTerms: true }).";
+  }
+  return text;
 }
 
 // Закрыть вкладку (по умолчанию активную; "all" — все вкладки и браузер).
@@ -1145,6 +1671,12 @@ module.exports = {
   snapshot,
   fill,
   click,
+  evalJs,
+  domHtml,
+  overlays,
+  overlayKind,
+  overlayItems,
+  screenshotFile,
   select,
   press,
   text,
@@ -1160,5 +1692,8 @@ module.exports = {
   profilePath,
   clearProfile,
   collectInPage, // используется тестами (мини-DOM), не вызывается снаружи
+  collectMap, // тесты: карта строится на мини-DOM через page.evaluate-заглушку
+  cleanupInPage, // тесты: очистка помех не трогает юридические кнопки
+  acceptTermsInPage, // тесты: подтверждение согласия отмечает галочку и кнопку
   setPlaywright, // только для тестов: подменить/сбросить кэш playwright
 };
