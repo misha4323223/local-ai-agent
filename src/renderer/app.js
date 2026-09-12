@@ -30,6 +30,7 @@
     openaiProfiles: [], // сохранённые OpenAI-совместимые подключения: { id, name, url, apiKey, model, project }
     openaiActiveProfile: "", // id активного подключения
     autoSwitchProfiles: false, // при ошибке ключа/баланса/лимита — авто-переключение
+    sendAllTools: false, // предохранитель C: слать все схемы инструментов (медленнее, но надёжнее)
   };
 
   // Пресеты для OpenAI-совместимых API (ключ/модель хранятся отдельно по каждому пресету? нет — единый URL+ключ).
@@ -2082,7 +2083,11 @@
 
   function onTermEvent(ev) {
     if (!ev) return;
-    if (ev.type === "out") {
+    if (ev.type === "metrics") {
+      // Метрики раунда агента из main.js: сколько токенов ушло, попал ли префикс в
+      // кэш, сколько ждали ответа. Тихой строкой в «Консоль» (правая панель).
+      termServerAppend('<span class="ts-metrics">▤ ' + esc(ev.text || "") + "</span>");
+    } else if (ev.type === "out") {
       const escTxt = esc(ev.text || "");
       termAppend('<span class="term-plain">' + escTxt + "</span>");
     } else if (ev.type === "agent") {
@@ -3365,6 +3370,7 @@
     $("s-ota-dir").value = settings.otaDir || "";
     renderOpenaiProfiles();
     $("s-auto-switch").checked = !!settings.autoSwitchProfiles;
+    $("s-send-all-tools").checked = !!settings.sendAllTools;
     // Почта
     $("s-mail-address").value = settings.mailAddress || "";
     $("s-mail-from-name").value = settings.mailFromName || "";
@@ -3422,6 +3428,7 @@
     settings.otaEnabled = !!$("s-ota-enabled").checked;
     settings.otaDir = $("s-ota-dir").value.trim();
     settings.autoSwitchProfiles = !!$("s-auto-switch").checked;
+    settings.sendAllTools = !!$("s-send-all-tools").checked;
     // Зеркало модели активного провайдера
     settings.model = settings[MODEL_KEY[settings.provider]] || "";
   }

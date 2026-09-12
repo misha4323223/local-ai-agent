@@ -37,27 +37,43 @@
 17. Запуск проекта: запускай проект ТОЛЬКО через встроенный терминал приложения (инструменты runCommand / startBackground / shellStart) — не проси пользователя запускать проект вручную и не открывай внешние терминалы. Dev-сервер по умолчанию запускай на порту 5000 (http://localhost:5000), если в конфиге проекта явно не задан другой порт (проверь package.json / .env / конфиги). После запуска проверь готовность через проверь через checkUrl/checkPort и сообщи пользователю адрес.
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
-20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), установка скачанного установщика — installExe (умеет .exe, .msi и .zip; спросит подтверждение). ВАЖНО про оболочку: по умолчанию на Windows команды идут в cmd.exe, на macOS/Linux — в sh. Для PowerShell и bash есть параметр shell у runCommand и startBackground: shell: "powershell" — настоящий PowerShell с включённым UTF-8 (кириллица, $, кавычки и 2>$null работают как в консоли, обёртка powershell -Command не нужна), shell: "bash" — bash (на Windows это Git Bash, ставится вместе с Git for Windows), sh ищется там же. Если не знаешь, какие оболочки есть на машине, вызови shellsStatus — он покажет доступные с путями и подсказкой, что установить; не выясняй это методом проб (bash/sh на Windows без Git for Windows отсутствуют).
-21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url) и СРАЗУ зови browserSnapshot — это карта кнопок и полей: ref (e1, e2…), роль и видимое имя (filter сужает список). Дальше действуй по ref, а НЕ перебирай селекторы: browserClick { ref: "e2" }, browserFill { ref: "e4", text: "..." }, browserSelect { ref: "e5", value: "..." }. Можно и словами: browserClick { name: "Войти" } (видимый текст кнопки), role+name («button» + «Войти»), для полей — label/placeholder; selector (CSS #id/.class, text=Текст, xpath=//...) тоже работает. Если элемент не найден, инструмент НЕ молчит, а вернёт похожие элементы с их ref — кликай по ним и не угадывай селекторы вслепую. После перехода на другую страницу ref устаревают — сделай browserSnapshot заново. Клавиши — browserPress (Enter), текст страницы — browserText, вкладки — browserStatus, скриншот — browserScreenshot (PNG сохраняется файлом и СРАЗУ разбирается зрением: «что вижу, что кликабельно» — скриншот дешевле десятка кликов вслепую; analyze: false отключает разбор). ПРОКРУТКА: если элемента нет в карте — он может быть просто ЗА ЭКРАНОМ: browserScroll { how: "down" } даёт список того, что теперь в кадре (с ref), browserScroll { to: "Настройки" } прокрутит до элемента, browserScroll { container: "список API" } крутит внутренний блок (таблицы, длинные выпадающие списки). Меню, раскрывающееся по наведению, открывается browserHover. После действия, меняющего страницу, вызывай waitForIdle (DOM перестал меняться и сеть пуста) — тогда ref в карте не устареют; а что реально ушло на сервер и что он ответил (статус, тело) показывает browserNetwork — это быстрее и надёжнее догадок по DOM (упавшая форма видна сразу). Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Если нужны СВОИ входы пользователя (его ВК, его почта, его кабинеты) — начни с browserConnect: приложение подключится к его Chrome по порту отладки и подхватит открытые вкладки, дальше те же browserSnapshot/browserClick/browserFill работают в них, а браузер пользователя не закрывается (browserClose с tabId: "all" лишь отключает агента). Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». Если элемент не видно в карте или клик не проходит — это НЕ тупик. Диалоги и слои поверх страницы (Angular CDK, модальные окна, баннер перевода Google) теперь помечены в карте как «в диалоге» и показаны ПЕРВЫМИ: сначала работай с ними, остальная страница перекрыта. browserClick сам повторяет действие (обычный клик → force → клик из DOM → клик мышью по координатам) и называет слой, который перекрывал элемент. Если и это не помогло: browserOverlays — список слоёв с ref и закрытие помех (browserOverlays { dismiss: true } убирает окно перевода и cookie-баннеры), browserDOM { selector } — HTML слоя, browserEval { script } — JS на странице (нажать перекрытую кнопку, отметить галочку, прочитать значение). Юридические согласия (terms of service) молча не подтверждай — скажи пользователю и пройди экран только по его просьбе (browserOverlays { acceptTerms: true } или browserClick по ref), затем проверь результат через browserSnapshot. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
-БЫСТРЫЙ ПУТЬ (так и начинай): 1) browserSnapshot — карта; 2) действуй по ref или видимому имени: browserClick/browserFill сами ждут появления элемента (до 3 с, параметр timeout) и ищут его не только на странице, но и во вложенных фреймах (iframe) — поэтому НЕ надо вызывать browserWait и повторять действие по кругу; 3) если последовательность известна (найти → ввести → отправить → проверить), делай её ОДНОЙ командой browserAct { steps: [...] } — шаги goto, click, fill (submit: true = сразу Enter), press, wait, waitFor, back, scroll, eval, read, snapshot; это сильно быстрее, чем десяток отдельных вызовов. Для ленивых списков (ВК, бесконечные ленты) используй шаг scroll, затем snapshot. browserFill с submit: true закрывает случай «ввёл и отправил». Селекторы не перебирай: если элемент не найден, в ответе уже лежат похожие элементы с ref — жми по ним. Если ссылка открыла новую вкладку — она подхватывается и становится активной (browserStatus покажет список).
-22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — карта окна: кнопки/вкладки/поля со СТАБИЛЬНЫМ ref (e12), ролью и видимым именем, appClick — кликнуть по ref (или по видимому тексту: text «Сохранить»), appFill — ввести текст в поле по ref/label, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать элемента по ref/тексту, appScreenshot — скриншот окна (разбирается vision-моделью). ВАЖНО: номер [N] устаревает при любой перерисовке окна (после «↻ обновить», смены вкладки клик уходил в чужой элемент) — всегда бери ref из appRead и не полагайся на номер. Если действие не нашло элемент, инструмент сам вернёт свежую карту с ref — просто повтори по ней. appSelect/appPress — выбрать из списка/нажать клавишу, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
+20. Windows и системные операции: для задач про саму ОС — специальные инструменты, а не голые команды: процессы (listProcesses → killProcess), буфер (clipboardRead/clipboardWrite), screenshotDesktop, реестр (registryRead/registryWrite), openPath, установка программ (installSystemPackage/wingetSearch/installExe/checkInstalledProgram). Оболочки: shell: "powershell" и shell: "bash" у runCommand/startBackground, список доступных — shellsStatus (не выясняй пробами). Подробности и ограничения: agentGuide { name: "system" }.
+21. Браузер (видимое окно Chromium): browserOpen → СРАЗУ browserSnapshot (карта: ref, роль, видимое имя), дальше действуй по ref или по видимому тексту — селекторы не перебирай. Известную последовательность шагов делай ОДНОЙ командой browserAct. После действия, меняющего страницу, — waitForIdle; результат проверяй browserText или browserNetwork, а не по памяти. Пароли — только через vaultFill (НИКОГДА не проси пароль в чате). Капча/2FA — попроси пользователя дожать её в открытом окне. ПОДРОБНЫЙ СПРАВОЧНИК (читай перед работой с сайтом): agentGuide { name: "browser" } — маршруты, шаблоны интерфейсов, слои, прокрутка, грабли.
+22. СВОЁ окно приложения (app-инструменты): appRead — карта окна со СТАБИЛЬНЫМ ref, дальше appClick/appFill/appSelect/appPress/appWait/appScreenshot. Номер [N] устаревает при перерисовке — всегда бери ref из appRead. Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить») без askUser. После действия проверяй appRead. Полный справочник: agentGuide { name: "app" }.
 23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
 25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
 26. Семантический поиск: semanticSearch(query) ищет по коду проекта по смыслу (стебли слов, camelCase/snake_case, BM25-ранжирование) и показывает сниппеты с номерами строк. Используй его для поиска «где находится X» и «как устроен Y» — быстрее и точнее, чем читать файлы подряд. Точный регулярный поиск — searchFile/searchProject.
 24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList). Память диалогов: когда контекст переполняется, старые шаги сворачиваются в памятку — если в настройках включена галочка «Память диалогов», приложение сохраняет такие памятки локально по датам. memoryList показывает дни и памятки за конкретный день (date: ГГГГ-ММ-ДД), memorySearch ищет по ним слова и фразы. Это помогает вспомнить прошлые сессии: «посмотри, что мы делали 5-го числа».
 27. Самоизменения и OTA: перед любой правкой собственного кода (src/, assets/) сначала создай точку отката checkpointSave(label — «перед самоизменением …»). Файлы src/bootstrap.js и src/ota.js и папка применённого OTA-бандла физически заблокированы: writeFile/editFile/applyPatch вернут ошибку — не пытайся их обойти. После сборки бандла (node scripts/make-ota.js) вызови otaStatus (видно ли обновление) и otaCheck (применить); после применения — validateProject; если после обновления что-то сломалось — otaRollback.
-28. Yandex Cloud: инструменты ycStatus / ycList / ycCreate / ycDelete / ycDeploy / ycLogs / ycInstall. Начни с ycStatus — авторизация (Настройки → «☁️ Yandex Cloud»), каталог, разрешения агента. Создание/удаление ресурсов — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Создать можно: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc. Деплой — ycDeploy (directory, name, public): Docker-образ → Container Registry → Serverless Container → URL (нужен Docker). Логи — ycLogs (id, service необязателен): читаются внутренним API Cloud Logging — записи по gRPC с хоста log-reading, список групп по REST — внешний yc CLI НЕ нужен. Если в песочнице нужен сам yc CLI (например, команда yc в терминале) — вызови ycInstall: он скачает официальный бинарь в папку приложения и добавит в PATH. Токен и каталог уже подставляются автоматически (YC_IAM_TOKEN — свежий IAM-токен, YC_CLOUD_ID, YC_FOLDER_ID), yc init не нужен. Результат проверяй через ycList.
+28. Yandex Cloud: ycStatus (начни отсюда — авторизация, каталог, разрешения агента) / ycList / ycCreate / ycDelete / ycDeploy / ycLogs / ycInstall. Создание и удаление — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Токен и каталог подставляются автоматически (YC_IAM_TOKEN, YC_CLOUD_ID, YC_FOLDER_ID), yc init не нужен. Порядок работы, ключи сервисов и детали деплоя: agentGuide { name: "yc" }.
 29. ВКонтакте (vk.com/vk.ru — домены взаимозаменяемы): браузерные инструменты. Поле ввода — contenteditable, селектор [role=textbox]: browserClick по полю → browserFill(selector: [role=textbox], text: ...) → отправка browserPress(key: Enter) (Shift+Enter — перенос строки). Страницы грузятся лениво — после открытия жди 2–5 секунд и перечитывай browserText; проверка отправки — текст сообщения в конце переписки. Работай в СУЩЕСТВУЮЩЕЙ вкладке браузера (новые открываются без сессии); состояние читай через browserText, а не скриншоты (ВК их обрезает); текст приходит вместе с левым меню — фильтруй по именам/датам. Вход/сессия — только руками пользователя, не обходи. Маршруты, селекторы, сценарии и известные контакты — в гайде, прочитай перед работой: readFile(path: agent-guide:vk).
 30. Анализ переписок (ВК, чаты, письма, файлы): определи КТО человек по уликам в тексте (работа/задачи → коллега; семейное/личное → родственник/друг; услуги/цены/заказы → клиент/поставщик; «Вы» и официальный тон → деловой контакт), выдели СУТЬ (2–4 предложения: о чём разговор, что решено, что ждёт ответа, срочность) и оформи ТАБЛИЦЕЙ: «Человек (профиль) | Кто он | Суть переписки | Важность | Следующий шаг». Для КЛИЕНТОВ дополнительно: профиль (потребность его словами, что обсуждали, бюджет/сроки если видно, возражения, тон) + фундамент для КП (2–4 пункта, что включить в предложение, и следующий логичный шаг). Не выдумывай: чего нет в тексте — «не определено». Длинную историю читай частями (PageUp + browserText). Полная методология — readFile(path: agent-guide:chat-analysis).
 31. Почта (SMTP/IMAP, Настройки → «✉️ Почта»): mailList — прочитать последние письма (отправитель, тема, дата, найденный код), mailCode — вытащить код подтверждения (from — фильтр по отправителю, например «yandex»), mailSend — отправить письмо (КП клиенту, ответ на запрос). Начни с mailList: если почта не настроена или нет разрешения на отправку, инструмент вернёт подсказку — передай её пользователю. Письма уходят с его ящика, поэтому перед отправкой клиенту покажи готовый текст и спроси подтверждение, если пользователь не просил отправить сразу. Пароль приложения не показывай и не проси в чате. Если письмо с кодом ещё не пришло — повтори mailCode через 10–20 секунд (письмо доходит не мгновенно).
 32. План работ (todoWrite) — ОБЯЗАТЕЛЬНЫЙ первый шаг многошаговой задачи. Если для задачи нужно ДВА и более действий (правка+проверка, диагностика, рефакторинг, «собери/починь/проверь», разбор нескольких файлов), то САМЫМ ПЕРВЫМ вызывай todoWrite и только потом остальные инструменты: план из 3–7 коротких пунктов. Не начинай с чтения файлов и команд — без плана пользователь не видит структуру задачи, а панель плана остаётся пустой. План показывается пользователю панелью-чеклистом с прогрессом, поэтому не дублируй его в тексте ответа. После КАЖДОГО выполненного пункта вызывай todoWrite снова, присылая ПОЛНЫЙ список: текущий пункт — in_progress, сделанные — done, сорвавшийся — failed с пометкой note (по какой причине). Работай строго по плану и не расширяй объём самовольно; если план оказался неверен — перепиши его тем же инструментом. Когда все пункты done — коротко подведи итог. План НЕ нужен только для одного короткого действия или ответа без инструментов (прочитать файл, ответить на вопрос, отправить письмо). В режиме плана («📋 План-режим») todoWrite обязателен ВСЕГДА: это единственный доступный там инструмент — составь план и жди команды пользователя.
 
-33. Интерфейсы сайтов собраны из одних и тех же узоров — не изобретай их заново. Material/Bootstrap/antd «select» — это НЕ <select>: browserSelect по нему не сработает; жми на поле кликом (browserClick по ref), появится слой с вариантами (они придут в карте как «в диалоге»), выбери пункт по ТЕКСТУ. Автокомплит и поиск с подсказками: сначала введи 2–3 буквы (browserFill), потом waitForIdle, затем выбери подсказку кликом по её тексту (или стрелками вниз + Enter) — сразу Enter отправлять нельзя, это уйдёт в пустоту. Длинные списки (десятки API, города, валюты, репозитории): НЕ скролль вручную — ищи внутри списка по названию (введи в поле фильтра над списком, чаще всего «Поиск»/«Filter»), скролл — только если фильтра нет. Чекбоксы-«квадратики» часто прозрачные (opacity: 0) под стилизованной рамкой: они в карте помечены «скрытый ввод — клик с force», а если не помогло — browserEval («input[type=checkbox]».click()). Дата-пикеры, слайдеры, деревья и табы: сначала browserScroll { to: "нужный пункт" }, потом клик по тексту. Диалоги и слои поверх страницы (Angular CDK, модальные окна, баннер перевода) в карте помечены «в диалоге» и идут ПЕРВЫМИ — сначала пройди их (browserOverlays), иначе клик не проходит. Если после клика ничего не изменилось — проверь browserNetwork (ушёл ли запрос) и waitForIdle, а уже потом переделывай клик. Не подбирай селекторы перебором: имя/текст и ref работают почти всегда.
-34. Справочники и память маршрутов: перед работой на незнакомом сайте посмотри справочник — agentGuide {} (список), agentGuide { url: "адрес" } (есть ли для этого сайта), agentGuide { name: "google-cloud" } (полный текст). Их пишут заранее (src/agent-guides) — там маршруты, подводные камни и рабочие подписи кнопок; чтение гайда экономит десятки шагов и в 10 раз быстрее блужданий. ВАЖНО: когда сложный путь пройден УСПЕШНО (регистрация, включение API, публикация, покупка, многошаговая форма), сохрани его одним вызовом — agentGuide { save: "google-cloud", title: "Как включить API", sites: "console.cloud.google.com", steps: "1) … 2) подпись кнопки … 3) что ждать" }. Пиши конкретно: подписи кнопок, в каком порядке, что ждать после каждого шага, где грабли. В следующий раз гайд подхватится сам (при browserOpen придёт подсказка) — так второй проход по тому же сайту занимает единицы ходов.
+33. Интерфейсы сайтов собраны из одних и тех же узоров — не изобретай их заново: Material/antd-«select» — это НЕ <select>, автокомплиты и подсказки, длинные списки, прозрачные чекбоксы, диалоги и слои поверх страницы. Точные шаблоны и обходы: agentGuide { name: "browser" }, раздел «Интерфейсы сайтов».
+34. Справочники и память маршрутов: перед работой на незнакомом сайте — agentGuide {} (список), agentGuide { url: "адрес" } (есть ли гайд для сайта), agentGuide { name: "..." } (полный текст): маршруты, подписи кнопок и грабли экономят десятки шагов. ВАЖНО: когда сложный путь пройден УСПЕШНО (регистрация, включение API, публикация, покупка, многошаговая форма) — сохрани его одним вызовом: agentGuide { save: "имя", title: "...", sites: "домен", steps: "1) … 2) подпись кнопки … 3) что ждать" }. Пиши конкретно: подписи кнопок, порядок, что ждать после шага, где грабли. В следующий раз гайд подхватится сам (при browserOpen придёт подсказка).
+35. БАТЧИНГ — не трать раунды на мелочи: несколько НЕЗАВИСИМЫХ операций чтения (2–5 файлов, список папок + поиск, git status + diff + log, несколько страниц) вызывай ВСЕ СРАЗУ в одном ответе — приложение выполнит их параллельно за время одного вызова. Не объединяй то, что зависит от результата предыдущего вызова, и НИКОГДА не объединяй инструменты, которые меняют файлы/состояние или требуют подтверждения: они выполняются строго по одному. Если нужного инструмента нет в списке ниже — вызови findTools { query: "что нужно сделать, словами" }: он найдёт его и включит на всю задачу.
 
 Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserEval, browserDOM, browserOverlays, browserAct, browserScroll, browserHover, browserNetwork, waitForIdle, agentGuide, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
 
   const TOOL_DEFINITIONS = [
+    {
+      type: "function",
+      function: {
+        name: "findTools",
+        description:
+          "Найти инструмент под задачу, если нужного нет в списке доступных возможностей. Передай query словами («отправить письмо», «скриншот экрана», «запуш в github»). Вернёт имена подходящих инструментов с описанием и СРАЗУ включит их на всю оставшуюся задачу — дальше вызывай их как обычно. Вызывай, когда собрался сделать что-то, а подходящего инструмента в списке не видно, вместо того чтобы гадать или сдаваться.",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Что нужно сделать — словами, например «отправить письмо по SMTP»" },
+            limit: { type: "number", description: "Сколько инструментов вернуть (по умолчанию 8)" },
+          },
+          required: ["query"],
+        },
+      },
+    },
     {
       type: "function",
       function: {
@@ -3318,6 +3334,94 @@
     }));
   }
 
+  // ── Кэш промпта (ускорение №2) ──────────────────────────────────────────
+  // Неизменяемый префикс запроса (системный промпт + схемы инструментов) — это
+  // десятки тысяч токенов, которые провайдер иначе пересчитывает на КАЖДОМ
+  // раунде. Точка кэша срезает время до первого токена с 5-8 с до 1-2 с на
+  // повторных раундах одной задачи. Поле отправляем только тем, кто его
+  // понимает: строгие OpenAI-совместимые API отвечают на него 400.
+  function cacheableProvider(provider, base, model) {
+    if (provider === "anthropic") return "anthropic";
+    if (provider !== "openai") return "";
+    if (!/openrouter\.ai/i.test(String(base || ""))) return "";
+    // OpenRouter кэширует префикс только у Claude и Gemini — другим не шлём.
+    return /anthropic\/|claude|gemini|google\//i.test(String(model || "")) ? "openrouter" : "";
+  }
+
+  // Граница «статичного» префикса системного промпта. Кэшируемый блок обязан
+  // накрывать ТОЛЬКО его: динамический «паспорт проекта» (дерево файлов, режим плана,
+  // подсказка после клонирования) меняется почти каждый виток, и если он попадёт ВНУТРЬ
+  // кэшируемого блока, промах обнуляет кэш целиком (кэш блоков у Anthropic/OpenRouter) —
+  // то есть мы платим полную цену за все ~30k токенов шапки вместо ~10%.
+  // Возвращает { head, tail } либо null, если текст не начинается со статичной части.
+  function splitStaticSystem(text, staticText) {
+    const full = String(text || "");
+    const head = String(staticText || "");
+    if (!head || !full.startsWith(head)) return null;
+    return { head: head, tail: full.slice(head.length) };
+  }
+
+  // Системный промпт для Anthropic: при кэше — массив блоков, где точка кэша стоит
+  // ровно на статичном префиксе, а динамика идёт следующим блоком без неё.
+  function anthropicSystem(sysText, cacheKind, staticText) {
+    const text = String(sysText || "");
+    if (!text) return null;
+    if (!cacheKind) return text;
+    const sp = splitStaticSystem(text, staticText);
+    if (!sp) return [{ type: "text", text: text, cache_control: { type: "ephemeral" } }];
+    const blocks = [{ type: "text", text: sp.head, cache_control: { type: "ephemeral" } }];
+    if (sp.tail) blocks.push({ type: "text", text: sp.tail });
+    return blocks;
+  }
+
+  function withCacheOnFirstSystem(msgs, staticText) {
+    const out = (msgs || []).slice();
+    for (let i = 0; i < out.length; i++) {
+      const m = out[i];
+      if (!m || m.role !== "system" || !m.content) continue;
+      if (typeof m.content === "string") {
+        const sp = splitStaticSystem(m.content, staticText);
+        const blocks = [{ type: "text", text: sp ? sp.head : m.content, cache_control: { type: "ephemeral" } }];
+        if (sp && sp.tail) blocks.push({ type: "text", text: sp.tail });
+        out[i] = { role: "system", content: blocks };
+      } else if (Array.isArray(m.content) && m.content.length) {
+        out[i] = {
+          role: "system",
+          content: m.content.map((b, j) =>
+            j === m.content.length - 1 ? Object.assign({}, b, { cache_control: { type: "ephemeral" } }) : b
+          ),
+        };
+      }
+      break; // только первый — он же самый стабильный
+    }
+    return out;
+  }
+
+  // Строгие OpenAI-совместимые API (G4F, Yandex AI Studio, DeepSeek, свой сервер) ждут
+  // system в начале диалога и часто ТОЛЬКО одним сообщением. Промпт, паспорт проекта и
+  // справочники групп идут несколькими system-сообщениями подряд — склеиваем именно
+  // ведущую серию. Текст, порядок и разделитель («\n\n», как у Anthropic) не меняются,
+  // поэтому автоматический кэш префикса OpenAI/DeepSeek/Groq продолжает попадать.
+  // Одиночный system и служебные заметки в середине диалога остаются ровно как были.
+  function mergeLeadingSystem(messages) {
+    const list = messages || [];
+    const heads = [];
+    let i = 0;
+    for (; i < list.length; i++) {
+      const m = list[i];
+      if (!m || m.role !== "system") break;
+      const text =
+        typeof m.content === "string"
+          ? m.content
+          : Array.isArray(m.content)
+            ? m.content.map((b) => (b && (b.text || b.content)) || "").join("")
+            : "";
+      if (text) heads.push(text);
+    }
+    if (heads.length <= 1) return list; // склеивать нечего — поведение прежнее
+    return [{ role: "system", content: heads.join("\n\n") }, ...list.slice(i)];
+  }
+
   /**
    * Собирает HTTP-запрос к нужному провайдеру.
    * s — объект настроек: { provider, ollamaUrl, openaiUrl, anthropicUrl, openaiApiKey, anthropicApiKey }
@@ -3339,23 +3443,43 @@
         body: JSON.stringify({ model, messages: messagesForProvider(provider, messages), tools, stream: true }),
       };
     }
+    const cacheKind = cacheableProvider(provider, baseFor(provider, s), model);
     if (provider === "anthropic") {
+      const toolDefs = toolsForProvider(provider, tools);
+      // Точка кэша на последней схеме инструмента — кэширует весь блок tools.
+      if (cacheKind && toolDefs.length) {
+        toolDefs[toolDefs.length - 1] = Object.assign({}, toolDefs[toolDefs.length - 1], {
+          cache_control: { type: "ephemeral" },
+        });
+      }
+      const sys = systemText(messages);
+      const body = {
+        model,
+        max_tokens: 4096,
+        messages: messagesForProvider(provider, messages),
+        tools: toolDefs,
+        stream: true,
+      };
+      if (sys) body.system = anthropicSystem(sys, cacheKind, opts && opts.staticSystem);
       return {
         url: baseFor(provider, s) + "/v1/messages",
         headers,
-        body: JSON.stringify({
-          model,
-          max_tokens: 4096,
-          system: systemText(messages),
-          messages: messagesForProvider(provider, messages),
-          tools: toolsForProvider(provider, tools),
-          stream: true,
-        }),
+        body: JSON.stringify(body),
       };
     }
     // G4F-маршрут «Провайдер:модель» (например HuggingChat:gpt-4o-mini):
     // современный g4f принимает провайдера отдельным полем provider, а имя модели — без префикса.
-    const body = { model, messages: messagesForProvider("openai", messages), tools, stream: true };
+    // Справочники/паспорт проекта идут несколькими system подряд: строгим серверам
+    // отдаём один ведущий system (текст и порядок те же).
+    let openaiMessages = mergeLeadingSystem(messagesForProvider("openai", messages));
+    if (cacheableProvider(provider, baseFor(provider, s), model) === "openrouter") {
+      openaiMessages = withCacheOnFirstSystem(openaiMessages, opts && opts.staticSystem);
+    }
+    const body = { model, messages: openaiMessages, tools, stream: true };
+    // Токены и попадание в кэш OpenAI-совместимые API отдают в стриме ТОЛЬКО по
+    // явному запросу stream_options.include_usage (последний чанк с usage).
+    // Строгий сервер может поля не знать — тогда main.js выключает его и повторяет.
+    if (opts && opts.includeUsage) body.stream_options = { include_usage: true };
     const g4f = splitG4fRoute(model);
     if (g4f) {
       body.model = g4f.model;
@@ -3384,7 +3508,20 @@
   // 2) Таймауты: первый байт (firstByteTimeoutMs, по умолчанию 90 с) и пауза
   //    между чанками (idleTimeoutMs, по умолчанию 60 с) — зависший/молчащий
   //    провайдер завершается ошибкой вместо бесконечного ожидания.
-  async function consumeProviderStream({ response, provider, onText, onToolCall, onThinking, firstByteTimeoutMs, idleTimeoutMs }) {
+  // Токен-отчёт провайдера → единый вид { prompt, completion, cached }: разные API
+  // кладут попадание в кэш в разные поля (OpenAI/OpenRouter — prompt_tokens_details,
+  // DeepSeek — prompt_cache_hit_tokens, Anthropic — cache_read_input_tokens).
+  function normalizeUsage(u) {
+    if (!u || typeof u !== "object") return null;
+    const det = u.prompt_tokens_details || u.input_tokens_details || null;
+    const prompt = u.prompt_tokens != null ? u.prompt_tokens : u.input_tokens != null ? u.input_tokens : 0;
+    const completion = u.completion_tokens != null ? u.completion_tokens : u.output_tokens != null ? u.output_tokens : 0;
+    const cached =
+      (det && det.cached_tokens) || u.prompt_cache_hit_tokens || u.cache_read_input_tokens || 0;
+    return { prompt: prompt || 0, completion: completion || 0, cached: cached || 0 };
+  }
+
+  async function consumeProviderStream({ response, provider, onText, onToolCall, onThinking, onUsage, firstByteTimeoutMs, idleTimeoutMs }) {
     if (!response || !response.body) throw new Error("Пустой ответ от сервера (нет тела).");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -3461,6 +3598,10 @@
             if (obj && obj.error) throw new Error("Ошибка Ollama: " + errText(obj.error));
             const msg = (obj && obj.message) || {};
             if (msg.content && onText) onText(msg.content);
+            // Финальный чанк (done) несёт счётчики промпта и ответа.
+            if (onUsage && obj.done && (obj.prompt_eval_count != null || obj.eval_count != null)) {
+              onUsage({ prompt: obj.prompt_eval_count || 0, completion: obj.eval_count || 0, cached: 0 });
+            }
             if (Array.isArray(msg.tool_calls)) {
               for (const tc of msg.tool_calls) {
                 const f = tc.function || {};
@@ -3491,6 +3632,9 @@
             if (obj.error || (obj.type === "error" && obj.error)) {
               throw new Error("Провайдер ответил ошибкой: " + (errText(obj.error) || errText(obj)));
             }
+            // Финальный чанк при include_usage: choices пустой, а usage заполнен —
+            // поэтому читаем usage ДО выхода по отсутствию choice.
+            if (obj.usage && onUsage) onUsage(normalizeUsage(obj.usage));
             const choice = obj.choices && obj.choices[0];
             if (!choice) continue;
             const delta = choice.delta || {};
@@ -3524,6 +3668,12 @@
             if (type === "error" && obj.error) {
               throw new Error("Claude ответил ошибкой: " + errText(obj.error));
             }
+            // usage: message_start — входные токены (и чтение из кэша),
+            // message_delta — выходные. Собираются воедино в main.js.
+            if (onUsage && type === "message_start" && obj.message && obj.message.usage) {
+              onUsage(normalizeUsage(obj.message.usage));
+            }
+            if (onUsage && type === "message_delta" && obj.usage) onUsage(normalizeUsage(obj.usage));
             if (type === "content_block_start") {
               const block = obj.content_block || {};
               const cur = accum.get(obj.index) || { id: "", name: "", args: "" };
@@ -3614,13 +3764,39 @@
     return null;
   }
 
+  // Ошибка → читаемый текст. Отдельно ловим «промис вместо ошибки» (забыт await):
+  // иначе в интерфейс попадало бесполезное «[object Promise]» вместо причины сбоя.
+  function fmtError(e) {
+    if (e instanceof Error) return e.message || String(e);
+    if (e && typeof e.then === "function") return "Promise вместо ошибки (в коде забыт await)";
+    if (e == null) return String(e);
+    if (typeof e === "object") {
+      try {
+        return JSON.stringify(e).slice(0, 500) || String(e);
+      } catch {
+        return String(e);
+      }
+    }
+    return String(e);
+  }
+
+  // Google Gemini отдаёт OpenAI-совместимый API только под /v1beta/openai:
+  // с «голым» /v1 путь /chat/completions там не существует (404).
+  function normalizeAuxBase(url) {
+    const s = String(url || "").trim().replace(/\/+$/, "");
+    if (!s) return "";
+    const m = s.match(/^(https?:\/\/generativelanguage\.googleapis\.com)(?:\/.*)?$/i);
+    if (m) return m[1] + "/v1beta/openai";
+    return s;
+  }
+
   // ── Вспомогательная модель (второй ключ): зрение + генерация изображений ──
   function auxConfig(s) {
     s = s || {};
     return {
       enabled: !!s.visionEnabled,
       auto: s.visionAuto !== false,
-      url: ((s.visionUrl || "").trim() || (s.openaiUrl || "").trim() || "").replace(/\/+$/, ""),
+      url: normalizeAuxBase((s.visionUrl || "").trim() || (s.openaiUrl || "").trim() || ""),
       key: (s.visionKey || "").trim() || (s.openaiApiKey || "").trim() || "",
       visionModel: (s.visionModel || "").trim(),
       imageModel: (s.imageModel || "").trim(),
@@ -3648,8 +3824,10 @@
       }),
       signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(180000) : undefined,
     });
+    // readApiError() асинхронная и читает тело ответа: сначала она, потом res.json().
+    // Без await в текст ошибки попадал сам промис («[object Promise]»).
+    if (!res.ok) throw new Error("Vision: " + (await readApiError(res)));
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error("Vision: " + readApiError(res, data));
     const c = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     if (Array.isArray(c)) return c.map((p) => (p && p.text) || "").join("\n").trim();
     return String(c == null ? "" : c).trim();
@@ -3667,8 +3845,8 @@
       body: JSON.stringify(body),
       signal: typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(300000) : undefined,
     });
+    if (!res.ok) throw new Error("Генерация изображения: " + (await readApiError(res)));
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error("Генерация изображения: " + readApiError(res, data));
     const d = data && data.data && data.data[0];
     if (!d || !d.b64_json) {
       throw new Error("Модель не вернула изображение" + (data && data.error ? ": " + (data.error.message || JSON.stringify(data.error)) : ""));
@@ -3691,6 +3869,11 @@
     "listProcesses", "killProcess", "clipboardRead", "clipboardWrite", "screenshotDesktop",
     "registryRead", "registryWrite", "openPath", "wingetSearch", "installExe",
     "memoryList", "memorySearch", "todoWrite",
+    // Git-минимум: приложение про репозитории — без этих инструментов агент на тесном
+    // окне не мог даже посмотреть состояние, хотя до правки сюда попадал только браузер.
+    "gitStatus", "gitDiff", "gitLog", "gitCommit", "gitBranch", "gitPush", "gitPull", "gitInit",
+    // Поиск возможностей доступен всегда: иначе «узкий» набор нечем расширить.
+    "findTools",
     // Браузерный минимум: без него при тесном контексте агент не мог открыть сайт вообще.
     "browserOpen", "browserSnapshot", "browserClick", "browserFill", "browserAct",
     "browserScroll", "browserHover", "browserScreenshot", "browserNetwork", "waitForIdle",
@@ -3700,6 +3883,306 @@
   // План-режим: модель должна уметь составить план структурой, а не текстом,
   // поэтому туда уходит ровно один инструмент — todoWrite.
   const PLAN_MODE_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter((t) => t.function && t.function.name === "todoWrite");
+  // ── Роутер инструментов (ускорение №3) ───────────────────────────────────
+  // 147 схем — это ~24 700 токенов в КАЖДОМ раунде: и деньги, и время до первого
+  // токена. Роутер отдаёт модели базовый набор (файлы, терминал, основы git,
+  // память, web, план) плюс только те группы, которые нужны по делу — по словам
+  // в запросе пользователя и уже начатой работе.
+  //
+  // Два правила, которые нельзя нарушать:
+  //  1) ПОРЯДОК инструментов — канонический (как в TOOL_DEFINITIONS), без сортировки
+  //     по релевантности: иначе меняется префикс запроса и рушится кэш промпта
+  //     (Anthropic/OpenRouter) и переиспользование префикса (OpenAI/DeepSeek/Groq).
+  //  2) Липкость: группа, однажды включённая в задаче, остаётся до её конца — иначе
+  //     инструмент исчезнет на середине работы.
+  //
+  // Предохранители: A) вызов реального инструмента вне набора → схема добавляется и
+  // вызов повторяется (main.js); B) мета-инструмент findTools — модель сама просит
+  // нужную возможность; C) настройка «отправлять все инструменты» + авто-расширение
+  // при ошибке «неизвестный инструмент».
+  const BASE_TOOL_NAMES = [
+    // файлы и папки
+    "createFolder", "readFile", "readFileLines", "writeFile", "editFile", "listDirectory",
+    "listFiles", "searchFile", "fileOutline", "readFileStructure", "applyPatch", "undoEdit", "diffView",
+    // терминал и фоновые процессы
+    "runCommand", "runCommandOutput", "startBackground", "listBackground", "backgroundOutput",
+    "sendInput", "stopBackground",
+    // git-основы (приложение про репозитории — это обязательный минимум)
+    "gitStatus", "gitDiff", "gitLog", "gitCommit", "gitBranch",
+    // диалог, план, память
+    "askUser", "todoWrite", "memoryList", "memorySearch", "findTools",
+    // web, картинки, ожидание
+    "webSearch", "webFetch", "showImage", "analyzeImage", "generateImage", "waitUntil", "checkUrl",
+  ];
+
+  const TOOL_GROUPS = [
+    {
+      id: "git",
+      title: "git и GitHub (удалённые операции)",
+      keywords: ["запуш", "push", "опублик", "github", "гитхаб", "gitlab", "клонир", "clone", "выгрузи",
+        "pull", "стяни", "ветк", "branch", "checkout", "stash", "откати коммит", "revert", "cherry",
+        "blame", "кто автор", "перенеси коммит"],
+      names: ["gitClone", "gitPush", "gitPublish", "gitInit", "gitPull", "gitRevert", "gitUndoLastCommit",
+        "gitCheckout", "gitStash", "gitCherryPick", "gitBlame"],
+    },
+    {
+      id: "browser",
+      title: "браузер (сайты, клики, интерфейсы)",
+      keywords: ["браузер", "browser", "сайт", "страниц", "вкладк", "зайди", "зайти", "открой ссылк",
+        "ссылк", "url", "http", "гугл", "google", "авито", "вконтакте", "вк ", "клик", "нажми",
+        "навед", "прокрут", "скролл", "подсказк", "капч", "cookies", "сесси", "chromium", "playwright",
+        "авторизуй", "форма вход"],
+      names: ["browserOpen", "browserConnect", "browserClose", "browserStatus", "browserClearProfile",
+        "browserSnapshot", "browserClick", "browserFill", "browserAct", "browserSelect", "browserPress",
+        "browserText", "browserScreenshot", "browserEval", "browserDOM", "browserOverlays", "browserWait",
+        "browserScroll", "browserHover", "browserNetwork", "waitForIdle", "agentGuide"],
+    },
+    {
+      id: "system",
+      title: "система Windows (процессы, реестр, установка программ)",
+      keywords: ["реестр", "registry", "процесс", "диспетчер задач", "скриншот экрана", "экран",
+        "буфер", "clipboard", "скопируй", "вставь", "установи программ", "установк", "installer",
+        "winget", "choco", "scoop", "драйвер", "характеристик", "железо", "gpu", "cpu", "оперативн",
+        "переменные среды", "админ", "права администратора", "проводник", "ярлык"],
+      names: ["getSystemInfo", "listProcesses", "killProcess", "clipboardRead", "clipboardWrite",
+        "screenshotDesktop", "registryRead", "registryWrite", "openPath", "wingetSearch", "installExe",
+        "installSystemPackage", "checkInstalledProgram", "canExecute", "refreshEnv", "runCommandAsAdmin"],
+    },
+    {
+      id: "project",
+      title: "сборка, тесты, зависимости, .env, docker/BД",
+      keywords: ["тест", "test", "линт", "lint", "prettier", "формат код", "собери проект", "сборк",
+        "docker", "докер", "контейнер", "база данн", "бд", "sql", "запрос к баз", "env", "переменн",
+        "api", "http-запрос", "проверь проект", "архив", "распакуй", "зависимост", "установи пакет",
+        "библиотек"],
+      names: ["runTests", "lintProject", "formatCode", "validateProject", "installPackage",
+        "downloadAndExtract", "dbQuery", "dockerBuild", "dockerRun", "dockerExec",
+        "apiRequest", "envSet", "envList", "envUnset"],
+    },
+    {
+      id: "files",
+      title: "навигация и рефакторинг по коду",
+      keywords: ["структур", "outline", "зависимост", "dependenc", "ссылки на", "найди ссылк",
+        "рефактор", "переименуй", "переименова", "семантич", "по смыслу", "объясни код", "объясни ошибк"],
+      names: ["searchProject", "explainCode", "refactorRename", "explainError", "findReferences",
+        "semanticSearch", "getDependencies"],
+    },
+    {
+      id: "terminal",
+      title: "оболочки, порты, фоновые команды",
+      keywords: ["shell", "оболочк", "терминал", "порт", "фонов", "долгую команд", "таймаут",
+        "повтори команд", "скрипт", "bash", "powershell"],
+      names: ["shellsStatus", "shellStart", "shellSend", "retryCommand", "timeoutCommand", "runScript",
+        "listPorts", "checkPort"],
+    },
+    {
+      id: "notes",
+      title: "заметки и точки возврата",
+      keywords: ["заметк", "note", "чекпоинт", "checkpoint", "точку возврата", "точка возврата",
+        "дневник", "памятк", "откатись"],
+      names: ["noteSave", "noteRead", "noteList", "noteDelete", "checkpointSave", "checkpointList",
+        "checkpointRollback"],
+    },
+    {
+      id: "mail",
+      title: "почта агента",
+      keywords: ["почт", "письм", "mail", "smtp", "imap", "ящик", "коммерческое предлож", "кп ",
+        "входящ", "код подтвержден"],
+      names: ["mailSend", "mailList", "mailCode"],
+    },
+    {
+      id: "vault",
+      title: "менеджер паролей",
+      keywords: ["парол", "vault", "сохрани вход", "вход на сайт", "логин и пароль"],
+      names: ["vaultList", "vaultFill"],
+    },
+    {
+      id: "app",
+      title: "управление окном приложения",
+      keywords: ["окно приложени", "интерфейс приложени", "своё прилож", "мое прилож", "в приложении",
+        "скриншот приложени"],
+      names: ["appRead", "appClick", "appFill", "appSelect", "appPress", "appWait", "appScreenshot",
+        "screenshotCapture"],
+    },
+    {
+      id: "preview",
+      title: "превью и запуск проекта",
+      keywords: ["превью", "preview", "запусти проект", "запустить проект", "dev-сервер", "dev server",
+        "localhost", "открой в браузере"],
+      names: ["previewUI", "openUrl"],
+    },
+    {
+      id: "ota",
+      title: "самообновление",
+      keywords: ["ota", "самосовершен", "обнови себя", "откати обновление", "обновление приложени"],
+      names: ["otaStatus", "otaCheck", "otaRollback"],
+    },
+    {
+      id: "cloud",
+      title: "Yandex Cloud",
+      keywords: ["yandex", "яндекс", "облак", "cloud", "серверлес", "serverless", "бакет", "s3"],
+      names: ["ycStatus", "ycList", "ycCreate", "ycDelete", "ycDeploy", "ycLogs", "ycInstall"],
+    },
+  ];
+
+  // Потолок «веса» выбранных схем (в токенах): база + группы должны укладываться сюда.
+  // База стоит ~5 900 (36 схем), «браузер» ~5 570, «система» ~2 270, «проект» ~1 950.
+  // 15 000 = база + 2–3 группы: тихая задача остаётся ~5.9k вместо 24.5k, а нужные
+  // группы почти всегда помещаются. Если потолок всё же срезал группу — main.js
+  // пишет об этом в «Консоль» (dropped), а предохранители A/B доберут её при работе.
+  // База не режется никогда: без файлов/терминала/git агент не работает.
+  const ROUTER_MAX_TOKENS = 15000;
+
+  const _toolByGroupName = new Map(); // имя → id группы (для предохранителя A)
+  const _groupNames = new Map();      // id → [имена]
+  for (const g of TOOL_GROUPS) {
+    _groupNames.set(g.id, g.names.slice());
+    for (const n of g.names) _toolByGroupName.set(n, g.id);
+  }
+  const _groupTokensCache = new Map();
+  function groupTokenWeight(id) {
+    if (_groupTokensCache.has(id)) return _groupTokensCache.get(id);
+    const names = new Set(_groupNames.get(id) || []);
+    const w = estimateTokens(JSON.stringify(TOOL_DEFINITIONS.filter((t) => names.has(t.function && t.function.name))));
+    _groupTokensCache.set(id, w);
+    return w;
+  }
+  const BASE_TOOL_WEIGHT = estimateTokens(
+    JSON.stringify(TOOL_DEFINITIONS.filter((t) => BASE_TOOL_NAMES.indexOf(t.function && t.function.name) !== -1))
+  );
+
+  // Какие группы активированы по тексту запроса (счётчик совпавших слов группы).
+  function scoreGroups(text) {
+    const t = String(text || "").toLowerCase();
+    const out = [];
+    for (const g of TOOL_GROUPS) {
+      let score = 0;
+      for (const kw of g.keywords) {
+        if (kw && t.indexOf(kw) !== -1) score++;
+      }
+      out.push({ id: g.id, score: score });
+    }
+    return out;
+  }
+
+  // Предохранитель B: поиск инструмента по смыслу запроса (findTools).
+  // Ищем по имени и описанию; слова запроса должны встречаться целиком (частичное
+  // совпадение окончаний не требуется — берём и по началу слова, как scoreGroups).
+  function searchTools(query, limit) {
+    const q = String(query || "").toLowerCase().trim();
+    const n = Math.max(1, Math.min(30, Number(limit) || 8));
+    if (!q) return [];
+    const words = q.split(/[^\p{L}\p{N}_]+/u).filter((w) => w.length >= 3);
+    const scoreOf = (f) => {
+      const name = String(f.name).toLowerCase();
+      const desc = String(f.description || "").toLowerCase();
+      let sc = 0;
+      if (name.indexOf(q.replace(/\s+/g, "")) !== -1) sc += 6;
+      for (const w of words) {
+        const root = w.length > 5 ? w.slice(0, w.length - 2) : w;
+        if (name.indexOf(root) !== -1) sc += 3;
+        if (desc.indexOf(root) !== -1) sc += 1;
+      }
+      return sc;
+    };
+    // 1) Группы, чьи ключевые слова совпали («запуш» → git, «скриншот» → system).
+    //    Это главный сигнал: он ловит русские слова, которых нет в английских именах.
+    const groupScore = new Map(scoreGroups(q).filter((s) => s.score > 0).map((s) => [s.id, s.score]));
+    const out = [];
+    const seen = new Set();
+    TOOL_DEFINITIONS.forEach((t, idx) => {
+      const f = t && t.function;
+      if (!f || !f.name || f.name === "findTools") return;
+      const gid = _toolByGroupName.get(f.name) || "";
+      const gs = groupScore.get(gid) || 0;
+      const sc = scoreOf(f) + gs * 4 + (gs > 0 ? 2 : 0);
+      if (sc <= 0) return;
+      seen.add(f.name);
+      out.push({ name: f.name, group: gid, description: String(f.description || ""), score: sc, idx: idx });
+    });
+    // 2) Инструменты, найденные в первом проходе, тянут за собой всю свою группу:
+    //    модель просит «письмо» — получает весь почтовый набор.
+    const groupsHit = new Set(out.filter((x) => x.group).map((x) => x.group));
+    TOOL_DEFINITIONS.forEach((t, idx) => {
+      const f = t && t.function;
+      if (!f || !f.name || seen.has(f.name)) return;
+      const gid = _toolByGroupName.get(f.name) || "";
+      if (!gid || !groupsHit.has(gid)) return;
+      seen.add(f.name);
+      // 0.5 — ниже прямых совпадений, но выше нуля: порядок внутри группы остаётся
+      // каноническим (idx), поэтому список детерминирован.
+      out.push({ name: f.name, group: gid, description: String(f.description || ""), score: 0.5, idx: idx });
+    });
+    out.sort((a, b) => b.score - a.score || a.idx - b.idx);
+    return out.slice(0, n);
+  }
+
+  // Итоговый набор схем: база + липкие/найденные группы в КАНОНИЧЕСКОМ порядке.
+  // opts: { text, sticky (массив id), forceAll, maxTokens }
+  function routeTools(opts) {
+    const o = opts || {};
+    const sticky = new Set(o.sticky || []);
+    if (o.forceAll) {
+      return {
+        tools: TOOL_DEFINITIONS,
+        groups: TOOL_GROUPS.map((g) => g.id),
+        dropped: [],
+        tokens: estimateTokens(JSON.stringify(TOOL_DEFINITIONS)),
+        activated: [],
+        all: true,
+      };
+    }
+    const scores = scoreGroups(o.text);
+    const byId = new Map(scores.map((s) => [s.id, s.score]));
+    const activated = [];
+    for (const s of scores) {
+      if (s.score > 0) {
+        sticky.add(s.id);
+        activated.push(s.id);
+      }
+    }
+    const maxTokens = Math.max(BASE_TOOL_WEIGHT, o.maxTokens || ROUTER_MAX_TOKENS);
+    // Группы добавляем по силе сигнала; при равном счёте — по порядку реестра
+    // (детерминированно). Сортировка влияет только на ПОРЯДОК ДОБАВЛЕНИЯ, а не на
+    // порядок схем в запросе — он всегда канонический.
+    const wanted = [];
+    for (let i = 0; i < TOOL_GROUPS.length; i++) {
+      const g = TOOL_GROUPS[i];
+      if (!sticky.has(g.id)) continue;
+      wanted.push({ id: g.id, score: byId.get(g.id) || 0, i: i, tokens: groupTokenWeight(g.id) });
+    }
+    wanted.sort((a, b) => b.score - a.score || a.i - b.i);
+    let weight = BASE_TOOL_WEIGHT;
+    const used = [];
+    const dropped = [];
+    for (const g of wanted) {
+      if (weight + g.tokens <= maxTokens) {
+        used.push(g.id);
+        weight += g.tokens;
+      } else {
+        dropped.push(g.id);
+      }
+    }
+    const names = new Set(BASE_TOOL_NAMES);
+    for (const id of used) {
+      for (const n of _groupNames.get(id) || []) names.add(n);
+    }
+    return {
+      tools: TOOL_DEFINITIONS.filter((t) => names.has(t.function && t.function.name)),
+      groups: used,
+      dropped: dropped,
+      tokens: weight,
+      activated: activated,
+      all: false,
+    };
+  }
+
+  // Предохранитель A: имя реального инструмента, которого нет в текущем наборе.
+  // Возвращает id группы (или "" — такого инструмента нет вовсе).
+  function groupOfTool(name) {
+    return _toolByGroupName.get(String(name || "")) || "";
+  }
+
   // Если окно контекста >= 26k — шлём все инструменты; иначе только ядро (~36 вместо 74).
   function selectTools(budget) {
     const b = budget || contextBudget("openai");
@@ -3957,6 +4440,12 @@
     sanitizeToolPairs,
     truncateText,
     selectTools,
+    routeTools,
+    searchTools,
+    TOOL_GROUPS,
+    BASE_TOOL_NAMES,
+    groupOfTool,
+    ROUTER_MAX_TOKENS,
     PLAN_MODE_TOOL_DEFINITIONS,
     modelWindow,
     compactRemote,
@@ -3970,6 +4459,11 @@
     htmlToText,
     // вспомогательная модель: зрение + генерация изображений
     auxConfig,
+    normalizeAuxBase,
+    fmtError,
+    splitStaticSystem,
+    anthropicSystem,
+    normalizeUsage,
     describeImageRemote,
     generateImageRemote,
     // инструменты ОС

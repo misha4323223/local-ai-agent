@@ -29,7 +29,7 @@ const crypto = require("crypto");
 const net = require("net");
 const { spawn, execFileSync } = require("child_process");
 
-const ROOT = path.join(__dirname, "..");
+const ROOT = path.join(__dirname, ".."); // корень проекта
 let passed = 0;
 let failed = 0;
 
@@ -48,6 +48,34 @@ function test(name, fn) {
 
 function tmpdir(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+// ── Промпт-диета: что РЕАЛЬНО видит модель ──────────────────────────────────
+// Длинные правила переехали в справочники (src/agent-guides) и приходят в запрос
+// сами, когда активна группа (GROUP_GUIDES в main.js). Поэтому проверяем
+// «эффективный промпт» = SYSTEM_PROMPT + автоподключаемые справочники, а не только
+// текст agent-core.js: иначе тест требует вернуть в промпт то, что сознательно убрали.
+function autoGuideNames() {
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const m = /const GROUP_GUIDES = \{([^}]*)\}/.exec(mainSrc);
+  assert.ok(m, "в main.js нет карты GROUP_GUIDES — справочники групп не подключаются");
+  const names = m[1]
+    .split(",")
+    .map((pair) => (pair.split(":")[1] || "").trim().replace(/["']/g, ""))
+    .filter(Boolean);
+  assert.ok(names.length >= 4, "GROUP_GUIDES почти пуст: " + m[1]);
+  return [...new Set(names)];
+}
+function modelPrompt() {
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+  const parts = [core.SYSTEM_PROMPT || ""];
+  for (const n of autoGuideNames()) {
+    const file = path.join(ROOT, "src", "agent-guides", n + ".md");
+    assert.ok(fs.existsSync(file), "справочник группы \"" + n + "\" не найден: " + file);
+    parts.push(fs.readFileSync(file, "utf8"));
+  }
+  // Markdown-кавычки мешают сверять фразы: убираем их, текст правил не меняем.
+  return parts.join("\n").replace(/`/g, "");
 }
 
 // ── 1. agent-core ───────────────────────────────────────────────────────────
@@ -366,6 +394,61 @@ async function testAgentCore() {
     assert.strictEqual(core.friendlyRateLimitError(500, "server error", groq), null);
     assert.strictEqual(core.friendlyRateLimitError(401, "unauthorized", groq), null);
     assert.strictEqual(core.friendlyRateLimitError(413, "request body too large", groq), null);
+  });
+
+  // ── Ошибка vision: показываем причину, а не «[object Promise]» ────────────
+  // Было: readApiError() (async) вызывалась без await → в текст ошибки попадал промис.
+  const realFetchVision = global.fetch;
+  await test("analyzeImage/generateImage: ошибка API читаемая, а не «[object Promise]»", async () => {
+    const badBody = JSON.stringify({
+      error: { code: 400, message: "API key not valid. Please pass a valid API key.", status: "INVALID_ARGUMENT" },
+    });
+    global.fetch = async () => ({ ok: false, status: 400, text: async () => badBody, json: async () => JSON.parse(badBody) });
+    const cfg = {
+      enabled: true,
+      url: "https://generativelanguage.googleapis.com/v1beta/openai",
+      key: "k",
+      visionModel: "gemini-2.0-flash-001",
+      imageModel: "img",
+    };
+    try {
+      await assert.rejects(
+        () => core.describeImageRemote(cfg, "data:image/png;base64,AA==", "что тут?", "gemini-2.0-flash-001"),
+        (e) => {
+          assert.ok(e instanceof Error, "брошен не Error");
+          assert.ok(!/\[object Promise\]/.test(e.message), "снова [object Promise]: " + e.message);
+          assert.ok(/API key not valid/.test(e.message), "нет причины из ответа API: " + e.message);
+          return true;
+        }
+      );
+      await assert.rejects(
+        () => core.generateImageRemote(cfg, "кот", "img"),
+        (e) => {
+          assert.ok(!/\[object Promise\]/.test(e.message), "generateImage снова [object Promise]: " + e.message);
+          assert.ok(/API key not valid/.test(e.message), "нет причины из ответа API: " + e.message);
+          return true;
+        }
+      );
+    } finally {
+      global.fetch = realFetchVision;
+    }
+  });
+
+  await test("fmtError: промис — «забыт await», объекты и строки читаемы", () => {
+    assert.strictEqual(core.fmtError(new Error("ENOENT: no such file or directory")), "ENOENT: no such file or directory");
+    assert.ok(/забыт await/.test(core.fmtError(Promise.resolve(1))), "промис не распознан как промис");
+    assert.strictEqual(core.fmtError("просто строка"), "просто строка");
+    assert.ok(core.fmtError({ code: 400 }).includes("400"), "объект не сериализован");
+    assert.strictEqual(core.fmtError(undefined), "undefined");
+  });
+
+  await test("auxConfig: база Gemini приводится к OpenAI-совместимому /v1beta/openai", () => {
+    const g1 = core.auxConfig({ visionEnabled: true, visionUrl: "https://generativelanguage.googleapis.com/v1", visionModel: "gemini-2.0-flash-001" });
+    assert.strictEqual(g1.url, "https://generativelanguage.googleapis.com/v1beta/openai");
+    const g2 = core.auxConfig({ visionEnabled: true, visionUrl: "https://generativelanguage.googleapis.com/v1beta/openai/", visionModel: "m" });
+    assert.strictEqual(g2.url, "https://generativelanguage.googleapis.com/v1beta/openai");
+    const other = core.auxConfig({ visionEnabled: true, visionUrl: "https://api.openai.com/v1", visionModel: "gpt-4o-mini" });
+    assert.strictEqual(other.url, "https://api.openai.com/v1", "чужая база изменена");
   });
 }
 
@@ -1485,7 +1568,7 @@ async function testYcDiagnosis() {
         const d = coreSrc.split('name: "' + n + '"')[1] || "";
         assert.ok(d.slice(0, 600).includes("ref"), "в описании " + n + " нет ref");
       }
-      assert.ok(/номер \[N\] устаревает при любой перерисовке/.test(coreSrc), "промпт не предупреждает про номера");
+      assert.ok(/номер \[N\] устаревает при любой перерисовке/.test(modelPrompt()), "промпт не предупреждает про номера");
     });
   } finally {
     global.fetch = realFetch;
@@ -1637,7 +1720,7 @@ async function testVault() {
     const defs = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name);
     assert.ok(defs.includes("vaultList") && defs.includes("vaultFill"), "нет описаний vault-инструментов");
     assert.ok(coreSrc.includes("НИКОГДА не проси пароль в чате"), "в промпте нет запрета просить пароль в чате");
-    assert.ok(coreSrc.includes("vaultFill подставляет логин и пароль прямо в форму"), "промпт не направляет агента в vaultFill");
+    assert.ok(modelPrompt().includes("vaultFill подставляет логин и пароль прямо в форму"), "промпт не направляет агента в vaultFill");
 
     for (const id of ["vault-list", "s-vault-name", "s-vault-url", "s-vault-login", "s-vault-pass", "s-vault-note", "btn-vault-add", "btn-vault-clear", "btn-vault-eye"]) {
       assert.ok(htmlSrc.includes('id="' + id + '"'), "нет id=" + id + " в index.html");
@@ -2650,7 +2733,8 @@ async function testYandexCloud() {
     const prompt = core.SYSTEM_PROMPT || "";
     for (const n of ["ycLogs", "ycInstall"]) assert.ok(prompt.includes(n), "в промпте нет " + n);
     assert.ok(/yc init не нужен/.test(prompt), "в промпте нет пояснения про автоматическую авторизацию");
-    assert.ok(/внутренним API Cloud Logging/.test(prompt), "в промпте не сказано, что логи идут внутренним API");
+    const full = modelPrompt(); // промпт + автоподключаемый справочник группы cloud (промпт-диета)
+    assert.ok(/внутренним API/i.test(full) && /Cloud Logging/.test(full), "в промпте не сказано, что логи идут внутренним API");
     const logsDef = core.TOOL_DEFINITIONS.find((d) => d.function && d.function.name === "ycLogs");
     assert.ok(/внутренним API/.test(logsDef.function.description), "описание ycLogs не обновлено");
     assert.deepStrictEqual(logsDef.function.parameters.required, ["id"], "id должен быть единственным обязательным");
@@ -3046,7 +3130,7 @@ async function testShellAndCdp() {
     assert.ok(/timeoutCommand, shellsStatus, checkInstalledProgram/.test(core2), "нет в списке инструментов промпта");
     assert.ok(/"shellsStatus",/.test(core2), "нет в ядре инструментов (тесный контекст)");
     assert.ok(/shells_status: "shellsStatus"/.test(core2), "нет алиаса");
-    assert.ok(/вызови shellsStatus/.test(core2), "промпт не велит проверять доступные оболочки");
+    assert.ok(/вызови shellsStatus/.test(modelPrompt()), "промпт не велит проверять доступные оболочки");
     assert.ok(/case "shellsStatus": \{/.test(mainFull), "нет диспетчера в main.js");
     assert.ok(/parts\.push\("Оболочки: " \+ shellsBrief\(\)\)/.test(mainFull), "нет строки оболочек в САММАРИ проекта");
   });
@@ -3233,7 +3317,7 @@ async function testShellAndCdp() {
     const list = core2.split("\n").find((l) => l.startsWith("Доступные инструменты:")) || "";
     assert.ok(/browserConnect/.test(list), "инструмента нет в списке для модели");
     assert.ok(/browser_connect: "browserConnect"/.test(core2), "нет алиаса browser_connect");
-    assert.ok(/начни с browserConnect/.test(core2), "промпт не объясняет, когда подключаться к своему Chrome");
+    assert.ok(/начни с browserConnect/.test(modelPrompt()), "промпт не объясняет, когда подключаться к своему Chrome");
     assert.ok(pre2.includes("browserConnect: (opts) =>"), "preload не пробрасывает browserConnect");
     assert.ok(mainFull.includes('case "browserConnect": {'), "нет диспетчера инструмента");
     assert.ok(mainFull.includes("function applyBrowserSettings(s)"), "нет единой точки применения браузерных настроек");
@@ -3898,7 +3982,11 @@ async function testPlanPanel() {
     // модель физически не могла, и панель оставалась пустой до кнопки «▶ Выполнить».
     assert.strictEqual(AgentCore.PLAN_MODE_TOOL_DEFINITIONS.length, 1, "в План-режиме не ровно один инструмент");
     assert.strictEqual(AgentCore.PLAN_MODE_TOOL_DEFINITIONS[0].function.name, "todoWrite", "в План-режиме нет todoWrite");
-    assert.ok(/const activeTools = planMode \? PLAN_MODE_TOOL_DEFINITIONS : selectTools\(budget\);/.test(mainSrc), "План-режим не получает набор с todoWrite");
+    // Набор схем теперь собирает роутер: в План-режиме — ровно PLAN_MODE_TOOL_DEFINITIONS,
+    // в обычном — routeTools (база + липкие группы).
+    assert.ok(/activeTools = PLAN_MODE_TOOL_DEFINITIONS;/.test(mainSrc), "План-режим не получает набор с todoWrite");
+    assert.ok(/routeInfo = routeTools\(\{ text: routerTask, sticky: \[\.\.\.stickyGroups\]/.test(mainSrc), "выбор схем не идёт через роутер");
+    assert.ok(/const forceAllTools = !!settings\.sendAllTools;/.test(mainSrc), "нет предохранителя C (все инструменты)");
     assert.ok(/tools: activeTools,/.test(mainSrc), "в запрос уходит не activeTools");
     assert.ok(mainSrc.indexOf("tools: planMode ? [] : activeTools") === -1, "осталось старое обнуление инструментов");
     // Исполнение: в этом режиме выполняется только todoWrite, остальное — честный отказ.
@@ -4328,12 +4416,20 @@ async function testBrowserOverlays() {
       const dir = path.join(tmpdir("agent-shots-"), "shots");
       const r = await bt.screenshot({ dir });
       assert.ok(/скриншот сохранён/.test(r), "нет подтверждения сохранения: " + r.slice(0, 120));
-      const m = r.match(/сохранён в файл: (.+\.png)/);
+      // По умолчанию — JPEG (компактнее для vision-модели), PNG остаётся по флагу png:true.
+      const m = r.match(/сохранён в файл: (.+\.(?:jpg|png))/);
       assert.ok(m && fs.existsSync(m[1]), "файла нет на диске: " + r.slice(0, 160));
+      assert.ok(/\.jpg$/.test(m[1]), "по умолчанию ожидался .jpg: " + m[1]);
       assert.ok(fs.readFileSync(m[1]).equals(png), "содержимое файла не совпало");
       assert.ok(/analyzeImage/.test(r), "нет подсказки про разбор");
       const data = await bt.screenshot({ dir, dataUrl: true });
-      assert.ok(/^data:image\/png;base64,/.test(data), "data URL не вернулся по запросу");
+      assert.ok(/^data:image\/jpeg;base64,/.test(data), "data URL не вернулся (ожидался jpeg): " + data.slice(0, 40));
+      // Флаг png: true возвращает PNG-файл и PNG data URL (точное чтение мелкого текста).
+      const rp = await bt.screenshot({ dir, png: true });
+      const mp = rp.match(/сохранён в файл: (.+\.png)/);
+      assert.ok(mp && fs.existsSync(mp[1]), "png: true не дал .png файл: " + rp.slice(0, 160));
+      const dp = await bt.screenshot({ dir, png: true, dataUrl: true });
+      assert.ok(/^data:image\/png;base64,/.test(dp), "png: true не вернул png data URL");
     });
   } finally {
     Module_.prototype.require = origRequire;
@@ -4347,8 +4443,8 @@ async function testBrowserOverlays() {
       assert.ok(coreSrc.indexOf('name: "' + t + '"') !== -1, "нет определения " + t + " в ядре");
       assert.ok(AgentCore.SYSTEM_PROMPT.indexOf(t) !== -1, t + " нет в списке доступных инструментов");
     }
-    assert.ok(/browserOverlays \{ dismiss: true \}/.test(AgentCore.SYSTEM_PROMPT), "промпт не учит закрывать помехи");
-    assert.ok(/terms of service\) молча не подтверждай/.test(AgentCore.SYSTEM_PROMPT), "промпт не запрещает молчаливое согласие");
+    assert.ok(/browserOverlays \{ dismiss: true \}/.test(modelPrompt()), "промпт не учит закрывать помехи");
+    assert.ok(/terms of service\) молча не подтверждай/.test(modelPrompt()), "промпт не запрещает молчаливое согласие");
     assert.ok(/screenshotFile\(Object\.assign\(\{\}, args, \{ dir: shotDir \}\)\)/.test(mainSrc), "скриншот не сохраняется файлом");
     assert.ok(/Vision-модель не ответила/.test(mainSrc), "нет честного сообщения, когда зрение не ответило");
     assert.ok(/activeEmit\(\{ type: "image", path: shot\.path/.test(mainSrc), "скриншот не показывается пользователю");
@@ -4364,6 +4460,113 @@ async function testBrowserOverlays() {
     assert.ok(appSrc.length > 0, "app.js не прочитан");
   });
 }
+
+// ── Ускорение агента: батчинг, скриншоты JPEG, порог компакции ──────────────
+async function testAgentSpeedups() {
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const appUiSrc = fs.readFileSync(path.join(ROOT, "src", "app-ui-tools.js"), "utf8");
+  const browserSrc = fs.readFileSync(path.join(ROOT, "src", "browser-tools.js"), "utf8");
+
+  await test("батчинг: правило 35 в промпте + параллельный набор read-only инструментов", () => {
+    assert.ok(/^35\. БАТЧИНГ/m.test(core.SYSTEM_PROMPT), "в промпте нет правила 35 (батчинг)");
+    assert.ok(/ВСЕ СРАЗУ в одном ответе/.test(core.SYSTEM_PROMPT), "правило не просит звать несколько инструментов сразу");
+    assert.ok(/параллельн/i.test(core.SYSTEM_PROMPT), "правило не объясняет, что вызовы пойдут параллельно");
+    assert.ok(/const PARALLEL_SAFE_TOOLS = new Set\(\[/.test(mainSrc), "нет списка безопасных для параллели инструментов");
+    const setStart = mainSrc.indexOf("PARALLEL_SAFE_TOOLS = new Set");
+    const block = mainSrc.slice(setStart, mainSrc.indexOf("]);", setStart));
+    for (const t of ["readFile", "searchProject", "gitStatus", "gitDiff", "webFetch"]) {
+      assert.ok(block.indexOf('"' + t + '"') !== -1, "в PARALLEL_SAFE_TOOLS нет " + t);
+    }
+    // Писатели и интерактивные инструменты НЕ должны попасть в параллельный набор.
+    for (const t of ["writeFile", "editFile", "applyPatch", "runCommand", "askUser", "gitCommit", "gitPush", "createFolder", "startBackground"]) {
+      assert.ok(block.indexOf('"' + t + '"') === -1, "писатель " + t + " попал в параллельный набор");
+    }
+    assert.ok(/calls\.every\(\(c\) => PARALLEL_SAFE_TOOLS\.has\(c\.name\)\)/.test(mainSrc), "нет условия параллельного выполнения");
+    assert.ok(/await Promise\.all\(\s*calls\.map/.test(mainSrc), "нет параллельного запуска через Promise.all");
+  });
+
+  await test("скриншоты: JPEG по умолчанию, PNG по флагу png:true, mime по расширению", () => {
+    assert.ok(/function encodeShot\(/.test(mainSrc) && /toJPEG\(/.test(mainSrc), "нет JPEG-кодирования скриншотов в main.js");
+    assert.ok(/wantPng = a\.png === true/.test(mainSrc), "нет флага png:true для точных скриншотов");
+    assert.ok(/const IMG_MIME = \{/.test(mainSrc) && /"\.jpg": "image\/jpeg"/.test(mainSrc), "analyzeImage не мапит .jpg → image/jpeg");
+    assert.ok(/toJPEG\(/.test(appUiSrc), "appScreenshot не отдаёт JPEG");
+    assert.ok(/type: "jpeg", quality/.test(browserSrc), "browserScreenshot не снимает JPEG по умолчанию");
+    assert.ok(/r\.mime \|\| "image\/png"/.test(browserSrc), "data URL скриншота браузера не учитывает mime");
+  });
+
+  await test("компакция: сжатие с резервом 15% до переполнения", () => {
+    // Резерв 15% + честное вычитание схем и системного промпта (иначе индикатор врёт).
+    assert.ok(/Math\.floor\(\(budget - toolsWeight - systemWeight\) \* 0\.85\)/.test(mainSrc), "нет резерва 15% в бюджете истории");
+    assert.ok(/const systemWeight = estimateTokens\(SYSTEM_PROMPT\);/.test(mainSrc), "системный промпт не вычитается из бюджета");
+    assert.ok(/const used = histTokens \+ toolsWeight \+ systemWeight;/.test(mainSrc), "индикатор контекста не учитывает промпт");
+  });
+  await test("кэш промпта: Claude получает точки кэша, OpenAI-совместимым поле не шлём", () => {
+    const tools = [
+      { type: "function", function: { name: "a", description: "d", parameters: { type: "object", properties: {} } } },
+      { type: "function", function: { name: "b", description: "d", parameters: { type: "object", properties: {} } } },
+    ];
+    // 1) Anthropic: кэш на system и на последней схеме инструмента (кэширует весь блок tools).
+    const anth = JSON.parse(
+      core.buildChatRequest(
+        { provider: "anthropic", anthropicUrl: "https://api.anthropic.com", anthropicApiKey: "k" },
+        {
+          model: "claude-sonnet-4",
+          messages: [
+            { role: "system", content: "СИСТЕМА" },
+            { role: "user", content: "hi" },
+          ],
+          tools,
+        }
+      ).body
+    );
+    assert.ok(Array.isArray(anth.system) && anth.system[0].cache_control, "Anthropic: нет точки кэша на system");
+    assert.strictEqual(anth.system[0].cache_control.type, "ephemeral", "Anthropic: неверный тип точки кэша");
+    assert.strictEqual(anth.system[0].text, "СИСТЕМА", "Anthropic: текст системного промпта потерялся");
+    assert.ok(anth.tools[anth.tools.length - 1].cache_control, "Anthropic: нет точки кэша на последнем инструменте");
+    assert.ok(!anth.tools[0].cache_control, "Anthropic: лишняя точка кэша на первом инструменте");
+
+    // 2) Обычный OpenAI-совместимый API: поле запрещено — иначе 400.
+    const oai = core.buildChatRequest(
+      { provider: "openai", openaiUrl: "https://api.openai.com/v1", openaiApiKey: "k" },
+      { model: "gpt-4o-mini", messages: [{ role: "system", content: "S" }, { role: "user", content: "hi" }], tools }
+    );
+    assert.strictEqual(oai.body.indexOf("cache_control"), -1, "OpenAI получил чужое поле cache_control (будет 400)");
+
+    // 3) OpenRouter: кэш для Claude/Gemini, но не для прочих моделей.
+    const orClaude = JSON.parse(
+      core.buildChatRequest(
+        { provider: "openai", openaiUrl: "https://openrouter.ai/api/v1", openaiApiKey: "k" },
+        { model: "anthropic/claude-sonnet-4", messages: [{ role: "system", content: "S" }, { role: "user", content: "hi" }] }
+      ).body
+    );
+    const sysMsg = orClaude.messages[0];
+    assert.ok(Array.isArray(sysMsg.content) && sysMsg.content[0].cache_control, "OpenRouter+Claude: нет точки кэша");
+    assert.strictEqual(sysMsg.content[0].text, "S", "OpenRouter+Claude: системный текст потерялся");
+    const orGpt = core.buildChatRequest(
+      { provider: "openai", openaiUrl: "https://openrouter.ai/api/v1", openaiApiKey: "k" },
+      { model: "openai/gpt-4o", messages: [{ role: "system", content: "S" }, { role: "user", content: "hi" }] }
+    );
+    assert.strictEqual(orGpt.body.indexOf("cache_control"), -1, "OpenRouter+GPT получил cache_control");
+    // 4) Ollama: ничего лишнего.
+    const ollama = core.buildChatRequest(
+      { provider: "ollama", ollamaUrl: "http://127.0.0.1:11434" },
+      { model: "llama3", messages: [{ role: "system", content: "S" }, { role: "user", content: "hi" }] }
+    );
+    assert.strictEqual(ollama.body.indexOf("cache_control"), -1, "Ollama получила cache_control");
+  });
+
+  await test("ожидание событий: адаптивный опрос вместо фиксированных пауз", () => {
+    assert.ok(/async function waitUntil\(fn, timeoutMs, pollMs\)/.test(browserSrc), "нет waitUntil в browser-tools");
+    assert.ok(/let findPoll = 80;/.test(browserSrc), "поиск элемента не адаптивный (остались фиксированные 200 мс)");
+    assert.ok(/findPoll = Math\.min\(Math\.round\(findPoll \* 1\.6\), FIND_POLL_MS\)/.test(browserSrc), "опрос поиска не растёт до потолка");
+    assert.ok(/let poll = 100;/.test(browserSrc), "browserWait не адаптивный (остались фиксированные 400 мс)");
+    assert.ok(/await waitUntil\(async \(\) => \{[\s\S]{0,180}?\}, 400, 70\)/.test(browserSrc), "hover не ждёт появления меню событием");
+    assert.ok(/const moved = await waitUntil\(async \(\) => \{/.test(browserSrc), "прокрутка колесом ждёт фиксированную паузу");
+    assert.ok(!/await sleep\(400\);\s*\n\s*const after = await namesOnPage/.test(browserSrc), "в hover осталась слепая пауза 400 мс");
+  });
+}
+
 
 // ── Стрим и печать: работа не чаще одного кадра ────────────────────────────
 async function testStreamThrottle() {
@@ -4647,7 +4850,7 @@ async function testBrowserSpeed() {
       assert.ok(/name: "browserAct"/.test(coreSrc), "нет определения инструмента browserAct");
       assert.ok(/browserAct: "⚡"/.test(appSrc), "нет иконки browserAct в интерфейсе");
       assert.ok(/browserAct: "Цепочка действий в браузере"/.test(appSrc), "нет подписи browserAct");
-      assert.ok(/БЫСТРЫЙ ПУТЬ/.test(coreSrc), "в промпте нет блока про быстрый путь");
+      assert.ok(/быстрый путь/i.test(modelPrompt()), "в промпте нет блока про быстрый путь");
       assert.ok(/submit: true/.test(coreSrc), "промпт не знает про submit у browserFill");
       assert.ok(/фрейм/.test(coreSrc), "в описаниях нет поиска по фреймам");
     });
@@ -5005,7 +5208,7 @@ async function testBrowserSenses() {
     });
 
     await test("книга UI-паттернов: Material-select, автокомплит, длинные списки", () => {
-      const p = AgentCore.SYSTEM_PROMPT;
+      const p = modelPrompt(); // промпт + автоподключаемый справочник группы browser (промпт-диета)
       assert.ok(/НЕ <select>/.test(p), "не сказано, что Material-select — не <select>");
       assert.ok(/Автокомплит|подсказк/i.test(p), "нет правила про автокомплит (ввёл → выбрал подсказку)");
       assert.ok(/НЕ скролль вручную/.test(p), "нет правила про длинные списки (искать, а не скроллить)");
@@ -5015,6 +5218,560 @@ async function testBrowserSenses() {
   } finally {
     bt.setPlaywright(null);
   }
+}
+
+// ── Живая сессия PowerShell: один процесс на все системные справки ──────────
+async function testPowerShellSession() {
+  const ps = require(path.join(ROOT, "src", "win-ps.js"));
+  const markers = ps.__markers();
+  const { EventEmitter } = require("events");
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+
+  // Фальшивый powershell.exe: считает, сколько раз его запускали, и отвечает
+  // так же, как настоящая обёртка (маркеры BEGIN/END + код).
+  function harness() {
+    const state = { spawns: 0, last: null, reply: () => {}, onWrite: () => {} };
+    ps.__setPlatformForTests(() => "win32");
+    ps.__setSpawnForTests((file, args) => {
+      state.spawns++;
+      state.lastArgs = args;
+      const c = new EventEmitter();
+      c.stdin = {
+        writable: true,
+        write(s) {
+          state.onWrite(String(s));
+        },
+      };
+      c.stdout = new EventEmitter();
+      c.stdout.setEncoding = () => {};
+      c.stderr = new EventEmitter();
+      c.kill = () => {
+        c.killed = true;
+      };
+      state.last = c;
+      return c;
+    });
+    state.reply = (out, code) =>
+      state.last.stdout.emit("data", markers.BEGIN + "\n" + out + "\n" + markers.END + code + "\n");
+    return state;
+  }
+
+  await test("живая PowerShell: рукопожатие один раз, дальше все скрипты в одном процессе", async () => {
+    const h = harness();
+    const real = [];
+    let handshakes = 0;
+    h.onWrite = (line) => {
+      const script = Buffer.from(line.trim(), "base64").toString("utf8");
+      if (script.indexOf(markers.HANDSHAKE) !== -1) {
+        handshakes++;
+        setTimeout(() => h.reply(markers.HANDSHAKE, 0), 1);
+        return;
+      }
+      real.push(script);
+      setTimeout(() => h.reply("вывод " + real.length, 0), 1);
+    };
+    try {
+      const a = await ps.exec("Get-Date");
+      const b = await ps.exec("Get-Item 'C:\\temp'");
+      assert.strictEqual(a.ok, true, "первый скрипт не выполнился: " + JSON.stringify(a));
+      assert.strictEqual(a.out, "вывод 1", "вывод разобран неверно: " + JSON.stringify(a.out));
+      assert.strictEqual(b.out, "вывод 2", "второй скрипт не прошёл через ту же сессию");
+      assert.deepStrictEqual(real, ["Get-Date", "Get-Item 'C:\\temp'"], "скрипты потерялись при base64-передаче");
+      assert.strictEqual(handshakes, 1, "рукопожатие делается не один раз");
+      assert.strictEqual(h.spawns, 1, "процесс PowerShell поднят больше одного раза");
+      assert.strictEqual(ps.isRunning(), true, "сессия не держится между вызовами");
+      const args = h.lastArgs || [];
+      assert.ok(args.indexOf("-EncodedCommand") !== -1, "обёртка не уходит через -EncodedCommand");
+      assert.strictEqual(args[0], "-NoProfile", "сессия грузит профиль (это те самые секунды)");
+      const decoded = Buffer.from(args[args.length - 1], "base64").toString("utf16le");
+      assert.ok(/while \(\$true\)/.test(decoded), "обёртка не читает команды в цикле");
+      assert.ok(decoded.indexOf(markers.EXIT) !== -1, "обёртка не понимает команду выхода");
+      assert.ok(decoded.indexOf("FromBase64String") !== -1, "обёртка не декодирует скрипт из base64");
+
+      // Таймаут: сессия умирает, вызывающий получает noSession — и откатывается.
+      h.onWrite = () => {};
+      const t = await ps.exec("Start-Sleep 100", { timeoutMs: 1000 });
+      assert.strictEqual(t.noSession, true, "таймаут не помечен как noSession (откат не сработает)");
+      assert.strictEqual(h.last.killed, true, "зависшая сессия не убита");
+      assert.strictEqual(ps.isRunning(), false, "умершая сессия осталась в состоянии «жива»");
+
+      // Следующий вызов поднимает новую сессию, а не молча ломается.
+      h.onWrite = (line) => {
+        const script = Buffer.from(line.trim(), "base64").toString("utf8");
+        setTimeout(() => h.reply(script.indexOf(markers.HANDSHAKE) !== -1 ? markers.HANDSHAKE : "ok", 0), 1);
+      };
+      const c2 = await ps.exec("'ещё'");
+      assert.strictEqual(c2.ok, true, "сессия не перезапустилась после сбоя");
+      assert.strictEqual(h.spawns, 2, "новая сессия не поднята");
+    } finally {
+      ps.shutdown();
+      ps.__setSpawnForTests(null);
+      ps.__setPlatformForTests(null);
+    }
+  });
+
+  await test("живая PowerShell: провал рукопожатия → мгновенный откат, без зависаний", async () => {
+    const h = harness();
+    h.onWrite = () => setTimeout(() => h.reply("мусор вместо ответа", 0), 1);
+    try {
+      const a = await ps.exec("Get-Date");
+      assert.strictEqual(a.noSession, true, "неудавшееся рукопожатие не включило откат");
+      assert.ok(/не подтвердилась/.test(a.err || ""), "нет понятной причины отказа: " + a.err);
+      assert.strictEqual(h.last.killed, true, "нерабочая сессия не убита");
+      // Вторая попытка не должна снова поднимать процесс (это были бы секунды впустую).
+      const b = await ps.exec("Get-Date");
+      assert.strictEqual(b.noSession, true, "вторая попытка не откатилась");
+      assert.strictEqual(h.spawns, 1, "после провала рукопожатия процесс поднимается заново");
+    } finally {
+      ps.shutdown();
+      ps.__setSpawnForTests(null);
+      ps.__setPlatformForTests(null);
+    }
+  });
+
+  await test("живая PowerShell: подключена к справкам, кэш и откат на месте", () => {
+    assert.ok(/async function psScript\(script, timeoutMs\)/.test(mainSrc), "нет psScript в main.js");
+    assert.ok(/await winPs\.exec\(script, \{ timeoutMs: ms \}\)/.test(mainSrc), "psScript не использует живую сессию");
+    assert.ok(
+      /return spawnRaw\(\["powershell\.exe", "-NoProfile", "-NonInteractive", "-Command", script\]/.test(mainSrc),
+      "нет отката на разовый запуск PowerShell"
+    );
+    assert.ok(
+      !/spawnRaw\(\["powershell\.exe", "-NoProfile", "-NonInteractive", "-Command", ps\], \{ cwd: os\.homedir\(\), timeoutMs: 30000 \}\)/.test(mainSrc),
+      "getSystemInfo по-прежнему поднимает процесс на каждый вопрос"
+    );
+    assert.ok(/cachedPs\("sysinfo", 30000/.test(mainSrc), "нет кэша конфигурации ПК");
+    assert.ok(/cachedPs\("proc:win", 2000/.test(mainSrc), "нет кэша списка процессов");
+    assert.ok(/cachedPs\(\s*"reg:"/.test(mainSrc), "нет кэша чтения реестра");
+    assert.ok(/invalidatePsCache\("proc:"\)/.test(mainSrc), "killProcess не сбрасывает кэш процессов");
+    assert.ok(/invalidatePsCache\("reg:"\)/.test(mainSrc), "registryWrite не сбрасывает кэш реестра");
+    assert.ok(
+      /\(v\) => \/__ERR__\|Cannot find\|не найден\|отказано\/i\.test\(v\.out\)/.test(mainSrc),
+      "ошибка чтения реестра попадёт в кэш"
+    );
+  });
+}
+
+// ── Кэш промпта: статичный префикс и метрики токенов ─────────────────────────
+async function testPromptCacheAndUsage() {
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const cssSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "styles.css"), "utf8");
+  const orSettings = { provider: "openai", openaiUrl: "https://openrouter.ai/api/v1", openaiApiKey: "k" };
+
+  await test("кэш промпта: кэшируемый блок — только статичный SYSTEM_PROMPT", () => {
+    const prompt = core.SYSTEM_PROMPT;
+    const dynamic = "\n\nРабочая директория: /home/user\n=== САММАРИ ПРОЕКТА ===\n📁 src/";
+    const sp = core.splitStaticSystem(prompt + dynamic, prompt);
+    assert.ok(sp, "статичный префикс не распознан");
+    assert.strictEqual(sp.head, prompt, "в кэшируемый блок попал не весь статичный промпт");
+    assert.strictEqual(sp.tail, dynamic, "динамический хвост отделён неверно");
+    assert.ok(
+      sp.head.indexOf("/home/user") === -1 && sp.head.indexOf("📁") === -1,
+      "динамический «паспорт проекта» попал в кэшируемый блок"
+    );
+    assert.strictEqual(core.splitStaticSystem("совсем другой текст", prompt), null, "чужой текст признан статичным");
+    assert.strictEqual(core.splitStaticSystem(prompt, ""), null, "пустая граница принята за статичный префикс");
+  });
+
+  await test("кэш промпта: OpenRouter+Claude — кэш только на статичном блоке", () => {
+    const prompt = core.SYSTEM_PROMPT;
+    const dynamic = "\n\n=== САММАРИ ПРОЕКТА ===\n📄 package.json";
+    const req = core.buildChatRequest(orSettings, {
+      model: "anthropic/claude-3.5-sonnet",
+      messages: [{ role: "system", content: prompt + dynamic }, { role: "user", content: "привет" }],
+      tools: core.TOOL_DEFINITIONS,
+      staticSystem: prompt,
+    });
+    const sys = JSON.parse(req.body).messages[0];
+    assert.strictEqual(sys.role, "system");
+    assert.ok(Array.isArray(sys.content), "system не разбит на блоки");
+    assert.strictEqual(sys.content.length, 2, "ожидались два блока: статичный и динамический");
+    assert.ok(sys.content[0].cache_control, "нет точки кэша на статичном блоке");
+    assert.ok(!sys.content[1].cache_control, "точка кэша попала на динамический блок");
+    assert.strictEqual(sys.content[0].text, prompt, "статичный блок искажён");
+    assert.strictEqual(sys.content[1].text, dynamic, "динамический блок искажён");
+    assert.ok(sys.content[0].text.indexOf("📄 package.json") === -1, "динамика осталась в кэшируемом блоке");
+    // Без границы — прежнее поведение: один кэшируемый блок целиком.
+    const plain = JSON.parse(
+      core.buildChatRequest(orSettings, {
+        model: "anthropic/claude-3.5-sonnet",
+        messages: [{ role: "system", content: prompt + dynamic }],
+        tools: [],
+      }).body
+    ).messages[0];
+    assert.strictEqual(plain.content.length, 1, "без границы блок должен остаться один");
+  });
+
+  await test("кэш промпта: Anthropic — system блоками, схемы инструментов тоже кэшируются", () => {
+    const prompt = core.SYSTEM_PROMPT;
+    const ant = { provider: "anthropic", anthropicUrl: "https://api.anthropic.com", anthropicApiKey: "k" };
+    const body = JSON.parse(
+      core.buildChatRequest(ant, {
+        model: "claude-sonnet-4",
+        messages: [{ role: "system", content: prompt + "\n\nПлан: пункт 1" }, { role: "user", content: "ок" }],
+        tools: core.TOOL_DEFINITIONS,
+        staticSystem: prompt,
+      }).body
+    );
+    assert.ok(Array.isArray(body.system), "system не блоками");
+    assert.strictEqual(body.system.length, 2, "динамика должна идти отдельным блоком");
+    assert.ok(body.system[0].cache_control, "нет точки кэша на статичном промпте");
+    assert.ok(!body.system[1].cache_control, "точка кэша накрыла динамику");
+    assert.ok(body.tools[body.tools.length - 1].cache_control, "схемы инструментов не кэшируются");
+    // Без границы — как раньше: один блок под кэш.
+    const old = JSON.parse(
+      core.buildChatRequest(ant, {
+        model: "claude-sonnet-4",
+        messages: [{ role: "system", content: prompt }],
+        tools: [],
+      }).body
+    );
+    assert.strictEqual(old.system.length, 1, "без границы ожидается один блок");
+    assert.ok(old.system[0].cache_control, "точка кэша пропала вовсе");
+  });
+  await test("кэш промпта: Anthropic + справочники — кэш только на статике, ничего не теряется", () => {
+    const prompt = core.SYSTEM_PROMPT;
+    const brief = "\n\nРабочая директория: /home/user\n=== САММАРИ ПРОЕКТА ===\n📁 src/";
+    const guideA = '=== СПРАВОЧНИК АГЕНТА: "browser" (группа "browser") ===\nБыстрый путь: browserOpen → browserSnapshot';
+    const guideB = '=== СПРАВОЧНИК АГЕНТА: "yc" (группа "cloud") ===\nНачни с ycStatus';
+    // Ровно та раскладка, что строит main.js: [system(промпт+brief), ...guideNotes, ...история]
+    const messages = [
+      { role: "system", content: prompt + brief },
+      { role: "system", content: guideA },
+      { role: "system", content: guideB },
+      { role: "user", content: "открой сайт" },
+      { role: "assistant", content: "ок" },
+    ];
+    const ant = { provider: "anthropic", anthropicUrl: "https://api.anthropic.com", anthropicApiKey: "k" };
+    const body = JSON.parse(
+      core.buildChatRequest(ant, { model: "claude-sonnet-4", messages, tools: [], staticSystem: prompt }).body
+    );
+    assert.ok(Array.isArray(body.system), "system не блоками");
+    assert.strictEqual(body.system.length, 2, "ожидались статичный блок + динамика со справочниками");
+    assert.ok(body.system[0].cache_control, "нет точки кэша на статичном промпте");
+    assert.ok(!body.system[1].cache_control, "точка кэша накрыла динамику и справочники");
+    assert.strictEqual(body.system[0].text, prompt, "статичный блок искажён");
+    const tail = body.system[1].text;
+    assert.ok(tail.indexOf(guideA) !== -1 && tail.indexOf(guideB) !== -1, "справочники потерялись в system");
+    assert.ok(tail.indexOf("/home/user") !== -1, "паспорт проекта потерялся");
+    assert.ok(body.system[0].text.indexOf("СПРАВОЧНИК АГЕНТА") === -1, "справочник попал в кэшируемый блок");
+    assert.ok(!body.messages.some((m) => m.role === "system"), "system остался в messages");
+    assert.deepStrictEqual(body.messages.map((m) => m.role), ["user", "assistant"], "история диалога повреждена");
+    // Заметка о повторной попытке приходит ПОСЛЕ истории (main.js) — у Anthropic она тоже
+    // обязана уехать в верхнеуровневый system: system внутри messages API не принимает.
+    const retryBody = JSON.parse(
+      core.buildChatRequest(ant, {
+        model: "claude-sonnet-4",
+        messages: [
+          { role: "system", content: prompt + brief },
+          { role: "user", content: "почини баг" },
+          { role: "assistant", content: "работаю" },
+          { role: "system", content: "⚠️ ПРЕДЫДУЩАЯ ПОПЫТКА УПАЛА — авто-повтор" },
+          { role: "user", content: "продолжай" },
+        ],
+        tools: [],
+        staticSystem: prompt,
+      }).body
+    );
+    assert.ok(!retryBody.messages.some((m) => m.role === "system"), "заметка о повторе осталась в messages");
+    assert.strictEqual(retryBody.system.length, 2, "заметка раздвоила блоки system");
+    assert.ok(
+      retryBody.system[1].text.indexOf("ПРЕДЫДУЩАЯ ПОПЫТКА УПАЛА") !== -1,
+      "заметка о повторе не попала в system"
+    );
+    assert.ok(!retryBody.system[1].cache_control, "кэш накрыл заметку о повторе");
+  });
+
+  await test("G4F: строгий OpenAI-совместимый получает ОДИН ведущий system и никаких полей кэша", () => {
+    const prompt = core.SYSTEM_PROMPT;
+    const g4f = { provider: "openai", openaiUrl: "http://localhost:1337/v1", openaiApiKey: "" };
+    const guideA = '=== СПРАВОЧНИК АГЕНТА: "browser" (группа "browser") ===\nБыстрый путь';
+    const guideB = '=== СПРАВОЧНИК АГЕНТА: "system" (группа "system") ===\nОболочки: shellsStatus';
+    const messages = [
+      { role: "system", content: prompt + "\n\nРабочая директория: /home/user" },
+      { role: "system", content: guideA },
+      { role: "system", content: guideB },
+      { role: "user", content: "привет" },
+    ];
+    const req = core.buildChatRequest(g4f, { model: "HuggingChat:gpt-4o-mini", messages, tools: [], staticSystem: prompt });
+    const body = JSON.parse(req.body);
+    assert.ok(/\/chat\/completions$/.test(req.url), "не OpenAI-совместимый путь: " + req.url);
+    // Маршрут «Провайдер:модель»: современный g4f ждёт провайдера отдельным полем.
+    assert.strictEqual(body.provider, "HuggingChat", "провайдер G4F не ушёл отдельным полем");
+    assert.strictEqual(body.model, "gpt-4o-mini", "имя модели не очищено от префикса провайдера");
+    const sysMsgs = body.messages.filter((m) => m.role === "system");
+    assert.strictEqual(sysMsgs.length, 1, "у строгого сервера больше одного system: " + sysMsgs.length);
+    assert.strictEqual(body.messages[0].role, "system", "system не в начале диалога");
+    const head = sysMsgs[0].content;
+    assert.ok(head.startsWith(prompt), "статичный промпт потерялся или сдвинулся");
+    assert.ok(head.indexOf("Рабочая директория: /home/user") !== -1, "паспорт проекта потерялся");
+    assert.ok(head.indexOf(guideA) !== -1 && head.indexOf(guideB) !== -1, "справочники потерялись");
+    assert.ok(
+      head.indexOf("Быстрый путь\n\n=== СПРАВОЧНИК АГЕНТА: \"system\"") !== -1,
+      "ведущие system склеены не через пустую строку (порядок/разделитель изменились)"
+    );
+    assert.ok(!/cache_control/.test(req.body), "поле кэша ушло строгому OpenAI-совместимому");
+    assert.strictEqual(body.stream_options, undefined, "stream_options ушёл без запроса");
+    // Исходный массив не мутируем, а служебная заметка в середине остаётся на месте.
+    assert.strictEqual(messages.filter((m) => m.role === "system").length, 3, "исходные сообщения изменены");
+    const retry = JSON.parse(
+      core.buildChatRequest(g4f, {
+        model: "gpt-4o-mini",
+        messages: messages.concat([
+          { role: "assistant", content: "ок" },
+          { role: "system", content: "⚠️ ПРЕДЫДУЩАЯ ПОПЫТКА УПАЛА" },
+          { role: "user", content: "продолжай" },
+        ]),
+        tools: [],
+      }).body
+    );
+    assert.strictEqual(retry.messages.filter((m) => m.role === "system").length, 2, "склеились и служебные заметки — они должны остаться на месте");
+    assert.strictEqual(retry.messages[retry.messages.length - 2].content, "⚠️ ПРЕДЫДУЩАЯ ПОПЫТКА УПАЛА", "заметка о повторе сдвинулась");
+  });
+
+  await test("кэш промпта: OpenRouter + справочники — одна точка кэша и ничего не теряется", () => {
+    const prompt = core.SYSTEM_PROMPT;
+    const guide = '=== СПРАВОЧНИК АГЕНТА: "app" (группа "app") ===\nappRead → appClick';
+    const body = JSON.parse(
+      core.buildChatRequest(orSettings, {
+        model: "anthropic/claude-3.5-sonnet",
+        messages: [
+          { role: "system", content: prompt + "\n\n📁 src/" },
+          { role: "system", content: guide },
+          { role: "user", content: "нажми Сохранить в настройках" },
+        ],
+        tools: [],
+        staticSystem: prompt,
+      }).body
+    );
+    const sys = body.messages[0];
+    assert.strictEqual(sys.role, "system", "первым должен идти system");
+    assert.ok(Array.isArray(sys.content), "system не разбит на блоки");
+    assert.strictEqual(sys.content.length, 2, "ожидались статичный блок и хвост");
+    assert.ok(sys.content[0].cache_control, "нет точки кэша на статике");
+    assert.ok(!sys.content[1].cache_control, "кэш накрыл динамику");
+    assert.strictEqual(sys.content[0].text, prompt, "статичный блок искажён");
+    assert.ok(sys.content[1].text.indexOf(guide) !== -1, "справочник потерялся");
+    const points = JSON.parse(JSON.stringify(body)).messages
+      .filter((m) => m.role === "system")
+      .reduce((n, m) => n + (Array.isArray(m.content) ? m.content.filter((b) => b.cache_control).length : 0), 0);
+    assert.strictEqual(points, 1, "точек кэша должно быть ровно одна, а не " + points);
+    assert.strictEqual(body.messages.filter((m) => m.role === "system").length, 1, "справочник ушёл отдельным system-сообщением");
+  });
+
+  await test("метрики: stream_options.include_usage только там, где его ждут", () => {
+    const msgs = [{ role: "system", content: core.SYSTEM_PROMPT }, { role: "user", content: "привет" }];
+    const strict = { provider: "openai", openaiUrl: "https://api.deepseek.com/v1", openaiApiKey: "k" };
+    const on = JSON.parse(core.buildChatRequest(strict, { model: "deepseek-chat", messages: msgs, tools: [], includeUsage: true }).body);
+    assert.deepStrictEqual(on.stream_options, { include_usage: true }, "нет stream_options.include_usage");
+    const off = JSON.parse(core.buildChatRequest(strict, { model: "deepseek-chat", messages: msgs, tools: [] }).body);
+    assert.strictEqual(off.stream_options, undefined, "stream_options ушёл без запроса");
+    const ant = JSON.parse(
+      core.buildChatRequest(
+        { provider: "anthropic", anthropicUrl: "https://api.anthropic.com", anthropicApiKey: "k" },
+        { model: "claude-sonnet-4", messages: msgs, tools: [], includeUsage: true }
+      ).body
+    );
+    assert.strictEqual(ant.stream_options, undefined, "stream_options ушёл в Anthropic");
+    const ol = JSON.parse(
+      core.buildChatRequest({ provider: "ollama", ollamaUrl: "http://localhost:11434" }, {
+        model: "qwen3:4b",
+        messages: msgs,
+        tools: [],
+        includeUsage: true,
+      }).body
+    );
+    assert.strictEqual(ol.stream_options, undefined, "stream_options ушёл в Ollama");
+  });
+
+  await test("метрики: токен-отчёт разных провайдеров приводится к одному виду", () => {
+    assert.deepStrictEqual(
+      core.normalizeUsage({ prompt_tokens: 29042, completion_tokens: 512, prompt_tokens_details: { cached_tokens: 26880 } }),
+      { prompt: 29042, completion: 512, cached: 26880 }
+    );
+    assert.deepStrictEqual(core.normalizeUsage({ prompt_tokens: 1000, completion_tokens: 50, prompt_cache_hit_tokens: 900 }), {
+      prompt: 1000,
+      completion: 50,
+      cached: 900,
+    });
+    assert.deepStrictEqual(core.normalizeUsage({ input_tokens: 800, output_tokens: 120, cache_read_input_tokens: 700 }), {
+      prompt: 800,
+      completion: 120,
+      cached: 700,
+    });
+    // Без данных кэша — ноль, а не NaN (иначе в консоль уйдёт «кэш NaN%»).
+    assert.deepStrictEqual(core.normalizeUsage({ prompt_tokens: 10 }), { prompt: 10, completion: 0, cached: 0 });
+    assert.strictEqual(core.normalizeUsage(null), null);
+    assert.strictEqual(core.normalizeUsage("мусор"), null);
+  });
+
+  await test("метрики: цифры уходят в «Консоль», откат без stream_options на месте", () => {
+    assert.ok(/onUsage: \(u\) => \{/.test(mainSrc), "usage ответа не принимается");
+    assert.ok(/roundUsage\.cached = Math\.max\(roundUsage\.cached, u\.cached \|\| 0\)/.test(mainSrc), "кэш не собирается по раунду");
+    assert.ok(/termEmit\(\{[\s\S]{0,80}?type: "metrics"/.test(mainSrc), "строка метрик не отправляется");
+    assert.ok(/staticSystem: SYSTEM_PROMPT/.test(mainSrc), "граница статичного промпта не передана в запрос");
+    assert.ok(/includeUsage: includeUsage/.test(mainSrc), "флаг токен-отчёта не передаётся в запрос");
+    assert.ok(/roundTtfbMs = Date\.now\(\) - roundStartedAt/.test(mainSrc), "нет замера времени до первого байта");
+    // Строгий сервер без stream_options: выключаем и повторяем раунд, а не падаем.
+    assert.ok(
+      /includeUsage &&\s*\(res\.status === 400 \|\| res\.status === 422\)/.test(mainSrc),
+      "нет отката для сервера без stream_options"
+    );
+    assert.ok(
+      /includeUsage && \/stream_options\|include_usage\/i\.test\(errText\)/.test(mainSrc),
+      "нет отката, если провайдер отверг stream_options внутри ответа"
+    );
+    assert.ok(/includeUsage = false;/.test(mainSrc), "флаг не выключается после отказа");
+    assert.ok(/round--;\s*continue;/.test(mainSrc), "раунд не повторяется после отказа");
+    // Интерфейс
+    assert.ok(/ev\.type === "metrics"/.test(appSrc), "app.js не принимает метрики");
+    assert.ok(/\.ts-metrics \{/.test(cssSrc), "нет стиля строки метрик");
+  });
+}
+
+// ── Роутер инструментов: реестр групп и чистая функция выбора ────────────────
+async function testToolRouter() {
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+  const allNames = core.TOOL_DEFINITIONS.map((t) => t.function && t.function.name);
+
+  await test("роутер: реестр покрывает все схемы ровно один раз", () => {
+    const base = core.BASE_TOOL_NAMES;
+    assert.strictEqual(base.length, new Set(base).size, "в базе есть дубли");
+    const inGroup = new Map();
+    for (const g of core.TOOL_GROUPS) {
+      assert.ok(g.id && g.title && Array.isArray(g.names) && g.names.length, "битая группа: " + JSON.stringify(g && g.id));
+      assert.ok(Array.isArray(g.keywords) && g.keywords.length, "у группы " + g.id + " нет ключевых слов");
+      for (const n of g.names) {
+        assert.ok(!inGroup.has(n), "инструмент " + n + " в двух группах: " + inGroup.get(n) + " и " + g.id);
+        inGroup.set(n, g.id);
+      }
+    }
+    // База и группы не пересекаются — иначе схема пришла бы дважды.
+    for (const n of base) assert.ok(!inGroup.has(n), "базовый " + n + " ещё и в группе " + inGroup.get(n));
+    const registered = new Set([...base, ...inGroup.keys()]);
+    const missing = allNames.filter((n) => !registered.has(n));
+    const extra = [...registered].filter((n) => !allNames.includes(n));
+    assert.deepStrictEqual(missing, [], "схемы вне реестра: " + missing.join(", "));
+    assert.deepStrictEqual(extra, [], "в реестре несуществующие схемы: " + extra.join(", "));
+    // Набор приложения про репозитории: git-минимум обязан быть в базе.
+    for (const n of ["gitStatus", "gitDiff", "gitLog", "gitCommit", "gitBranch"]) {
+      assert.ok(base.includes(n), n + " не в базе — на тесном окне git исчезнет");
+    }
+  });
+
+  await test("роутер: порядок схем канонический и детерминированный", () => {
+    const r1 = core.routeTools({ text: "почини git push и задеплой на сервер" });
+    const r2 = core.routeTools({ text: "почини git push и задеплой на сервер" });
+    assert.deepStrictEqual(r1.groups, r2.groups, "состав групп не детерминирован");
+    const n1 = r1.tools.map((t) => t.function.name);
+    const n2 = r2.tools.map((t) => t.function.name);
+    assert.deepStrictEqual(n1, n2, "порядок схем не детерминирован");
+    // Канонический порядок = порядок объявления (иначе кэш префикса промахивается).
+    assert.deepStrictEqual(n1, allNames.filter((n) => n1.includes(n)), "порядок схем не канонический");
+    assert.deepStrictEqual(r1.tools.map((t) => t.function.name), r2.tools.map((t) => t.function.name));
+    // forceAll — тот же канонический порядок и полный набор.
+    const all = core.routeTools({ forceAll: true });
+    assert.strictEqual(all.all, true);
+    assert.deepStrictEqual(all.tools.map((t) => t.function.name), allNames);
+    assert.strictEqual(all.dropped.length, 0, "forceAll что-то срезал");
+  });
+
+  await test("роутер: группа включается по смыслу и остаётся липкой", () => {
+    const fresh = core.routeTools({ text: "закоммить и запуш изменения на github" });
+    assert.ok(fresh.groups.includes("git"), "группа git не включена: " + fresh.groups.join(","));
+    assert.ok(fresh.activated.includes("git"), "git нет в activated");
+    // Липкость: следующий запрос без слов о git — группа остаётся до конца задачи.
+    const sticky = core.routeTools({ text: "посмотри файл", sticky: fresh.groups });
+    assert.ok(sticky.groups.includes("git"), "липкая группа потеряна");
+    // Без липкости тот же запрос группу не тянет.
+    const lonely = core.routeTools({ text: "привет, как дела" });
+    assert.ok(!lonely.groups.includes("git"), "git включился без запроса");
+    assert.strictEqual(lonely.groups.length, 0, "тихая задача включила группы: " + lonely.groups.join(","));
+    assert.strictEqual(lonely.tools.length, core.BASE_TOOL_NAMES.length, "тихая задача получила не только базу");
+  });
+
+  await test("роутер: экономия токенов и потолок не режет базу", () => {
+    const all = core.routeTools({ forceAll: true });
+    const quiet = core.routeTools({ text: "привет, как дела" });
+    assert.ok(quiet.tokens < all.tokens * 0.4, "экономия меньше 60%: " + quiet.tokens + " из " + all.tokens);
+    assert.ok(core.ROUTER_MAX_TOKENS >= quiet.tokens, "потолок меньше веса базы");
+    // Группа, не влезшая в потолок, попадает в dropped (не пропадает молча).
+    const tiny = core.routeTools({ text: "закоммить и запуш на github, открой браузер", maxTokens: quiet.tokens });
+    assert.ok(tiny.tools.length >= core.BASE_TOOL_NAMES.length, "база урезана");
+    assert.ok(tiny.dropped.length > 0, "срезанная группа не отмечена в dropped");
+    assert.ok(
+      tiny.groups.every((id) => !tiny.dropped.includes(id)),
+      "группа попала и в used, и в dropped"
+    );
+  });
+
+  await test("роутер: groupOfTool знает группу вызова (предохранитель A)", () => {
+    assert.strictEqual(core.groupOfTool("gitPush"), "git");
+    assert.strictEqual(core.groupOfTool("browserClick"), "browser");
+    assert.strictEqual(core.groupOfTool("getSystemInfo"), "system");
+    // Базовый инструмент группы не имеет — дотягивать нечего.
+    assert.strictEqual(core.groupOfTool("readFile"), "");
+    assert.strictEqual(core.groupOfTool("совсемНетТакого"), "");
+    assert.strictEqual(core.groupOfTool(""), "");
+    // Вызов инструмента вне текущего набора всегда разрешим через его группу.
+    const quiet = core.routeTools({ text: "привет" });
+    const quietNames = quiet.tools.map((t) => t.function.name);
+    for (const n of ["gitPush", "browserClick", "registryWrite"]) {
+      assert.ok(!quietNames.includes(n), n + " неожиданно в базе");
+      assert.ok(core.groupOfTool(n), "у " + n + " нет группы — предохранитель A не сработает");
+      const widened = core.routeTools({ text: "привет", sticky: quiet.groups.concat(core.groupOfTool(n)) });
+      assert.ok(
+        widened.tools.map((t) => t.function.name).includes(n),
+        "после расширения " + n + " всё равно отсутствует"
+      );
+    }
+  });
+
+  await test("роутер: findTools ищет по-русски и не зависит от порядка", () => {
+    assert.ok(core.BASE_TOOL_NAMES.includes("findTools"), "findTools нет в базовом наборе");
+    assert.ok(allNames.includes("findTools"), "нет схемы findTools");
+    const push = core.searchTools("запуш в github").map((t) => t.name);
+    assert.ok(push.includes("gitPush"), "по «запуш» не нашёлся gitPush: " + push.join(","));
+    const mail = core.searchTools("отправить письмо по smtp").map((t) => t.name);
+    assert.ok(mail.includes("mailSend"), "по «письмо smtp» не нашёлся mailSend: " + mail.join(","));
+    const shot = core.searchTools("скриншот экрана").map((t) => t.name);
+    assert.ok(shot.includes("screenshotDesktop"), "по «скриншот экрана» не нашёлся screenshotDesktop");
+    // Детерминизм: одинаковый запрос — одинаковый список (стабильный префикс промпта).
+    assert.deepStrictEqual(core.searchTools("запуш в github"), core.searchTools("запуш в github"));
+    // Каждый результат знает свою группу — предохранитель B умеет включить её целиком.
+    for (const t of core.searchTools("запуш в github")) {
+      if (t.name !== "findTools") assert.ok(t.group, t.name + " без группы");
+    }
+    // Сам findTools в выдачу не попадает (он и так в базе) и мусор не матчится.
+    assert.ok(!core.searchTools("запуш в github").some((t) => t.name === "findTools"), "findTools в выдаче");
+    assert.deepStrictEqual(core.searchTools("абракадабращщ"), []);
+    assert.deepStrictEqual(core.searchTools(""), []);
+  });
+
+  await test("роутер: предохранители подключены в main.js и в настройках", () => {
+    const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+    const htmlSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+    const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+    // A: реальный вызов вне набора дотягивает группу и повторяет раунд со схемой.
+    assert.ok(/const gid = groupOfTool\(c\.name\);/.test(mainSrc), "нет предохранителя A");
+    assert.ok(/stickyGroups\.add\(gid\);\s*\n\s*refreshTools\(\);/.test(mainSrc), "группа вызова не добавляется на ходу");
+    // B: findTools исполняется и включает группы текущей задачи.
+    assert.ok(/case "findTools": \{/.test(mainSrc), "findTools не исполняется");
+    assert.ok(/activeToolRouter\.addGroups\(groups\)/.test(mainSrc), "findTools не включает группы");
+    assert.ok(/activeToolRouter = \{/.test(mainSrc), "нет роутера текущего запуска");
+    // C: чекбокс «Отправить все инструменты» + полный набор без роутера.
+    assert.ok(/const forceAllTools = !!settings\.sendAllTools;/.test(mainSrc), "настройка не читается агентом");
+    assert.ok(/if \(o\.forceAll\)/.test(coreSrc), "forceAll не поддерживается роутером");
+    assert.ok(/id="s-send-all-tools"/.test(htmlSrc), "нет чекбокса в настройках");
+    assert.ok(/settings\.sendAllTools = !!\$\("s-send-all-tools"\)\.checked;/.test(appSrc), "чекбокс не сохраняется");
+    assert.ok(/\$\("s-send-all-tools"\)\.checked = !!settings\.sendAllTools;/.test(appSrc), "чекбокс не восстанавливается");
+    // Метрика раунда говорит, сколько групп ушло и что срезано.
+    assert.ok(/· групп " \+ routeInfo\.groups\.length/.test(mainSrc), "метрика без числа групп");
+    assert.ok(/срезано: " \+ routeInfo\.dropped\.join/.test(mainSrc), "метрика молчит о срезанных группах");
+  });
 }
 
 (async () => {
@@ -5048,6 +5805,10 @@ async function testBrowserSenses() {
   await testStreamThrottle();
   await testBrowserSpeed();
   await testBrowserSenses();
+  await testAgentSpeedups();
+  await testPowerShellSession();
+  await testPromptCacheAndUsage();
+  await testToolRouter();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");
   process.exit(failed ? 1 : 0);
 })();

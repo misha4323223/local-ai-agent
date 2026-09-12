@@ -973,6 +973,37 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Ждать УСЛОВИЕ (а не «слепую» паузу) с опросом и жёстким потолком: как только
+// страница готова — идём дальше сразу, а на медленном сайте ждём до потолка.
+// Это и быстрее (обычно 60-150 мс вместо фиксированных 200-400), и надёжнее
+// (не действуем по недорисованной странице).
+async function waitUntil(fn, timeoutMs, pollMs) {
+  const deadline = Date.now() + Math.max(0, timeoutMs || 0);
+  const step = Math.max(30, pollMs || 60);
+  for (;;) {
+    let ok = false;
+    try {
+      ok = await fn();
+    } catch (e) {
+      ok = false;
+    }
+    if (ok) return true;
+    const left = deadline - Date.now();
+    if (left <= 0) return false;
+    await sleep(Math.min(step, left));
+  }
+}
+
+// Текущая вертикальная прокрутка страницы (для ожидания сдвига вместо паузы).
+function readScrollY(page) {
+  return page
+    .evaluate(() => {
+      const d = document.scrollingElement || document.documentElement;
+      return d ? d.scrollTop : window.scrollY || 0;
+    })
+    .catch(() => null);
+}
+
 // Все «окна» страницы: сама страница + вложенные фреймы (вход через iframe,
 // платёжные и капча-виджеты, ленивые консоли). Поиск по фреймам снимает
 // половину «не нашёл» — раньше такой элемент был для агента невидимым.
@@ -1012,6 +1043,9 @@ async function resolveTarget(page, q, kind, opts) {
     : (isNaN(asked) ? FIND_TIMEOUT : Math.max(0, Math.min(asked, 30000)));
   const deadline = Date.now() + waitMs;
   let fallback = null;
+  // Адаптивный опрос: только что появившийся элемент находится за ~80 мс,
+  // а не за фиксированные 200 (к медленному сайту интервал растёт до FIND_POLL_MS).
+  let findPoll = 80;
   for (;;) {
     fallback = null;
     for (const fr of frameList(page)) {
@@ -1030,7 +1064,8 @@ async function resolveTarget(page, q, kind, opts) {
     // Что-то нашли (пусть и невидимое) — не ждём: дальше решает клик (force/прокрутка).
     if (fallback) return fallback;
     if (Date.now() >= deadline) break;
-    await sleep(FIND_POLL_MS);
+    await sleep(findPoll);
+    findPoll = Math.min(Math.round(findPoll * 1.6), FIND_POLL_MS);
   }
   return null;
 }
@@ -1164,12 +1199,14 @@ async function scrollPage(page, a) {
     if (how === "up" || how === "вверх") key = "PageUp";
     else if (how === "top" || how === "начало") key = "Home";
     else if (how === "bottom" || how === "низ") key = "End";
+    const beforeY = await readScrollY(page);
     try {
       await page.keyboard.press(key, { timeout: ACTION_TIMEOUT });
     } catch (e) {
       return "Ошибка browserAct (прокрутка): " + String((e && e.message) || e).slice(0, 150);
     }
-    await sleep(250);
+    await waitUntil(async () => (await readScrollY(page)) !== beforeY, 220, 50);
+    await sleep(70);
   }
   await afterNavigation(page);
   return "OK — прокрутка " + how + (times > 1 ? " ×" + times : "");
@@ -1530,23 +1567,33 @@ async function screenshotFile(args) {
   args = args || {};
   const t = needTab(args.tabId || args.tab);
   if (t.error) return { error: t.error };
+  // JPEG по умолчанию: файл в 3–5 раз меньше PNG — быстрее пишется и дешевле для
+  // vision-модели. png:true (или fullPage) остаётся для точного чтения мелкого текста.
+  const wantPng = args.png === true || args.format === "png" || args.fullPage === true;
+  const quality = Math.min(Math.max(parseInt(args.quality, 10) || 72, 30), 100);
   let buf;
   try {
-    buf = await t.tab.page.screenshot({ type: "png", fullPage: args.fullPage === true });
+    buf = await t.tab.page.screenshot(
+      wantPng
+        ? { type: "png", fullPage: args.fullPage === true }
+        : { type: "jpeg", quality: quality, fullPage: args.fullPage === true }
+    );
   } catch (e) {
     return { error: "Ошибка browserScreenshot: " + String((e && e.message) || "").slice(0, 200) };
   }
+  const ext = wantPng ? ".png" : ".jpg";
+  const mime = wantPng ? "image/png" : "image/jpeg";
   const dir = String(args.dir || path.join(os.tmpdir(), "ai-agent-shots"));
   let file = "";
   try {
     fs.mkdirSync(dir, { recursive: true });
-    file = path.join(dir, "browser-" + new Date().toISOString().replace(/[:.]/g, "-") + ".png");
+    file = path.join(dir, "browser-" + new Date().toISOString().replace(/[:.]/g, "-") + ext);
     fs.writeFileSync(file, buf);
   } catch (e) {
     file = "";
   }
   const info = await pageInfo(t.tab.page);
-  return { buf: buf, path: file, url: info.url, title: info.title };
+  return { buf: buf, path: file, url: info.url, title: info.title, mime: mime };
 }
 
 // Текстовый ответ для агента: путь к файлу (data URL — только если попросили явно).
@@ -1555,7 +1602,7 @@ async function screenshot(args) {
   const r = await screenshotFile(args);
   if (r.error) return r.error;
   if (args.dataUrl === true || args.asDataUrl === true) {
-    return "data:image/png;base64," + r.buf.toString("base64");
+    return "data:" + (r.mime || "image/png") + ";base64," + r.buf.toString("base64");
   }
   if (r.path) {
     return (
@@ -1565,7 +1612,7 @@ async function screenshot(args) {
       "или работай по DOM: browserSnapshot / browserDOM / browserEval."
     );
   }
-  return "data:image/png;base64," + r.buf.toString("base64");
+  return "data:" + (r.mime || "image/png") + ";base64," + r.buf.toString("base64");
 }
 
 // ── Инструменты поверх стандартных ─────────────────────────────────────────
@@ -1896,6 +1943,7 @@ async function wait(args) {
     ? [{ loc: t.tab.page.locator(dom.refSelector(q.ref)), desc: "ref " + q.ref }]
     : clickCandidates(t.tab.page, q);
   const deadline = Date.now() + timeout;
+  let poll = 100;
   while (Date.now() < deadline) {
     const target = await firstUsable(cands);
     if (target) {
@@ -1903,7 +1951,8 @@ async function wait(args) {
       try { vis = await target.loc.isVisible(); } catch { vis = false; }
       if (vis) return "OK — элемент «" + target.desc + "» появился.";
     }
-    await new Promise((r) => setTimeout(r, 400));
+    await sleep(Math.min(poll, Math.max(1, deadline - Date.now())));
+    poll = Math.min(Math.round(poll * 1.5), 400);
   }
   return missText(t.tab.page, "browserWait", q, "не появился за " + timeout + " мс");
 }
@@ -2241,13 +2290,33 @@ async function wheelAt(page, dx, dy, times, box) {
   const cy = box ? Math.round(box.y + box.height / 2) : Math.round(h / 2);
   try { if (page.mouse && page.mouse.move) await page.mouse.move(cx, cy); } catch (e) {}
   if (!page.mouse || !page.mouse.wheel) return { ok: false };
+  // Прокрутка «долетела» — идём дальше, не выжидая всю фиксированную паузу.
+  const readPos = () =>
+    page
+      .evaluate(() => {
+        const d = document.scrollingElement || document.documentElement;
+        return (d ? d.scrollTop : window.scrollY || 0) + ":" + (d ? d.scrollLeft : window.scrollX || 0);
+      })
+      .catch(() => null);
   for (let i = 0; i < times; i++) {
+    const before = box ? null : await readPos();
     try {
       await page.mouse.wheel(dx, dy);
     } catch (e) {
       return { ok: false, error: String((e && e.message) || e).slice(0, 140) };
     }
-    await sleep(200);
+    // Внутренний контейнер прогресс по документу не показывает — короткая пауза.
+    if (box) {
+      await sleep(180);
+      continue;
+    }
+    const moved = await waitUntil(async () => {
+      const now = await readPos();
+      return now != null && now !== before;
+    }, 220, 45);
+    // Небольшая страховка на инерцию/плавную прокрутку, чтобы следующий щелчок
+    // колеса не наложился на ещё идущую анимацию.
+    await sleep(moved ? 90 : 140);
   }
   return { ok: true };
 }
@@ -2356,7 +2425,13 @@ async function hover(args) {
       }
     }
   }
-  await sleep(400);
+  // Ждём ПОЯВЛЕНИЯ новых элементов событием, а не «слепой» паузой 400 мс:
+  // меню/подсказка обычно отрисованы за 60-150 мс — идём дальше сразу.
+  await waitUntil(async () => {
+    const now = await namesOnPage(page);
+    for (const n of now) if (before.indexOf(n) < 0) return true;
+    return false;
+  }, 400, 70);
   const after = await namesOnPage(page);
   const fresh = [];
   for (const n of after) {

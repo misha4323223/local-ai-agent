@@ -29,9 +29,13 @@ const {
   webFetchPage,
   // вспомогательная модель: зрение + генерация изображений
   auxConfig,
+  fmtError,
   describeImageRemote,
   generateImageRemote,
-  selectTools,
+  routeTools,
+  searchTools,
+  ROUTER_MAX_TOKENS,
+  groupOfTool,
   PLAN_MODE_TOOL_DEFINITIONS,
   modelWindow,
   // инструменты ОС (парсеры, whitelist)
@@ -60,6 +64,7 @@ const vault = require("./vault.js"); // пароли сайтов: поиск з
 const mail = require("./mail.js"); // почта агента: SMTP (отправка КП) + IMAP (коды подтверждения), на встроенных модулях
 const ycCli = require("./yc-cli.js"); // официальный yc CLI внутрь папки приложения: загрузка + PATH (без системных прав)
 const ycLogs = require("./yc-logs.js"); // логи Cloud Logging внутренним API (REST + gRPC) — внешний yc CLI не нужен
+const winPs = require("./win-ps.js"); // живая сессия PowerShell: системные справки без холодного старта
 secrets.init(path.join(app.getPath("userData"), "secrets.json"));
 const _ipcHandleOrig = ipcMain.handle.bind(ipcMain);
 const ipcHandlerMap = new Map();
@@ -519,6 +524,19 @@ const DANGEROUS_CMD_RE =
 
 // Инструменты, требующие явного подтверждения пользователя (как опасные команды).
 const DANGEROUS_TOOLS = new Set(["killProcess", "registryWrite", "installExe"]);
+
+// Батчинг (правило 35): инструменты, которые безопасно выполнять ПАРАЛЛЕЛЬНО —
+// только чтение без побочных эффектов и без диалогов с пользователем. Если в одном
+// раунде модель прислала несколько таких вызовов, они идут одновременно.
+const PARALLEL_SAFE_TOOLS = new Set([
+  "readFile", "readFileLines", "listFiles", "listDirectory", "searchFile", "searchProject",
+  "fileOutline", "readFileStructure", "semanticSearch", "findReferences", "explainCode",
+  "getDependencies", "gitStatus", "gitLog", "gitDiff", "gitBranch", "gitBlame",
+  "listProcesses", "getSystemInfo", "listPorts", "checkPort", "checkUrl",
+  "checkInstalledProgram", "canExecute", "shellsStatus", "envList",
+  "webSearch", "webFetch", "apiRequest", "memoryList", "memorySearch",
+  "noteRead", "noteList", "checkpointList", "agentGuide", "vaultList",
+]);
 
 // Короткое описание аргументов для подтверждения опасного действия.
 function describeToolArgs(name, a) {
@@ -997,8 +1015,8 @@ function screenshotUrl(url) {
       setTimeout(async () => {
         try {
           const img = await win.webContents.capturePage();
-          const png = img.toPNG();
-          done({ ok: true, dataUrl: "data:image/png;base64," + png.toString("base64") });
+          const shot = encodeShot(img, {});
+          done({ ok: true, dataUrl: "data:" + shot.mime + ";base64," + shot.buf.toString("base64"), mime: shot.mime });
         } catch (e) {
           fail(e.message);
         }
@@ -1011,10 +1029,41 @@ function screenshotUrl(url) {
 
 // Сохранение скриншота на диск: скриншоты хранятся в userData/screenshots, чтобы
 // агент мог проанализировать их vision-моделью через analyzeImage(path).
-function saveScreenshotPng(buf, baseName) {
+// Кодирование скриншота: JPEG по умолчанию (быстро, компактно, вдвое дешевле для
+// vision-модели), PNG — по флагу png:true (точные задачи, чтение мелкого текста).
+// Длинная сторона при необходимости ужимается до MAX_SHOT_SIDE.
+const MAX_SHOT_SIDE = 1440;
+function encodeShot(img, args) {
+  const a = args || {};
+  const wantPng = a.png === true || a.format === "png";
+  let out = img;
+  try {
+    const sz = img.getSize();
+    const longest = Math.max(sz.width || 0, sz.height || 0);
+    const cap = Math.min(Math.max(parseInt(a.maxWidth, 10) || MAX_SHOT_SIDE, 480), 2560);
+    if (longest > cap) {
+      const k = cap / longest;
+      out = img.resize({ width: Math.max(1, Math.round(sz.width * k)), height: Math.max(1, Math.round(sz.height * k)), quality: "good" });
+    }
+  } catch {}
+  if (!wantPng) {
+    try {
+      const q = Math.min(Math.max(parseInt(a.quality, 10) || 72, 30), 100);
+      const jpg = out.toJPEG(q);
+      if (jpg && jpg.length) return { buf: jpg, mime: "image/jpeg", ext: ".jpg" };
+    } catch {}
+  }
+  const png = out.toPNG();
+  return { buf: png, mime: "image/png", ext: ".png" };
+}
+
+// Сохранить скриншот на диск (расширение — по типу картинки). Агент читает его
+// через analyzeImage(path).
+function saveScreenshotPng(buf, baseName, mime) {
   const dir = path.join(app.getPath("userData"), "screenshots");
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, String(baseName || "shot").replace(/[^\w.-]+/g, "_") + "-" + Date.now() + ".png");
+  const ext = String(mime || "").indexOf("jpeg") !== -1 ? ".jpg" : ".png";
+  const file = path.join(dir, String(baseName || "shot").replace(/[^\w.-]+/g, "_") + "-" + Date.now() + ext);
   fs.writeFileSync(file, buf);
   return file;
 }
@@ -1601,13 +1650,49 @@ function spawnRaw(args, opts) {
   });
 }
 
+// ── Системные запросы PowerShell через живую сессию (ускорение №5) ──────────
+// Разовый `powershell.exe -NoProfile -Command "..."` — это холодный старт .NET
+// (0,4–1,5 с) на КАЖДЫЙ запрос справки. Живая сессия держит ОДИН процесс;
+// при любом сбое (нет PowerShell, таймаут, процесс умер) — обычный разовый
+// запуск, то есть поведение инструментов не меняется ни в одном сценарии.
+async function psScript(script, timeoutMs) {
+  const ms = timeoutMs || 30000;
+  if (process.platform === "win32") {
+    const r = await winPs.exec(script, { timeoutMs: ms });
+    if (!r.noSession) return r;
+  }
+  return spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script], {
+    cwd: os.homedir(),
+    timeoutMs: ms,
+  });
+}
+
+// Кэш системных справок: агент часто спрашивает одно и то же подряд (что за ПК,
+// жив ли процесс). Живёт коротким TTL, чтобы не отдавать протухшее состояние.
+// isBad(v) — «это не результат, а ошибка»: такое не кэшируем.
+const _sysCache = new Map(); // key → { t, val }
+async function cachedPs(key, ttlMs, fn, isBad) {
+  const hit = _sysCache.get(key);
+  if (hit && Date.now() - hit.t < ttlMs) return hit.val;
+  const val = await fn();
+  if (val && !(typeof isBad === "function" && isBad(val))) _sysCache.set(key, { t: Date.now(), val });
+  return val;
+}
+function invalidatePsCache(prefix) {
+  for (const k of Array.from(_sysCache.keys())) {
+    if (!prefix || k.indexOf(prefix) === 0) _sysCache.delete(k);
+  }
+}
+
 // Обновить PATH текущего процесса из системного окружения (после установок).
 async function refreshEnvFromOS() {
   const before = envPathInfo().value;
   let sysPath = "";
   if (process.platform === "win32") {
-    const r = await spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-      "$m=[Environment]::GetEnvironmentVariable('Path','Machine'); $u=[Environment]::GetEnvironmentVariable('Path','User'); Write-Output ($m + ';' + $u)"], { cwd: os.homedir(), timeoutMs: 30000 });
+    const r = await psScript(
+      "$m=[Environment]::GetEnvironmentVariable('Path','Machine'); $u=[Environment]::GetEnvironmentVariable('Path','User'); Write-Output ($m + ';' + $u)",
+      30000
+    );
     sysPath = (r.out || "").trim();
   } else {
     for (const shell of ["bash", "sh"]) {
@@ -2059,6 +2144,23 @@ async function executeTool(name, args, settings) {
       return "⏹ Остановлено пользователем (Esc / Стоп). Немедленно прекрати вызовы инструментов и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось.";
     }
     switch (name) {
+      // Предохранитель B: модель просит нужную возможность словами — включаем её
+      // группу в текущей задаче и перечисляем подходящие инструменты.
+      case "findTools": {
+        const query = String(args.query || "").trim();
+        if (!query) return "Укажи query — что нужно сделать словами (например «отправить письмо»).";
+        const found = searchTools(query, args.limit);
+        if (!found.length) {
+          return "Ничего не нашлось по запросу «" + query + "». Сформулируй иначе (действие + объект: «клик по элементу страницы», «запуш ветки») или используй runCommand.";
+        }
+        const groups = [...new Set(found.map((f) => f.group).filter(Boolean))];
+        if (activeToolRouter && groups.length) activeToolRouter.addGroups(groups);
+        return (
+          "Нашёл инструменты по запросу «" + query + "» (схемы уже добавлены в запрос — вызывай их как обычно):\n" +
+          found.map((f) => "• " + f.name + (f.group ? " [" + f.group + "]" : "") + " — " + truncateText(f.description, 160)).join("\n") +
+          (groups.length ? "\nВключены группы: " + groups.join(", ") + ". Список всех инструментов задачи — " + (activeToolRouter ? activeToolRouter.names().join(", ") : "") : "")
+        );
+      }
       case "createFolder": {
         const p = resolvePath(args.path, settings);
         fs.mkdirSync(p, { recursive: true });
@@ -2315,7 +2417,8 @@ async function executeTool(name, args, settings) {
         if (!IMG_EXTS.includes(ext)) return "Ошибка: это не изображение (" + (ext || "без расширения") + "). Поддерживаются: " + IMG_EXTS.join(", ");
         const st = fs.statSync(p);
         if (st.size > 8 * 1024 * 1024) return "Ошибка: файл слишком большой (" + st.size + " байт). Максимум 8 МБ.";
-        const dataUrl = "data:image/" + (ext === ".svg" ? "svg+xml" : ext.slice(1)) + ";base64," + fs.readFileSync(p).toString("base64");
+        const IMG_MIME = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".ico": "image/x-icon", ".avif": "image/avif" };
+        const dataUrl = "data:" + (IMG_MIME[ext] || "image/png") + ";base64," + fs.readFileSync(p).toString("base64");
         if (activeEmit) activeEmit({ type: "image", path: p, dataUrl });
         return "OK — изображение показано пользователю: " + p + " (" + st.size + " байт)";
       }
@@ -2337,7 +2440,7 @@ async function executeTool(name, args, settings) {
           const desc = await describeImageRemote(cfg, dataUrl, question, cfg.visionModel);
           return "Описание изображения (" + p + "):\n" + (desc || "(пусто)") + "\n\nЕсли пользователь ждёт правок по этой картинке — вноси изменения и сообщи итог.";
         } catch (e) {
-          return "Ошибка анализа изображения: " + ((e && e.message) || e) + ". Проверь ключ и модель-зрение в Настройках → «🖼 Зрение и генерация».";
+          return "Ошибка анализа изображения: " + fmtError(e) + ". Проверь ключ и модель-зрение в Настройках → «🖼 Зрение и генерация».";
         }
       }
       case "generateImage": {
@@ -2360,7 +2463,7 @@ async function executeTool(name, args, settings) {
           if (activeEmit) activeEmit({ type: "image", path: out, dataUrl });
           return "OK — изображение сгенерировано и сохранено: " + out + " (" + buf.length + " байт, " + mediaType + "). Превью уже показано пользователю. Встраивай файл в проект (относительный путь: " + name + ")."
         } catch (e) {
-          return "Ошибка генерации изображения: " + ((e && e.message) || e) + ". Проверь ключ и модель-генерацию в Настройках → «🖼 Зрение и генерация».";
+          return "Ошибка генерации изображения: " + fmtError(e) + ". Проверь ключ и модель-генерацию в Настройках → «🖼 Зрение и генерация».";
         }
       }
       case "checkPort": {
@@ -2475,7 +2578,7 @@ async function executeTool(name, args, settings) {
         let saved = null;
         try {
           const buf = Buffer.from(String(shot.dataUrl).split(",")[1] || "", "base64");
-          if (buf.length) saved = saveScreenshotPng(buf, "page");
+          if (buf.length) saved = saveScreenshotPng(buf, "page", shot.mime);
         } catch {}
         return "OK — скриншот " + url + " снят (1280×800), показан пользователю во встроенном просмотрщике" +
           (saved ? " и сохранён: " + saved : "") +
@@ -3230,8 +3333,13 @@ async function executeTool(name, args, settings) {
             "$ips=@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254*' } | ForEach-Object { $_.IPAddress }); " +
             "$disks=@(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Root=$_.Root; UsedGB=[math]::Round($_.Used/1GB,1); FreeGB=[math]::Round($_.Free/1GB,1) } }); " +
             "[pscustomobject]@{ os=$os.Caption; build=$os.Version; cpu=$cpu.Name; gpu=$gpu.Name; ramGB=[math]::Round($os.TotalVisibleMemorySize/1MB,1); ips=$ips; disks=$disks } | ConvertTo-Json -Compress -Depth 3";
-          const r = await spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], { cwd: os.homedir(), timeoutMs: 30000 });
-          const si = parseSysInfoJson(r.ok ? r.out : "");
+          // CIM-запрос конфигурации ПК — самый дорогой в инструменте, а меняется
+          // он раз в жизни машины: 30 с кэша снимают повторный обход системы.
+          const siRaw = await cachedPs("sysinfo", 30000, async () => {
+            const r = await psScript(ps, 30000);
+            return r.ok ? r.out : "";
+          });
+          const si = parseSysInfoJson(siRaw);
           if (si.os) rows.push("Windows: " + si.os + (si.build ? " (build " + si.build + ")" : ""));
           if (si.cpu) rows.push("CPU: " + truncateText(si.cpu, 100));
           if (si.gpu) rows.push("GPU: " + truncateText(si.gpu, 100));
@@ -3554,8 +3662,12 @@ async function executeTool(name, args, settings) {
         const filter = String(args.filter || "").trim().toLowerCase();
         let out = "";
         if (process.platform === "win32") {
-          const r = await spawnRaw(["tasklist", "/FO", "CSV", "/NH"], { cwd: os.homedir(), timeoutMs: 20000 });
-          out = r.ok ? r.out : "";
+          // Список процессов спрашивают подряд («сервер ещё жив?»): 2 с кэша
+          // снимают повторный tasklist, а короткий TTL не показывает мёртвое.
+          out = await cachedPs("proc:win", 2000, async () => {
+            const r = await spawnRaw(["tasklist", "/FO", "CSV", "/NH"], { cwd: os.homedir(), timeoutMs: 20000 });
+            return r.ok ? r.out : "";
+          });
         } else {
           const r = await spawnRaw(["ps", "-eo", "pid=,comm=,%cpu=,rss=,args="], { cwd: os.homedir(), timeoutMs: 20000 });
           out = r.ok ? r.out : "";
@@ -3590,6 +3702,7 @@ async function executeTool(name, args, settings) {
           label = name;
         }
         const out = await runTerminalCommand(cmd, os.homedir(), 20000);
+        invalidatePsCache("proc:"); // мы только что убили процесс — старый список не отдаём
         const failed = /не найден|ERROR|not found|No matching|No processes|кодом (1|128)/i.test(out);
         return (failed ? "Возможно, процесс уже завершён или не найден:\n" : "OK — процесс " + label + " завершён.\n") + "$ " + cmd + "\n\n" + out;
       }
@@ -3627,14 +3740,14 @@ async function executeTool(name, args, settings) {
         let src = sources[0];
         if (winFilter) src = sources.find((s) => s.name.toLowerCase().indexOf(winFilter) !== -1) || sources[0];
         if (!src) return "Не удалось получить источники экрана/окон.";
-        const png = src.thumbnail.toPNG();
-        if (!png || !png.length) return "Пустой скриншот «" + src.name + "» — не удалось захватить.";
+        const shot = encodeShot(src.thumbnail, args);
+        if (!shot.buf || !shot.buf.length) return "Пустой скриншот «" + src.name + "» — не удалось захватить.";
         const sz = src.thumbnail.getSize();
-        const dataUrl = "data:image/png;base64," + png.toString("base64");
+        const dataUrl = "data:" + shot.mime + ";base64," + shot.buf.toString("base64");
         if (activeEmit) activeEmit({ type: "image", path: "desktop:" + src.name, dataUrl });
         let saved = null;
         try {
-          if (png.length) saved = saveScreenshotPng(png, "screen");
+          if (shot.buf.length) saved = saveScreenshotPng(shot.buf, "screen", shot.mime);
         } catch {}
         return "OK — скриншот «" + src.name + "» (" + sz.width + "×" + sz.height + ") снят, показан пользователю во встроенном просмотрщике" +
           (saved ? " и сохранён: " + saved : "") +
@@ -3659,9 +3772,19 @@ async function executeTool(name, args, settings) {
             "$i = Get-Item -Path '" + esc + "' -ErrorAction SilentlyContinue; " +
             "if ($null -eq $i) { Write-Output '__ERR__' } else { $d = $i.GetValue(''); if ($null -eq $d) { Write-Output '(раздел без значения по умолчанию)' } else { Write-Output ('Значение по умолчанию: ' + $d) } }";
         }
-        const r = await spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], { cwd: os.homedir(), timeoutMs: 20000 });
-        const out = (r.out || "").trim();
-        if (out.indexOf("__ERR__") !== -1 || /Cannot find|не найден|отказано/i.test(out + r.err)) {
+        // Реестр читают часто, а пишут редко — 5 с кэша на путь+значение;
+        // ошибку (нет раздела/нет прав) не кэшируем: её могут исправить сразу.
+        const rr = await cachedPs(
+          "reg:" + regPath + "|" + name,
+          5000,
+          async () => {
+            const r = await psScript(ps, 20000);
+            return { out: (r.out || "").trim(), err: r.err || "" };
+          },
+          (v) => /__ERR__|Cannot find|не найден|отказано/i.test(v.out)
+        );
+        const out = rr.out;
+        if (out.indexOf("__ERR__") !== -1 || /Cannot find|не найден|отказано/i.test(out + rr.err)) {
           return "Раздел или значение не найдено: " + regPath + (name ? " → " + name : "") + ". Проверь путь — чтение разрешено только из SOFTWARE/ENVIRONMENT/SYSTEM/SECURITY.";
         }
         return "Реестр " + regPath + (name ? " → " + name : "") + ":\n" + out;
@@ -3687,10 +3810,11 @@ async function executeTool(name, args, settings) {
           "New-Item -Path $p -Force | Out-Null;" +
           "New-ItemProperty -Path $p -Name '" + escName + "' -Value '" + valPs + "' -PropertyType " + type + " -Force | Out-Null;" +
           "Write-Output 'OK'";
-        const r = await spawnRaw(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps], { cwd: os.homedir(), timeoutMs: 20000 });
+        const r = await psScript(ps, 20000);
         if (!r.ok || (r.out || "").indexOf("OK") === -1) {
           return "Ошибка записи: " + (((r.err || "") + " " + (r.out || "")).trim() || "неизвестная причина") + " — проверь права (HKCU не требует админа) или путь.";
         }
+        invalidatePsCache("reg:"); // запись сделана — кэш чтения реестра больше не верен
         return "OK — значение «" + name + "» = «" + value + "» (" + type + ") записано в " + regPath;
       }
       case "openPath": {
@@ -4210,7 +4334,7 @@ async function executeTool(name, args, settings) {
         return "Ошибка: неизвестный инструмент " + name;
     }
   } catch (e) {
-    return "Ошибка: " + (e.message || String(e));
+    return "Ошибка: " + fmtError(e);
   }
 }
 
@@ -4222,6 +4346,8 @@ async function fetchModels(settings) {
 // ─────────────────────────── AI: чат с инструментами ───────────────────────────
 let activeAbort = null;
 let activeEmit = null; // отправка ai:event из executeTool (showImage и т.п.)
+// Роутер инструментов текущего запуска: findTools по нему включает группы на лету.
+let activeToolRouter = null;
 
 // Авто-чекпоинт (как в Replit): после завершённого задания агента, если он менял файлы
 // в git-репозитории — создаём один локальный коммит-точку возврата. Никогда не пушит.
@@ -4317,10 +4443,105 @@ async function runAi(settings, messages, win, opts) {
   } catch {}
   let contextRetried = false; // при переполнении контекста пробуем ещё раз с меньшим бюджетом
   let reportRetried = false; // пустой финальный текст — один раз просим итоговый отчёт
-  // Динамический список инструментов: при тесном контексте — только ядро файлов/терминала.
-  const activeTools = planMode ? PLAN_MODE_TOOL_DEFINITIONS : selectTools(budget);
-  const toolsWeight = activeTools.length ? estimateTokens(JSON.stringify(activeTools)) : 0;
-  let histBudget = Math.max(1500, budget - toolsWeight); // бюджет истории без учёта схемы инструментов
+  // ── Роутер инструментов ──────────────────────────────────────────────────
+  // Вместо «все 146 схем в каждом раунде» шлём базу + группы, нужные этой задаче
+  // (routeTools из agent-core). Состав ЛИПКИЙ на всю задачу: группа, однажды
+  // включённая, не исчезает на середине работы. Порядок схем всегда канонический —
+  // иначе промахивается кэш префикса промпта (см. 1.5.46).
+  const routerTask = (() => {
+    const parts = [];
+    for (let i = messages.length - 1; i >= 0 && parts.length < 3; i--) {
+      const m = messages[i];
+      if (!m || m.role !== "user") continue;
+      const c = m.content;
+      const txt = typeof c === "string"
+        ? c
+        : Array.isArray(c)
+          ? c.filter((p) => p && p.type === "text").map((p) => p.text || "").join("\n")
+          : "";
+      if (txt) parts.push(txt);
+    }
+    return parts.join("\n").slice(0, 4000);
+  })();
+  // Группа → справочник агента: подключается сам, когда группа активна. Так «диета»
+  // промпта ничего не теряет: длинные правила живут в гайдах и приходят ровно тогда,
+  // когда нужны (браузер, система, окно приложения, облако).
+  const GROUP_GUIDES = { browser: "browser", system: "system", app: "app", cloud: "yc" };
+  const injectedGuides = new Set();
+  const guideNotes = []; // system-сообщения с текстом гайдов (стабильный префикс)
+  const stickyGroups = new Set(); // id групп, включённых в этой задаче
+  const forceAllTools = !!settings.sendAllTools; // предохранитель C: «отправлять все инструменты»
+  let routeInfo = null; // последний результат routeTools (метрики + предохранители)
+  let activeTools = [];
+  let toolsWeight = 0;
+  let histBudget = 1500;
+  let budgetWarned = false; // предупреждаем один раз за запуск, а не каждый раунд
+  // Вес системного промпта (~8k токенов) — раньше в бюджет не входил, поэтому индикатор
+  // контекста занижал заполнение и сжатие срабатывало позже, чем нужно.
+  const systemWeight = estimateTokens(SYSTEM_PROMPT);
+  // Объект для executeTool (findTools): включить группу на лету и посмотреть состав.
+  activeToolRouter = {
+    addGroups(ids) {
+      let changed = false;
+      for (const id of ids || []) {
+        if (!id || stickyGroups.has(id)) continue;
+        stickyGroups.add(id);
+        changed = true;
+      }
+      if (changed) refreshTools();
+    },
+    has(id) {
+      return stickyGroups.has(id);
+    },
+    names() {
+      return activeTools.map((t) => t.function && t.function.name).filter(Boolean);
+    },
+    groups() {
+      return [...stickyGroups];
+    },
+  };
+  const refreshTools = () => {
+    if (planMode) {
+      routeInfo = null;
+      activeTools = PLAN_MODE_TOOL_DEFINITIONS;
+    } else {
+      const baseWeight = routeTools({ text: "" }).tokens;
+      // Потолок: не больше ROUTER_MAX_TOKENS и не больше того, что оставляет место
+      // истории (system-промпт ~8k + минимум на диалог).
+      const maxTokens = Math.max(baseWeight, Math.min(ROUTER_MAX_TOKENS, Math.max(baseWeight, budget - 12000)));
+      routeInfo = routeTools({ text: routerTask, sticky: [...stickyGroups], forceAll: forceAllTools, maxTokens: maxTokens });
+      for (const id of routeInfo.groups) stickyGroups.add(id);
+      activeTools = routeInfo.tools;
+    }
+    toolsWeight = activeTools.length ? estimateTokens(JSON.stringify(activeTools)) : 0;
+    // Тесное окно: схемы + промпт уже занимают почти всё. Честно говорим об этом
+    // один раз — иначе агент «тупеет» без объяснений (модель видит обрезанный хвост).
+    if (!budgetWarned && !planMode && budget > 0 && toolsWeight + systemWeight > budget * 0.9) {
+      budgetWarned = true;
+      termEmit({
+        type: "metrics",
+        text: "⚠ Окно модели мало: схемы (~" + Math.round(toolsWeight / 1000) + "k) + системный промпт (~" + Math.round(systemWeight / 1000) + "k) занимают почти всё окно (" + budget + " т.). Возьми модель с окном побольше — иначе агент видит обрезанный контекст и работает вслепую.",
+      });
+    }
+    histBudget = Math.max(1500, Math.floor((budget - toolsWeight - systemWeight) * 0.85)); // история + резерв 15%: сжатие успевает до переполнения
+    // Справочник группы: подключаем один раз за задачу, дальше он просто едет в запросе.
+    if (!planMode && routeInfo) {
+      for (const gid of routeInfo.groups) {
+        const gname = GROUP_GUIDES[gid];
+        if (!gname || injectedGuides.has(gname)) continue;
+        const text = guideReadText(gname);
+        if (!text.trim()) continue;
+        injectedGuides.add(gname);
+        guideNotes.push({
+          role: "system",
+          content:
+            "=== СПРАВОЧНИК АГЕНТА: \"" + gname + "\" (группа \"" + gid + "\") — следуй ему в этой задаче ===\n" + text,
+        });
+        termEmit({ type: "metrics", text: "📘 Подключён справочник «" + gname + "» (группа «" + gid + "»)." });
+      }
+    }
+  };
+  refreshTools();
   const ctxManager = createContextManager({
     settings,
     emit,
@@ -4333,9 +4554,9 @@ async function runAi(settings, messages, win, opts) {
   const emitContext = (hist) => {
     try {
       const histTokens = hist && hist.length ? estimateTokens(JSON.stringify(hist)) : 0;
-      const used = histTokens + toolsWeight;
+      const used = histTokens + toolsWeight + systemWeight;
       const percent = budget > 0 ? Math.max(0, Math.min(100, Math.round((used / budget) * 100))) : 0;
-      emit({ type: "context", used, budget, percent, history: histTokens, tools: toolsWeight });
+      emit({ type: "context", used, budget, percent, history: histTokens, tools: toolsWeight, system: systemWeight });
     } catch {}
   };
 
@@ -4436,11 +4657,21 @@ async function runAi(settings, messages, win, opts) {
   // Авто-повтор после сбоя: при любой ошибке (сеть/API/провайдер/инструмент) делаем ещё
   // попытку с продолжением контекста (история canonical сохраняется) — до AUTO_RETRY_LIMIT повторов.
   const AUTO_RETRY_LIMIT = 2;
+  // Метрики раунда: токены/кэш/TTFB. Провайдер отдаёт их только по флагу
+  // stream_options.include_usage; строгий сервер может его не знать — тогда
+  // выключаем флаг на весь запуск и повторяем раунд (см. обработку !res.ok).
+  let includeUsage = true;
+  let roundUsage = null; // { prompt, completion, cached } текущего раунда
   for (let attemptNum = 1; ; attemptNum++) {
   try {
   for (let round = 0; round < maxRounds; round++) {
+    roundUsage = null; // аккумулятор токенов текущего раунда
+    const roundStartedAt = Date.now();
+    let roundTtfbMs = 0;
     // Пользователь остановил агента (Esc/Стоп) — не начинаем новый раунд.
     if (global.__agentStopRequested) return stopGraceful();
+    // Роутер: пересобираем набор схем (группы могли добавиться в прошлом раунде).
+    refreshTools();
     let collected = "";
     const toolCalls = [];
     const stripper = createThinkingStripper({ onHidden: emitThink });
@@ -4461,8 +4692,12 @@ async function runAi(settings, messages, win, opts) {
 
     const req = buildChatRequest(settings, {
       model: settings.model,
-      messages: canonical,
+      messages: guideNotes.length ? [canonical[0], ...guideNotes, ...canonical.slice(1)] : canonical,
       tools: activeTools,
+      // Статичный префикс промпта: до этой границы ставится точка кэша, чтобы
+      // динамический «паспорт проекта» не обнулял кэш на каждом витке.
+      staticSystem: SYSTEM_PROMPT,
+      includeUsage: includeUsage,
     });
     let res;
     try {
@@ -4476,8 +4711,25 @@ async function runAi(settings, messages, win, opts) {
       if (e.name === "AbortError") throw e;
       throw new Error("Сетевая ошибка при запросе к " + provider + ": " + e.message);
     }
+    roundTtfbMs = Date.now() - roundStartedAt; // заголовки ответа = первый байт
     if (!res.ok) {
       const detail = await readApiError(res);
+      // Строгий OpenAI-совместимый сервер может не знать stream_options (мы просили им
+      // токены и кэш). Это не ошибка пользователя: выключаем флаг и повторяем раунд.
+      if (
+        includeUsage &&
+        (res.status === 400 || res.status === 422) &&
+        /stream_options|include_usage|unknown|unrecognized|unsupported|extra|invalid/i.test(detail) &&
+        !/context|too long|maximum|num_ctx/i.test(detail)
+      ) {
+        includeUsage = false;
+        termEmit({
+          type: "metrics",
+          text: "Провайдер не понял stream_options.include_usage — отключаю (запрос без метрик токенов).",
+        });
+        round--;
+        continue;
+      }
       // Лимиты провайдера (Groq free ~7K токенов/мин): понятное объяснение вместо сырого JSON.
       const friendly = friendlyRateLimitError(res.status, detail, settings);
       if (friendly) throw new Error(friendly);
@@ -4490,7 +4742,7 @@ async function runAi(settings, messages, win, opts) {
       ) {
         contextRetried = true;
         budget = Math.max(3000, Math.floor(budget * 0.4));
-        histBudget = Math.max(1500, budget - toolsWeight);
+        histBudget = Math.max(1500, budget - toolsWeight - systemWeight);
         if (canonical.length > 1) {
           const sys = canonical[0];
           canonical = [sys, ...(await ctxManager.manage(canonical.slice(1), histBudget))];
@@ -4524,7 +4776,43 @@ async function runAi(settings, messages, win, opts) {
       },
       onToolCall: (tc) => toolCalls.push(tc),
       onThinking: emitThink,
+      onUsage: (u) => {
+        if (!u) return;
+        roundUsage = roundUsage || { prompt: 0, completion: 0, cached: 0 };
+        // Провайдеры шлют usage частями (Anthropic: вход в message_start, выход в
+        // message_delta) — по каждому полю берём максимум.
+        roundUsage.prompt = Math.max(roundUsage.prompt, u.prompt || 0);
+        roundUsage.completion = Math.max(roundUsage.completion, u.completion || 0);
+        roundUsage.cached = Math.max(roundUsage.cached, u.cached || 0);
+      },
     });
+
+    // Метрики раунда в «Консоль» (вкладка «Консоль» правой панели): без цифр
+    // любая оптимизация контекста — гадание.
+    {
+      const estPrompt = toolsWeight + estimateTokens(JSON.stringify(canonical));
+      const totalMs = Date.now() - roundStartedAt;
+      const tokens =
+        roundUsage && roundUsage.prompt
+          ? roundUsage.prompt + "→" + roundUsage.completion
+          : "≈" + estPrompt + " (провайдер не прислал)";
+      const cache =
+        roundUsage && roundUsage.prompt
+          ? roundUsage.cached + " (" + Math.round((roundUsage.cached / roundUsage.prompt) * 100) + "%)"
+          : "нет данных";
+      termEmit({
+        type: "metrics",
+        text:
+          "раунд " + (round + 1) + "/" + maxRounds +
+          " · схем " + activeTools.length + " (~" + toolsWeight + " т.)" +
+          (routeInfo && routeInfo.groups.length ? " · групп " + routeInfo.groups.length : "") +
+          (routeInfo && routeInfo.dropped.length ? " · срезано: " + routeInfo.dropped.join(",") : "") +
+          " · токены " + tokens +
+          " · кэш " + cache +
+          " · TTFB " + (roundTtfbMs / 1000).toFixed(1) + " с" +
+          " · всего " + (totalMs / 1000).toFixed(1) + " с",
+      });
+    }
 
     const tail = stripper.finish();
     if (tail) {
@@ -4609,6 +4897,22 @@ async function runAi(settings, messages, win, opts) {
       seenCalls.add(sig);
       calls.push(norm);
     }
+    // Предохранитель A: модель вызвала реальный инструмент, которого нет в текущем
+    // наборе схем (группа не была активирована). Дотягиваем его группу — в этом и
+    // следующих раундах схема будет на месте; сам вызов выполняем как обычно.
+    if (!planMode && routeInfo) {
+      for (const c of calls) {
+        const gid = groupOfTool(c.name);
+        if (!gid || stickyGroups.has(gid)) continue;
+        stickyGroups.add(gid);
+        refreshTools();
+        termEmit({
+          type: "metrics",
+          text: "🔧 «" + c.name + "» вне набора схем — добавляю группу «" + gid + "» (схем станет " + activeTools.length + ").",
+        });
+      }
+    }
+
     // Все вызовы раунда оказались дублями — завершаем без «пустых» tool_calls.
     if (!calls.length) {
       if (!String(finalText || "").trim()) finalText = "Готово.";
@@ -4630,6 +4934,25 @@ async function runAi(settings, messages, win, opts) {
         return call;
       }),
     });
+
+    // Батчинг: если раунд целиком состоит из независимых read-only вызовов —
+    // выполняем их параллельно (экономит по раунду на каждый вызов). Любой
+    // пишущий/интерактивный инструмент в раунде возвращает строгую очередь.
+    if (!planMode && calls.length > 1 && calls.every((c) => PARALLEL_SAFE_TOOLS.has(c.name))) {
+      for (const c of calls) emit({ type: "tool_start", name: c.name, args: c.args });
+      const results = await Promise.all(
+        calls.map((c) =>
+          executeTool(c.name, c.args, settings).catch((e) => "Ошибка инструмента " + c.name + ": " + fmtError(e))
+        )
+      );
+      calls.forEach((c, i) => {
+        const capped = truncateText(results[i], 8000);
+        emit({ type: "tool_result", name: c.name, result: capped });
+        canonical.push({ role: "tool", tool_call_id: c.id, content: capped });
+      });
+      if (global.__agentStopRequested) return stopGraceful();
+      continue;
+    }
 
     for (const c of calls) {
       // План-режим: выполняем только todoWrite. Если модель по привычке вызвала
@@ -4692,6 +5015,15 @@ async function runAi(settings, messages, win, opts) {
     const fatal = (e && e.name === "AbortError") || (e && e.fatal) || global.__agentStopRequested || (e && e.message && /Не выбрана модель/.test(e.message));
     if (fatal || attemptNum > AUTO_RETRY_LIMIT) throw e;
     const errText = String((e && e.message) || e).slice(0, 800);
+    // Провайдер отверг stream_options уже внутри ответа (не ошибкой на заголовках) —
+    // снимаем флаг: авто-повтор ниже пойдёт без него.
+    if (includeUsage && /stream_options|include_usage/i.test(errText)) {
+      includeUsage = false;
+      termEmit({
+        type: "metrics",
+        text: "Провайдер отверг stream_options — повторяю запрос без метрик токенов.",
+      });
+    }
     // Авто-переключение на следующее сохранённое OpenAI-подключение: ошибка ключа/
     // баланса/лимита/сети — пробуем другой ключ вместо бессмысленных повторов.
     let switchedProfile = null;

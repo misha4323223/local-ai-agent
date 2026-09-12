@@ -1,29 +1,29 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* 2100: глубокий космос + неон */
-  --bg: #05060d;
-  --bg-soft: #0a0e1e;
-  --bg-side: rgba(9, 13, 28, 0.72);
-  --bg-hover: rgba(139, 158, 255, 0.09);
-  --bg-input: rgba(13, 17, 34, 0.72);
-  --bg-card: rgba(15, 20, 42, 0.75);
-  --bg-bubble-user: linear-gradient(135deg, rgba(0, 229, 255, 0.22), rgba(139, 92, 246, 0.26));
-  --bg-bubble-ai: rgba(14, 18, 38, 0.66);
-  --bg-tool: rgba(4, 7, 16, 0.9);
-  --border: rgba(128, 196, 255, 0.17);
-  --border-soft: rgba(140, 166, 255, 0.1);
-  --text: #eef3ff;
-  --text-dim: #a5b3d8;
-  --text-faint: #64718f;
-  --accent: #22d3ee;
-  --accent-2: #a5f3fc;
-  --accent-violet: #8b5cf6;
-  --gradient: linear-gradient(135deg, #00e5ff 0%, #4f7cff 45%, #b44dff 100%);
-  --danger: #ff5c7a;
-  --ok: #2ee6a8;
-  --warn: #ffcf5c;
-  --radius: 14px;
+  /* Монохром: строгий чёрно-белый интерфейс без градиентов и свечений */
+  --bg: #0a0a0b;
+  --bg-soft: #101012;
+  --bg-side: #0c0c0e;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-input: #131316;
+  --bg-card: #141417;
+  --bg-bubble-user: #f2f2f3;
+  --bg-bubble-ai: #141416;
+  --bg-tool: #0d0d0f;
+  --border: #2b2b30;
+  --border-soft: #1f1f23;
+  --text: #f4f4f5;
+  --text-dim: #a3a3ab;
+  --text-faint: #6d6d75;
+  --accent: #e6e6e8;
+  --accent-2: #ffffff;
+  --accent-violet: #9a9aa2;
+  --gradient: #e6e6e8;
+  --danger: #ff6b6b;
+  --ok: #74c69d;
+  --warn: #d9b45b;
+  --radius: 12px;
   --mono: "Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", monospace;
   --font: "Inter", "Segoe UI Variable", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
@@ -508,6 +508,7 @@ body {
 .term-server .ts-err { color: #ff9d94; }
 .term-server .ts-ok { color: #7fd4a8; }
 .term-server .ts-warn { color: #ffd166; }
+.term-server .ts-metrics { color: #8b8b93; font-variant-numeric: tabular-nums; }
 .term-input-row {
   display: flex;
   align-items: center;

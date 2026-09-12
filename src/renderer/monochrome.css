@@ -1,0 +1,376 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   МОНОХРОМ + ПРОИЗВОДИТЕЛЬНОСТЬ
+   ---------------------------------------------------------------------------
+   Подключается ПОСЛЕ styles.css и перекрывает «неоновую» тему 2100.
+
+   Что и почему убрано (по результатам разбора styles.css):
+     1. backdrop-filter — 32 объявления, вплоть до blur(24px) saturate(140%).
+        Это самое дорогое свойство в интерфейсе: под каждым «стеклянным»
+        элементом браузер заново собирает размытие при КАЖДОЙ перерисовке.
+        Во время стриминга ответа пузырь перерисовывается на каждом чанке —
+        именно поэтому печать «жевала». Отключено глобально.
+     2. Бесконечные декоративные анимации: вращение логотипа, блик кнопки,
+        парение и пульсация иконки, скан-линия терминала, дрожание заголовка,
+        дрейф туманности. Тратили GPU постоянно и впустую. Отключены.
+     3. Градиенты, неон, свечения (text-shadow) и тени — визуальный шум и
+        устаревший «киберпанк». Заменены плоским монохромом.
+
+   СОЗНАТЕЛЬНО оставлено: мгновенные микро-отклики на наведение (цвет/граница)
+   и мигание индикаторов состояния (курсор при стриминге, точки «думаю»,
+   точки в работе) — это обратная связь, а не «эффект», и стоит ~ноль в простое.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── 1. Глобальная зачистка эффектов ──────────────────────────────────── */
+
+/* «Стекло», свечения и тени — нигде */
+*, *::before, *::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  text-shadow: none !important;
+  box-shadow: none !important;
+}
+
+/* Плоский фон вместо космоса (туманность-псевдоэлементы гасим) */
+body { background: var(--bg) !important; }
+body::before, body::after { content: none !important; }
+#main { background: transparent !important; }
+
+/* Декоративные анимации — выключить, а их псевдоэлементы убрать совсем */
+.msg,
+.msg.assistant .think,
+.welcome::before,
+.welcome-logo,
+.welcome-logo::before,
+.welcome-logo::after,
+.welcome h1,
+.brand-logo::after,
+.btn-primary::before,
+.overlay,
+.ps-dot,
+.term-out::after {
+  animation: none !important;
+}
+.brand-logo::after,
+.welcome::before,
+.welcome-logo::before,
+.welcome-logo::after,
+.btn-primary::before,
+.term-out::after,
+body::before,
+body::after {
+  content: none !important;
+}
+
+/* Свечения-фильтры (blur/drop-shadow) */
+.brand-logo::after,
+.welcome-logo::after,
+.launch-em,
+.btn-primary:hover,
+.composer-btns #btn-send:hover {
+  filter: none !important;
+}
+
+/* Функциональные индикаторы: тонко, без свечения */
+.bubble.pending::after,
+.dots i,
+.work-dot,
+.plan-dot {
+  animation-duration: 1.1s !important;
+  animation-iteration-count: infinite !important;
+}
+
+/* Фокус-кольцо вернуть — доступность важнее «плоскости» */
+.composer:focus-within,
+#chat-search:focus,
+#preview-url:focus,
+.field input:focus,
+.field textarea:focus,
+.select:focus,
+.chat-title-input:focus {
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.22) !important;
+}
+.chat-item.active { box-shadow: inset 2px 0 0 var(--accent) !important; }
+
+/* ─── 2. Поверхности ───────────────────────────────────────────────────── */
+#sidebar {
+  background: var(--bg-side) !important;
+  border-right: 1px solid var(--border-soft) !important;
+}
+#project-panel {
+  background: var(--bg-side) !important;
+  border-left: 1px solid var(--border-soft) !important;
+}
+#chat-header {
+  background: var(--bg) !important;
+  border-bottom: 1px solid var(--border-soft) !important;
+}
+.side-panel {
+  background: var(--bg-soft) !important;
+  border-left: 1px solid var(--border-soft) !important;
+}
+.sp-head, .preview-toolbar {
+  background: transparent !important;
+  border-color: var(--border-soft) !important;
+}
+.sp-switch, #preview-url, .term-input-row {
+  background: var(--bg-input) !important;
+  border-color: var(--border-soft) !important;
+}
+.preview-stage { background: var(--bg) !important; }
+.term-out { background: #08080a !important; }
+
+/* ─── 3. Логотип и бренд ───────────────────────────────────────────────── */
+.brand-logo {
+  background: var(--text) !important;
+  color: #0a0a0b !important;
+  border-radius: 10px !important;
+}
+.brand-name {
+  background: none !important;
+  -webkit-text-fill-color: currentColor !important;
+  color: var(--text) !important;
+}
+.brand-sub { color: var(--text-faint) !important; }
+
+/* ─── 4. Кнопки ────────────────────────────────────────────────────────── */
+.btn {
+  background: var(--bg-input) !important;
+  border: 1px solid var(--border) !important;
+  transition: background 0.1s, border-color 0.1s, color 0.1s !important;
+}
+.btn:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: #3a3a40 !important;
+  transform: none !important;
+}
+.btn:active { transform: none !important; }
+.btn-primary {
+  background: var(--text) !important;
+  border: 1px solid var(--text) !important;
+  color: #0a0a0b !important;
+  font-weight: 600;
+}
+.btn-primary:hover {
+  background: #ffffff !important;
+  border-color: #ffffff !important;
+}
+.btn-danger {
+  background: transparent !important;
+  border-color: rgba(255, 107, 107, 0.5) !important;
+  color: var(--danger) !important;
+}
+.btn-danger:hover {
+  background: rgba(255, 107, 107, 0.12) !important;
+  border-color: rgba(255, 107, 107, 0.7) !important;
+  transform: none !important;
+}
+.btn-ghost:hover { background: rgba(255, 255, 255, 0.06) !important; }
+.icon-btn.active {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: var(--accent) !important;
+  color: var(--text) !important;
+}
+
+/* ─── 5. Бейдж, поиск, список чатов ────────────────────────────────────── */
+.badge {
+  background: var(--bg-input) !important;
+  border-color: var(--border) !important;
+  color: var(--text-dim) !important;
+}
+.badge:hover { border-color: #3a3a40 !important; color: var(--text) !important; }
+#chat-search { background: var(--bg-input) !important; border-color: var(--border) !important; }
+#chat-search:focus { border-color: var(--accent) !important; }
+.chat-item { transition: background 0.12s, color 0.12s !important; }
+.chat-item:hover { background: var(--bg-hover) !important; transform: none !important; }
+.chat-item.active {
+  background: rgba(255, 255, 255, 0.07) !important;
+  color: var(--text) !important;
+  border-color: var(--border-soft) !important;
+}
+
+/* ─── 6. Сообщения ─────────────────────────────────────────────────────── */
+.msg.user .bubble {
+  background: var(--bg-bubble-user) !important;
+  color: #0a0a0b !important;
+  border: 1px solid #ffffff !important;
+}
+.msg.user .bubble a { color: #0a0a0b !important; }
+.msg.assistant .bubble {
+  background: var(--bg-bubble-ai) !important;
+  border: 1px solid var(--border-soft) !important;
+}
+.msg.error .bubble {
+  background: rgba(255, 107, 107, 0.1) !important;
+  border: 1px solid rgba(255, 107, 107, 0.45) !important;
+  color: #ffb3b3 !important;
+}
+.msg.assistant .think {
+  background: rgba(255, 255, 255, 0.03) !important;
+  border: 1px solid var(--border-soft) !important;
+  border-left: 3px solid #3a3a40 !important;
+}
+.think-head:hover { background: rgba(255, 255, 255, 0.05) !important; }
+.bubble.pending::after { background: var(--text) !important; }
+.dots i { background: var(--text-dim) !important; }
+
+/* ─── 7. Приветственный экран ──────────────────────────────────────────── */
+.welcome-logo {
+  background: var(--text) !important;
+  color: #0a0a0b !important;
+  border-radius: 18px !important;
+}
+.welcome h1 {
+  background: none !important;
+  -webkit-text-fill-color: currentColor !important;
+  color: var(--text) !important;
+}
+.welcome-sub { color: var(--text-dim) !important; }
+.welcome .chip,
+.welcome .chip.action,
+.welcome .chip.launch {
+  background: var(--bg-input) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-dim) !important;
+  transition: background 0.12s, border-color 0.12s, color 0.12s !important;
+}
+.welcome .chip.action:hover,
+.welcome .chip.launch:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: #3a3a40 !important;
+  color: var(--text) !important;
+  transform: none !important;
+}
+.model-needed {
+  background: var(--bg-input) !important;
+  border-color: var(--warn) !important;
+  color: var(--text) !important;
+}
+
+/* ─── 8. Композер ──────────────────────────────────────────────────────── */
+.composer {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+}
+.composer:focus-within { border-color: var(--accent) !important; }
+.composer-btns #btn-send {
+  background: var(--text) !important;
+  border: none !important;
+  color: #0a0a0b !important;
+}
+.composer-btns #btn-send:hover { background: #ffffff !important; }
+.composer-btns #btn-stop {
+  background: transparent !important;
+  border-color: rgba(255, 107, 107, 0.5) !important;
+  color: var(--danger) !important;
+}
+.plan-toggle.active {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: var(--accent) !important;
+  color: var(--text) !important;
+}
+
+/* ─── 9. Оверлеи, попапы, настройки ────────────────────────────────────── */
+.overlay { background: rgba(0, 0, 0, 0.6) !important; }
+.model-popup {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+}
+.mp-item:hover { background: rgba(255, 255, 255, 0.06) !important; }
+.mp-item.active {
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: var(--text) !important;
+  box-shadow: inset 2px 0 0 var(--accent) !important;
+}
+.confirm-panel, .device-panel, .settings-panel, .ask-panel,
+.file-panel, .palette-panel, .image-view {
+  background: var(--bg-soft) !important;
+  border-color: var(--border) !important;
+}
+.settings-head { background: transparent !important; border-color: var(--border-soft) !important; }
+.stab.active, .seg.active, .chip.active {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: var(--accent) !important;
+  color: var(--text) !important;
+}
+.select, .chip, .field input, .field textarea, .chat-title-input,
+.env-row, .gh-repos, .gh-repo-item, .gh-connected, .device-code,
+.attach-bar {
+  background: var(--bg-input) !important;
+  border-color: var(--border) !important;
+}
+.gh-repo-item:hover, .env-row:hover, .ma-btn:hover, .ai-actions .btn:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+.gh-repo-item.selected {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: var(--accent) !important;
+}
+.gh-repo-item .repo-icon { background: rgba(255, 255, 255, 0.08) !important; color: var(--text) !important; }
+.panel-resize:hover { background: rgba(255, 255, 255, 0.14) !important; }
+#attach-thumb { background: transparent !important; }
+
+/* ─── 10. Ход работы, инструменты, план ────────────────────────────────── */
+.tool-body, .tool-row, .work-body { background: transparent !important; }
+.work-group.expanded .work-head, .work-head:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+}
+.plan-group { background: transparent !important; border-color: var(--border-soft) !important; }
+.plan-group.finished .plan-fill { background: var(--ok) !important; }
+.ps-dot.on, .sb-dot.on, .hd-dot.ok { background: var(--ok) !important; }
+.ps-dot.err, .sb-dot.err { background: var(--danger) !important; }
+.hd-dot.warn { background: var(--warn) !important; }
+
+/* ─── 11. Markdown, код, диаграммы ─────────────────────────────────────── */
+.md-codeblock {
+  background: #0d0d0f !important;
+  border-color: var(--border-soft) !important;
+}
+.md-codehead { background: transparent !important; border-color: var(--border-soft) !important; }
+.md-copy:hover { background: rgba(255, 255, 255, 0.08) !important; color: var(--text) !important; }
+.md-table th { background: rgba(255, 255, 255, 0.04) !important; }
+.md-tablewrap { border-color: var(--border-soft) !important; }
+.bubble.md blockquote.md-quote {
+  background: transparent !important;
+  border-image: none !important;
+  border-left: 3px solid #3a3a40 !important;
+}
+.bubble.md .md-task { background: rgba(255, 255, 255, 0.04) !important; }
+.bubble.md a:hover { color: #ffffff !important; }
+.md-seq { background: var(--bg-card) !important; border-color: var(--border-soft) !important; }
+.seq-actor { background: rgba(255, 255, 255, 0.06) !important; border-color: var(--border-soft) !important; }
+.seq-msg.cross::after { background: none !important; }
+
+/* ─── 12. Терминал, превью ─────────────────────────────────────────────── */
+.term-prompt, .term-cmd-line .term-prefix { color: var(--ok) !important; }
+#term-input { caret-color: var(--text) !important; }
+.dev-btns .btn.active {
+  background: rgba(255, 255, 255, 0.12) !important;
+  border-color: var(--accent) !important;
+  color: var(--text) !important;
+}
+.preview-device, .preview-device.phone { border-color: var(--border) !important; }
+.preview-launch { background: var(--bg-card) !important; border-color: var(--border) !important; }
+.scroll-bottom {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-dim) !important;
+}
+.scroll-bottom:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  transform: none !important;
+}
+
+/* ─── 13. Статус-бар, палитра, скроллбары, GitHub/мобильные канты ──────── */
+#status-bar { background: var(--bg-soft) !important; border-color: var(--border-soft) !important; }
+::-webkit-scrollbar-thumb { background: #2b2b30 !important; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a40 !important; }
+.gh-repo-export {
+  background: var(--bg-input) !important;
+  border-color: var(--border) !important;
+}
+.gh-repo-export.primary {
+  background: rgba(255, 255, 255, 0.14) !important;
+  border-color: var(--accent) !important;
+  color: var(--text) !important;
+}
+.mobile-url-chip { background: var(--bg-input) !important; border-color: var(--border) !important; }

@@ -479,7 +479,24 @@ async function screenshot(args, win) {
   if (!winOk(win)) throw new Error("Окно приложения недоступно (запусти desktop-версию).");
   const img = await win.webContents.capturePage();
   if (!img || img.isEmpty()) throw new Error("Пустой скриншот окна");
-  const png = img.toPNG();
+  // JPEG по умолчанию (компактнее и быстрее для vision-модели), PNG — при png:true.
+  let out = img;
+  try {
+    const sz = img.getSize();
+    const longest = Math.max(sz.width || 0, sz.height || 0);
+    const cap = Math.min(Math.max(parseInt(args.maxWidth, 10) || 1440, 480), 2560);
+    if (longest > cap) {
+      const k = cap / longest;
+      out = img.resize({ width: Math.max(1, Math.round(sz.width * k)), height: Math.max(1, Math.round(sz.height * k)), quality: "good" });
+    }
+  } catch {}
+  if (!(args.png === true || args.format === "png")) {
+    try {
+      const jpg = out.toJPEG(Math.min(Math.max(parseInt(args.quality, 10) || 72, 30), 100));
+      if (jpg && jpg.length) return "data:image/jpeg;base64," + jpg.toString("base64");
+    } catch {}
+  }
+  const png = out.toPNG();
   if (!png || !png.length) throw new Error("Не удалось сформировать скриншот окна");
   return "data:image/png;base64," + png.toString("base64");
 }
