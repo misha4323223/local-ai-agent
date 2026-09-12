@@ -20,6 +20,18 @@ const AUTH_FAIL_WINDOW_MS = 60000;
 const AUTH_LOCK_MS = 5 * 60 * 1000;
 const RENDERER_DIR = path.join(__dirname, "renderer");
 
+// Версия приложения попадает в имя кэша service worker. Раньше имя было неизменным
+// ("ai-agent-mobile-v1"), и телефон мог неделями работать на СТАРОМ app.js из кэша:
+// исправления не появлялись, поведение расходилось с ПК — «мобильная версия как будто
+// отдельная». Теперь новая версия приложения = новое имя кэша, старый удаляется.
+const APP_VERSION = (() => {
+  try {
+    return String(require(path.join(__dirname, "..", "package.json")).version || "0");
+  } catch {
+    return "0";
+  }
+})();
+
 // Что мост отдаёт из src/renderer. Раньше список был захардкожен в handleHttp и в нём
 // не было monochrome.css и highlight.js: телефон получал «неоновую» тему вместо
 // монохромной, а подсветка кода молча отключалась.
@@ -82,7 +94,7 @@ const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 const SW_JS = `"use strict";
 /* Service Worker мобильного доступа: офлайн-кэш интерфейса.
    Документ — network-first (всегда свежий), остальное — stale-while-revalidate. */
-const CACHE = "ai-agent-mobile-v1";
+const CACHE = "ai-agent-mobile-${APP_VERSION}";
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => {
   e.waitUntil(

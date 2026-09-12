@@ -2020,6 +2020,137 @@ async function testMobileBridge() {
       b.stop();
     }
   });
+
+  await test("mobile-bridge: настройки и события реально доезжают до телефона (живой WebSocket)", async () => {
+    assert.strictEqual(typeof WebSocket, "function", "нужен глобальный WebSocket (Node 22+)");
+    // Мост отдаёт ровно то же, что IPC на ПК: телефон — не «отдельное приложение».
+    const handlers = new Map([
+      ["settings:get", () => ({ provider: "openai", agentEnv: { TOKEN: "секрет" }, yandexOauthToken: "y0-TOKEN" })],
+      ["yc:status", () => ({ loggedIn: true, folderName: "prod", allowUpdate: true })],
+    ]);
+    const b = new MobileBridge({ handlerMap: handlers });
+    b.port = await freePort();
+    b.pin = "123456";
+    b.start();
+    let ws = null;
+    try {
+      ws = new WebSocket("ws://127.0.0.1:" + b.port + "/ws");
+      const seen = [];
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("таймаут WebSocket")), 5000);
+        ws.onopen = () => ws.send(JSON.stringify({ t: "auth", pin: "123456" }));
+        ws.onmessage = (e) => {
+          const m = JSON.parse(e.data);
+          seen.push(m);
+          if (m.t === "auth_ok") ws.send(JSON.stringify({ t: "call", id: 1, ch: "settings:get", args: [] }));
+          if (m.t === "res" && m.id === 1) ws.send(JSON.stringify({ t: "call", id: 2, ch: "yc:status", args: [] }));
+          if (m.t === "res" && m.id === 2) {
+            clearTimeout(t);
+            resolve();
+          }
+        };
+        ws.onerror = () => {
+          clearTimeout(t);
+          reject(new Error("WebSocket не поднялся"));
+        };
+      });
+      const set = seen.find((m) => m.t === "res" && m.id === 1);
+      assert.ok(set && set.ok, "вызов канала настроек не прошёл");
+      assert.strictEqual(set.v.agentEnv.TOKEN, "секрет", "переменные агента не доехали до телефона");
+      assert.strictEqual(set.v.yandexOauthToken, "y0-TOKEN", "токен Yandex Cloud не доехал до телефона");
+      const st = seen.find((m) => m.t === "res" && m.id === 2);
+      assert.ok(st && st.ok && st.v.loggedIn === true, "на телефоне Yandex Cloud не видит подключение с ПК");
+      // Событие с ПК доходит до телефона без перезагрузки страницы.
+      b.broadcast("ai:event", { type: "chunk", text: "привет", from: "desktop" });
+      b.broadcast("chats:reload", { at: 1 });
+      await new Promise((r) => setTimeout(r, 150));
+      const ev = seen.find((m) => m.t === "ev" && m.ch === "ai:event");
+      assert.ok(ev && ev.v.text === "привет" && ev.v.from === "desktop", "событие прогона не разослано: " + JSON.stringify(ev));
+      assert.ok(seen.some((m) => m.t === "ev" && m.ch === "chats:reload"), "телефон не получает уведомление о новой истории");
+    } finally {
+      try {
+        if (ws) ws.close();
+      } catch {}
+      b.stop();
+    }
+  });
+
+  await test("mobile-bridge: service worker получает версию приложения (телефон не залипает на старом коде)", async () => {
+    const pkgVersion = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version;
+    const b = new MobileBridge({ handlerMap: new Map() });
+    b.port = await freePort();
+    b.pin = "123456";
+    b.start();
+    try {
+      const sw = await get(b.port, "/sw.js");
+      assert.strictEqual(sw.status, 200, "sw.js не отдаётся");
+      assert.ok(
+        sw.body.includes("ai-agent-mobile-" + pkgVersion),
+        "в имени кэша service worker нет версии приложения: " + (sw.body.match(/ai-agent-mobile-[^"]*/) || ["—"])[0]
+      );
+      assert.ok(sw.body.includes("caches.delete"), "старые кэши не удаляются");
+      const boot = await get(b.port, "/bootstrap.js");
+      assert.ok(/__mobileBridge = true/.test(boot.body), "без флага моста mobile-api не включится");
+    } finally {
+      b.stop();
+    }
+  });
+
+  await test("mobile-api: покрывает все методы интерфейса и знает все каналы IPC", () => {
+    const app = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+    const mob = fs.readFileSync(path.join(ROOT, "src", "renderer", "mobile-api.js"), "utf8");
+    const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    const keys = new Set([...mob.matchAll(/^\s{4}([a-zA-Z0-9_]+):/gm)].map((m) => m[1]));
+    // Совпадения с адресами (api.deepseek.com и т.п.) и сознательно отсутствующий
+    // синхронный канал сохранения чатов: sendSync по WebSocket невозможен, при
+    // закрытии страницы история уходит асинхронным saveChats.
+    const skip = new Set(["anthropic", "cerebras", "cloud", "deepseek", "groq", "mistral", "nvidia", "openai", "saveChatsSync"]);
+    const used = [...new Set((app.match(/api\.[a-zA-Z0-9_]+/g) || []).map((s) => s.slice(4)))];
+    const missing = used.filter((k) => !skip.has(k) && !keys.has(k));
+    assert.deepStrictEqual(missing, [], "в мобильной копии API нет методов: " + missing.join(", "));
+    // Каждый вызов из мобильной копии должен существовать в main.js — иначе кнопка
+    // на телефоне молча ничего не делает, и причину не видно.
+    const inv = [...new Set([...mob.matchAll(/invoke\("([^"]+)"\)/g)].map((m) => m[1]))];
+    const bad = inv.filter((ch) => !main.includes('ipcMain.handle("' + ch + '"') && !main.includes('ipcMain.on("' + ch + '"'));
+    assert.deepStrictEqual(bad, [], "нет обработчиков каналов: " + bad.join(", "));
+    const ons = [...new Set([...mob.matchAll(/\bon\("([^"]+)"\)/g)].map((m) => m[1]))];
+    for (const ch of ons) assert.ok(main.includes('"' + ch + '"'), "нет события " + ch + " в main.js");
+  });
+
+  await test("синхронизация: история чатов с другого устройства подхватывается сама", () => {
+    const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    const pre = fs.readFileSync(path.join(ROOT, "src", "preload.js"), "utf8");
+    const mob = fs.readFileSync(path.join(ROOT, "src", "renderer", "mobile-api.js"), "utf8");
+    const app = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+    assert.ok(
+      /ipcMain\.handle\("chats:save", \(e, d\) => \{\n  saveChats\(d\);\n  notifyChatsSaved\(e\);/.test(main),
+      "сохранение истории не уведомляет другие клиенты"
+    );
+    assert.ok(/function notifyChatsSaved\(e\)/.test(main) && /send\("chats:reload"/.test(main), "нет события chats:reload");
+    assert.ok(/senderId === mainWindow\.webContents\.id\) return;/.test(main), "своё же окно получает лишнее уведомление");
+    assert.ok(/onChatsReload/.test(pre), "в preload нет onChatsReload");
+    assert.ok(/onChatsReload/.test(mob), "в mobile-api нет onChatsReload");
+    assert.ok(/api\.onChatsReload\(\(\) => reloadChatsFromDisk\(\)\)/.test(app), "интерфейс не подписан на chats:reload");
+    assert.ok(/if \(session \|\| chatsSavePending\) return;/.test(app), "перезагрузка может затереть свой прогон или несохранённые правки");
+    // Прогон, запущенный телефоном, помечается в событиях и не подмешивается в чужой чат.
+    assert.ok(/let activeRunOrigin = "desktop";/.test(main), "нет признака «кто запустил прогон»");
+    assert.ok(/activeRunOrigin = e && e\.sender && e\.sender\.id \? "desktop" : "mobile";/.test(main), "ai:send не отмечает источник прогона");
+    assert.ok(/from: activeRunOrigin/.test(main), "события не помечаются источником");
+    assert.ok(/if \(ev && ev\.from === "mobile" && !session\)/.test(app), "чужой прогон подмешивается в текущий чат");
+  });
+
+  await test("мобильный интерфейс: сайдбар с настройками открывается на телефоне", () => {
+    const css = fs.readFileSync(path.join(ROOT, "src", "renderer", "styles.css"), "utf8");
+    const m720 = css.match(/@media \(max-width: 720px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m720, "нет блока max-width: 720px");
+    assert.ok(
+      !/#sidebar\s*\{\s*display:\s*none/.test(m720[1]),
+      "на телефоне сайдбар по-прежнему скрыт display:none — гамбургер открывает пустоту"
+    );
+    assert.ok(!/#project-panel\s*\{\s*display:\s*none/.test(m720[1]), "панель проекта на телефоне скрыта");
+    const m900 = css.match(/@media \(max-width: 900px\) \{([\s\S]*?)\n\}/);
+    assert.ok(m900 && /#sidebar \{[\s\S]*?display: flex;/.test(m900[1]), "у выезжающего сайдбара нет display:flex");
+  });
 }
 
 // ── 4c. mobile-api: страница входа с телефона ───────────────────────────────
@@ -2778,7 +2909,7 @@ async function testYandexCloud() {
 
   await test("Yandex Cloud: инструменты, алиасы промпта, мост и интерфейс согласованы", () => {
     const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name);
-    for (const n of ["ycStatus", "ycList", "ycCreate", "ycDelete", "ycDeploy", "ycLogs", "ycInstall"]) {
+    for (const n of ["ycStatus", "ycList", "ycContainer", "ycCreate", "ycDelete", "ycDeploy", "ycLogs", "ycInstall"]) {
       assert.ok(names.includes(n), "нет инструмента " + n);
     }
     const prompt = core.SYSTEM_PROMPT || "";
@@ -3049,6 +3180,277 @@ async function testYandexCloud() {
     }
   });
 
+  await test("ycContainer: пустой контейнер и границы сервиса не ломают сводку", () => {
+    // Контейнер без ревизий: сводка пустой ревизии должна быть безопасной.
+    const s = yc.revisionSummary(undefined);
+    assert.strictEqual(s.image, "");
+    assert.deepStrictEqual(s.secrets, []);
+    assert.deepStrictEqual(s.mounts, []);
+    assert.strictEqual(s.timeoutSec, null);
+    // Неизвестная длительность не превращается в NaN.
+    assert.strictEqual(yc.revisionSummary({ executionTimeout: "не время" }).timeoutSec, null);
+  });
+
+
+  // ── Глубокий слой Serverless Containers: обзор → редактор → ревизии ────────
+  // Фикстура — ровно тот Revision, который отдаёт Container.GetRevision.
+  const REV = {
+    id: "bba5rev1",
+    containerId: "c1",
+    description: "release 1",
+    createdAt: "2026-09-10T10:00:00Z",
+    image: {
+      imageUrl: "cr.yandex/cr1/api:latest",
+      imageDigest: "sha256:abc",
+      command: { command: ["node", "server.js"] },
+      args: { args: ["--port", "8080"] },
+      environment: { NODE_ENV: "production", LOG_LEVEL: "info" },
+      workingDir: "/app",
+    },
+    resources: { memory: String(256 * 1024 * 1024), cores: "1", coreFraction: "100" },
+    executionTimeout: "30s",
+    concurrency: "4",
+    serviceAccountId: "aje1",
+    status: "ACTIVE",
+    connectivity: { networkId: "enp1" },
+    provisionPolicy: { minInstances: "1" },
+    secrets: [{ id: "e6q1", versionId: "v1", key: "DB_PASS", environmentVariable: "DB_PASSWORD" }],
+    logOptions: { folderId: "b1", minLevel: "INFO" },
+    scalingPolicy: { zoneInstancesLimit: "5", zoneRequestsLimit: "0" },
+    storageMounts: [{ bucketId: "static-bucket", prefix: "assets", readOnly: true, mountPointPath: "/static" }],
+    mounts: [{ mountPointPath: "/data", mode: "READ_WRITE", objectStorage: { bucketId: "data-bucket", prefix: "" } }],
+    runtime: { task: {} },
+  };
+
+  await test("ycContainer: сводка ревизии переводит байты, длительность и режим в человеческий вид", () => {
+    const s = yc.revisionSummary(REV);
+    assert.strictEqual(s.id, "bba5rev1");
+    assert.strictEqual(s.status, "ACTIVE");
+    assert.strictEqual(s.image, "cr.yandex/cr1/api:latest");
+    assert.strictEqual(s.memoryMb, 256, "байты должны стать мегабайтами");
+    assert.strictEqual(s.cores, 1);
+    assert.strictEqual(s.coreFraction, 100);
+    assert.strictEqual(s.timeoutSec, 30, "duration 30s → секунды");
+    assert.strictEqual(s.concurrency, 4);
+    assert.deepStrictEqual(s.command, ["node", "server.js"]);
+    assert.deepStrictEqual(s.args, ["--port", "8080"]);
+    assert.strictEqual(s.workingDir, "/app");
+    assert.strictEqual(s.env.NODE_ENV, "production", "переменные окружения ревизии потерялись");
+    assert.strictEqual(s.serviceAccountId, "aje1");
+    assert.strictEqual(s.networkId, "enp1");
+    assert.strictEqual(s.minInstances, 1);
+    assert.strictEqual(s.maxInstancesPerZone, 5);
+    assert.strictEqual(s.secrets[0].environmentVariable, "DB_PASSWORD");
+    assert.strictEqual(s.logDisabled, false);
+    assert.strictEqual(s.logMinLevel, "INFO");
+    assert.strictEqual(s.storageMounts[0].path, "/static");
+    assert.strictEqual(s.storageMounts[0].readOnly, true);
+    assert.strictEqual(s.mounts[0].path, "/data");
+    assert.strictEqual(s.mounts[0].mode, "READ_WRITE");
+    assert.strictEqual(s.mounts[0].bucketId, "data-bucket");
+    assert.strictEqual(s.runtime, "task", "режим task не распознан");
+    // Пустая ревизия не должна ничего ломать (контейнер ещё не деплоился).
+    const empty = yc.revisionSummary(null);
+    assert.strictEqual(empty.id, "");
+    assert.strictEqual(empty.runtime, "http");
+    assert.deepStrictEqual(empty.env, {});
+  });
+
+  await test("ycContainer: префилл «Создать ревизию» берёт настройки активной и не теряет переменные", () => {
+    const base = yc.revisionToDeployOpts(REV, {});
+    assert.strictEqual(base.imageUrl, "cr.yandex/cr1/api:latest", "образ должен подставляться из ревизии");
+    assert.strictEqual(base.memoryMb, 256);
+    assert.strictEqual(base.cores, 1);
+    assert.strictEqual(base.timeoutSec, 30);
+    assert.strictEqual(base.concurrency, 4);
+    assert.strictEqual(base.serviceAccountId, "aje1");
+    assert.strictEqual(base.networkId, "enp1");
+    assert.strictEqual(base.workingDir, "/app");
+    assert.strictEqual(base.runtime, "task");
+    assert.strictEqual(base.storageMounts.length, 1);
+    assert.strictEqual(base.mounts.length, 1);
+    assert.deepStrictEqual(base.env, { NODE_ENV: "production", LOG_LEVEL: "info" });
+
+    // Переменные ДОБАВЛЯЮТСЯ к прежним, переданное побеждает.
+    const merged = yc.revisionToDeployOpts(REV, { env: { NODE_ENV: "staging", EXTRA: "1" } });
+    assert.deepStrictEqual(merged.env, { NODE_ENV: "staging", LOG_LEVEL: "info", EXTRA: "1" });
+
+    // envReplace: true — набор заменяется целиком (старые переменные не остаются).
+    const replaced = yc.revisionToDeployOpts(REV, { env: { ONLY: "1" }, envReplace: true });
+    assert.deepStrictEqual(replaced.env, { ONLY: "1" });
+
+    // Переопределения сильнее префилла.
+    const over = yc.revisionToDeployOpts(REV, { memoryMb: 512, cores: 2, image: undefined, imageUrl: "cr.yandex/cr1/api:v2" });
+    assert.strictEqual(over.memoryMb, 512);
+    assert.strictEqual(over.cores, 2);
+    assert.strictEqual(over.imageUrl, "cr.yandex/cr1/api:v2");
+
+    // Первая ревизия контейнера: префилла нет, образ обязателен.
+    const first = yc.revisionToDeployOpts(null, {});
+    assert.ok(!first.imageUrl, "без префилла образ должен остаться пустым — его спросит инструмент");
+    assert.strictEqual(first.memoryMb, 256, "нужны разумные значения по умолчанию");
+  });
+
+  await test("ycContainer: запрос ревизии несёт ресурсы, команду, сеть, секреты и режим task", async () => {
+    const realFetch2 = global.fetch;
+    const seen = { url: "", body: null };
+    try {
+      global.fetch = makeFetch((url, opts) => {
+        const u = String(url);
+        if (u.includes("/endpoints")) return { body: {} };
+        if (u.includes("/iam/v1/tokens")) return { body: { iamToken: "t", expiresAt: new Date(Date.now() + 3600e3).toISOString() } };
+        if (u.includes(":deploy")) {
+          seen.url = u;
+          seen.body = JSON.parse((opts && opts.body) || "{}");
+          return { body: { id: "op1", done: true } };
+        }
+        if (u.includes("/operations/")) return { body: { id: "op1", done: true } };
+        return { body: {} };
+      });
+      yc.resetIamCache();
+      await yc.deployContainerRevision("oauth", {
+        containerId: "c1",
+        folderId: "b1",
+        imageUrl: "cr.yandex/cr1/api:latest",
+        memoryMb: 256,
+        cores: 2,
+        coreFraction: 20, // у многоядерной ревизии сервис принимает только 100%
+        timeoutSec: 45,
+        concurrency: 5,
+        env: { A: "1" },
+        command: ["node", "server.js"],
+        args: ["--port", "8080"],
+        workingDir: "/app",
+        networkId: "enp1",
+        minInstances: 1,
+        secrets: [{ id: "e6q1", key: "DB_PASS", environmentVariable: "DB_PASSWORD" }, { id: "broken" }],
+        storageMounts: [{ bucketId: "static-bucket", prefix: "assets", readOnly: true, mountPointPath: "/static" }],
+        mounts: [{ mountPointPath: "/data", mode: "read_write", bucketId: "data-bucket" }],
+        runtime: "task",
+        logMinLevel: "warn",
+      });
+      assert.ok(/\/containers\/v1\/revisions:deploy$/.test(seen.url), "URL деплоя: " + seen.url);
+      assert.strictEqual(seen.body.containerId, "c1");
+      assert.strictEqual(seen.body.resources.memory, String(256 * 1024 * 1024), "память уходит в байтах");
+      assert.strictEqual(seen.body.resources.cores, "2");
+      assert.strictEqual(seen.body.resources.coreFraction, "100", "доля ядра у многоядерной ревизии только 100%");
+      assert.strictEqual(seen.body.executionTimeout, "45s");
+      assert.strictEqual(seen.body.concurrency, "5");
+      assert.deepStrictEqual(seen.body.imageSpec.environment, { A: "1" });
+      assert.deepStrictEqual(seen.body.imageSpec.command, { command: ["node", "server.js"] });
+      assert.deepStrictEqual(seen.body.imageSpec.args, { args: ["--port", "8080"] });
+      assert.strictEqual(seen.body.imageSpec.workingDir, "/app");
+      assert.deepStrictEqual(seen.body.connectivity, { networkId: "enp1" });
+      assert.deepStrictEqual(seen.body.provisionPolicy, { minInstances: "1" });
+      assert.strictEqual(seen.body.secrets.length, 1, "секрет без key/environmentVariable не должен уходить");
+      assert.deepStrictEqual(seen.body.secrets[0], { id: "e6q1", key: "DB_PASS", environmentVariable: "DB_PASSWORD" });
+      assert.strictEqual(seen.body.storageMounts[0].mountPointPath, "/static");
+      assert.strictEqual(seen.body.storageMounts[0].readOnly, true);
+      assert.strictEqual(seen.body.mounts[0].mode, "READ_WRITE", "режим монтирования приводится к верхнему регистру");
+      assert.deepStrictEqual(seen.body.runtime, { task: {} });
+      assert.strictEqual(seen.body.logOptions.minLevel, "WARN", "уровень логов приводится к верхнему регистру");
+      assert.strictEqual(seen.body.logOptions.folderId, "b1");
+
+      // Границы сервиса: таймаут не больше 600 с, память не меньше 128 МБ.
+      seen.body = null;
+      await yc.deployContainerRevision("oauth", { containerId: "c1", imageUrl: "cr.yandex/cr1/api:latest", timeoutSec: 9999, memoryMb: 64 });
+      assert.strictEqual(seen.body.executionTimeout, "600s");
+      assert.strictEqual(seen.body.resources.memory, String(128 * 1024 * 1024));
+      // Без образа ревизию создавать нечем — ошибка должна быть понятной, без сети.
+      const noImage = await yc.deployContainerRevision("oauth", { containerId: "c1" }).then(() => null, (e) => e);
+      assert.ok(noImage && /образ/i.test(noImage.message), "нет понятной ошибки про образ: " + (noImage && noImage.message));
+    } finally {
+      global.fetch = realFetch2;
+    }
+  });
+
+  await test("ycContainer: обзор, ревизии, правка и откат идут по верным адресам", async () => {
+    const realFetch2 = global.fetch;
+    const seen = [];
+    try {
+      global.fetch = makeFetch((url, opts) => {
+        const u = String(url);
+        const method = (opts && opts.method) || "GET";
+        if (u.includes("/endpoints")) return { body: {} };
+        if (u.includes("/iam/v1/tokens")) return { body: { iamToken: "t", expiresAt: new Date(Date.now() + 3600e3).toISOString() } };
+        if (u.includes("/operations/")) return { body: { id: "op1", done: true } };
+        seen.push({ url: u, method, body: opts && opts.body ? JSON.parse(opts.body) : null });
+        if (method === "GET" && u.includes("/containers/v1/containers/c1")) {
+          return {
+            body: { id: "c1", name: "api", url: "https://api.example", status: "ACTIVE", folderId: "b1", createdAt: "2026-09-01T00:00:00Z", description: "Прод", labels: { env: "prod" } },
+          };
+        }
+        if (u.includes("/containers/v1/revisions?")) return { body: { revisions: [Object.assign({}, REV)] } };
+        if (method === "GET" && /\/containers\/v1\/revisions\/[^:?]+$/.test(u)) return { body: Object.assign({}, REV) };
+        return { body: {} };
+      });
+      yc.resetIamCache();
+      const cont = await yc.getContainer("oauth", "c1");
+      assert.strictEqual(cont.url, "https://api.example");
+      assert.strictEqual(cont.labels.env, "prod", "метки контейнера потерялись");
+      const revs = await yc.listRevisions("oauth", { containerId: "c1", pageSize: 100 });
+      assert.strictEqual(revs.length, 1);
+      assert.strictEqual(revs[0].id, "bba5rev1");
+      const rev = await yc.getRevision("oauth", "bba5rev1");
+      assert.strictEqual(rev.containerId, "c1");
+      const upd = await yc.updateContainer("oauth", "c1", { description: "Прод API" });
+      assert.strictEqual(upd.name, "api");
+      await yc.rollbackContainer("oauth", "c1", "bba5rev1");
+
+      const listUrl = seen.find((s) => s.url.includes("/revisions?")).url;
+      assert.ok(/\/containers\/v1\/revisions\?containerId=c1&pageSize=100$/.test(listUrl), "список ревизий: " + listUrl);
+      const revUrl = seen.find((s) => s.url.includes("/revisions/bba5rev1")).url;
+      assert.ok(/\/containers\/v1\/revisions\/bba5rev1$/.test(revUrl), "детали ревизии: " + revUrl);
+      const patch = seen.find((s) => s.method === "PATCH");
+      assert.ok(patch && /\/containers\/v1\/containers\/c1$/.test(patch.url), "PATCH контейнера: " + (patch && patch.url));
+      assert.strictEqual(patch.body.updateMask, "description", "маска должна перечислять только изменяемые поля");
+      assert.strictEqual(patch.body.description, "Прод API");
+      assert.ok(!("name" in patch.body) && !("labels" in patch.body), "неизменяемые поля не должны уходить в запрос — иначе сервис их сбросит");
+      const rb = seen.find((s) => /:rollback$/.test(s.url));
+      assert.ok(rb && rb.method === "POST", "откат — это POST :rollback");
+      assert.deepStrictEqual(rb.body, { revisionId: "bba5rev1" });
+      // Пустая правка — понятная ошибка, а не молчаливый PATCH без маски.
+      const noPatch = await yc.updateContainer("oauth", "c1", {}).then(() => null, (e) => e);
+      assert.ok(noPatch && /нечего менять/i.test(noPatch.message), "нет понятной ошибки про пустую правку");
+    } finally {
+      global.fetch = realFetch2;
+    }
+  });
+
+  await test("ycContainer: инструмент, разрешение и интерфейс согласованы", () => {
+    const names = core.TOOL_DEFINITIONS.map((d) => d.function && d.function.name);
+    assert.ok(names.includes("ycContainer"), "нет инструмента ycContainer");
+    assert.ok(/ycContainer/.test(modelPrompt()), "в промпте нет ycContainer");
+    const cloud = core.TOOL_GROUPS.find((g) => g.id === "cloud");
+    assert.ok(cloud && cloud.names.includes("ycContainer"), "группа cloud не содержит ycContainer");
+    const def = core.TOOL_DEFINITIONS.find((d) => d.function && d.function.name === "ycContainer");
+    for (const a of ["overview", "revisions", "revision", "deploy", "rollback", "update"]) {
+      assert.ok(def.function.description.includes(a), "в описании инструмента нет действия " + a);
+    }
+    assert.deepStrictEqual(def.function.parameters.required, ["action", "container"], "action и container обязательны");
+    const preload = fs.readFileSync(path.join(ROOT, "src", "preload.js"), "utf8");
+    assert.ok(/ycSetPermissions: \(allowCreate, allowDelete, allowUpdate\)/.test(preload), "preload не передаёт третье разрешение");
+    const html = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+    assert.ok(html.includes('id="s-yc-allow-update"'), "нет чекбокса «Разрешить агенту менять контейнеры»");
+    const app = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+    assert.ok(/s-yc-allow-update"\)\.onchange/.test(app), "app.js не слушает третий чекбокс");
+    assert.ok(/api\.ycSetPermissions\(create, del, upd\)/.test(app), "app.js не сохраняет третье разрешение");
+    const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+    assert.ok(main.includes('case "ycContainer"'), "нет обработчика ycContainer");
+    assert.ok(/allowUpdate \? "разрешено"/.test(main), "ycStatus не сообщает про право менять контейнеры");
+    assert.ok(/ycAllowAgentUpdate: !!allowUpdate/.test(main), "IPC не сохраняет право менять контейнеры");
+    assert.ok(
+      /\(action === "deploy" \|\| action === "rollback" \|\| action === "update"\) && !cfg\.allowUpdate/.test(main),
+      "нет гейта разрешения для deploy/rollback/update"
+    );
+    const guide = fs.readFileSync(path.join(ROOT, "src", "agent-guides", "yc.md"), "utf8");
+    for (const a of ["overview", "revisions", "revision", "deploy", "rollback", "update"]) {
+      assert.ok(guide.includes(a), "в справочнике yc.md нет действия " + a);
+    }
+    assert.ok(/удалить ревизию нельзя/i.test(guide), "в справочнике нет важного ограничения: ревизию удалить нельзя");
+    // Ждём завершения операций без гарантированной паузы в 2 секунды.
+    assert.ok(/let first = true;/.test(ycSrc), "waitOperation всё ещё спит перед первой проверкой");
+  });
   await test("yc: сводка быстрее — короткий таймаут без повторов, облака и каталоги параллельно", () => {
     const ycSrc2 = fs.readFileSync(path.join(ROOT, "src", "yandex-cloud.js"), "utf8");
     assert.ok(
@@ -6018,6 +6420,55 @@ async function testOllamaWindow() {
   }
 }
 
+// ── Контекст длинного чата и кнопка «Продолжить контекст» ───────────────────
+async function testChatContextTransfer() {
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+
+  await test("trimConversation: на длинном чате остаётся свежий хвост, а не одно сообщение", () => {
+    // Регрессия: прежний проход «с начала» тратил бюджет на старые сообщения, а на чате
+    // длиннее бюджета возвращал ОДНО последнее сообщение — задача агента терялась.
+    const msgs = [];
+    for (let i = 0; i < 40; i++) {
+      msgs.push({ role: "user", content: "U" + i + ":" + "x".repeat(200) });
+      msgs.push({ role: "assistant", content: "A" + i + ":" + "y".repeat(200) });
+    }
+    let total = 0;
+    for (const m of msgs) total += core.estimateTokens(m.content);
+    assert.ok(total > 3000, "тест собран неверно: сообщений меньше бюджета (" + total + " т.)");
+    const trimmed = core.trimConversation(msgs, 3000);
+    assert.ok(trimmed.length > 1, "история схлопнулась до " + trimmed.length + " сообщения — задача потеряна");
+    assert.ok(trimmed.length < msgs.length, "история не обрезана вообще (" + trimmed.length + ")");
+    assert.ok(trimmed.some((m) => String(m.content).startsWith("U39:")), "потерян последний запрос пользователя");
+    assert.ok(!trimmed.some((m) => String(m.content).startsWith("U0:")), "самое старое сообщение не обрезано");
+    assert.strictEqual(trimmed[0].role, "user", "история начинается не с user: " + trimmed[0].role);
+  });
+
+  await test("история чата уходит в модель целиком и со служебными заметками", () => {
+    const i = appSrc.indexOf("let history = chat.messages");
+    const j = appSrc.indexOf("session = { chatId: chat.id");
+    assert.ok(i > 0 && j > i, "не нашёл сборку истории в sendMessage");
+    const block = appSrc.slice(i, j);
+    assert.ok(!block.includes("AgentCore.trimConversation(history"), "история по-прежнему режется в интерфейсе по полному бюджету");
+    assert.ok(block.includes('m.role === "system"'), "служебные заметки чата не попадают в контекст");
+    assert.ok(block.includes('m.role === "user"') && block.includes('m.role === "assistant"'), "user/assistant не попадают в контекст");
+  });
+
+  await test("кнопка «Продолжить контекст» переносит последний запрос и хвост диалога", () => {
+    const i = appSrc.indexOf("function buildContinuationContext");
+    const j = appSrc.indexOf('$("btn-continue-chat").onclick');
+    assert.ok(i > 0, "нет сборки контекста для кнопки");
+    assert.ok(j > i, "кнопка не использует новую сборку контекста");
+    const fn = appSrc.slice(i, j);
+    assert.ok(fn.includes("Последний запрос пользователя"), "в контекст не попадает последний запрос пользователя");
+    assert.ok(fn.includes("Последний ответ агента"), "в контекст не попадает последний ответ");
+    assert.ok(fn.includes("Хвост диалога"), "в контекст не попадает хвост диалога");
+    const handler = appSrc.slice(j, j + 900);
+    assert.ok(handler.includes("buildContinuationContext(prev)"), "кнопка не собирает контекст новой функцией");
+    assert.ok(!handler.includes("lastAssistant.slice"), "кнопка по-прежнему шлёт только последний ответ");
+  });
+}
+
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
   await testAgentCore();
@@ -6055,6 +6506,7 @@ async function testOllamaWindow() {
   await testPromptCacheAndUsage();
   await testToolRouter();
   await testOllamaWindow();
+  await testChatContextTransfer();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");
   process.exit(failed ? 1 : 0);
 })();

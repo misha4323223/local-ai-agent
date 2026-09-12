@@ -797,6 +797,30 @@
   // Панель плана: отдельный контейнер над панелью действий — она не сбрасывается
   // вместе с ходом работ и не уезжает при прокрутке списка действий.
   let planCollapsed = false;
+  // ─── Синхронизация истории между устройствами ───
+  // История чатов лежит в одном файле, а клиентов несколько: окно на ПК и телефоны.
+  // Когда сохраняет другой клиент, приходит событие chats:reload — раньше его не
+  // было, и ответ, написанный с телефона, появлялся на ПК только после перезапуска.
+  let remoteRunNotified = false;
+  async function reloadChatsFromDisk() {
+    if (!isElectron || typeof api.loadChats !== "function") return;
+    // Свой прогон агента или несохранённые правки — перезагрузка их потеряет.
+    if (session || chatsSavePending) return;
+    let c = null;
+    try {
+      c = await api.loadChats();
+    } catch {
+      return;
+    }
+    if (!c || !Array.isArray(c.chats)) return;
+    chatsData = sanitizeChats(c);
+    remoteRunNotified = false;
+    renderSidebar();
+    renderMessages();
+    try { refreshProject(); } catch {}
+    toast("📱 История обновлена с другого устройства");
+  }
+
   function renderPlanPanel() {
     const host = $("plan-panel");
     if (!host) return;
@@ -1683,14 +1707,19 @@
     persistChats();
     setStreaming(true);
 
-    // Контекст-окно: держим историю в рамках бюджета токенов выбранной модели
+    // История уходит в main ЦЕЛИКОМ: там её держат в бюджете модели, а при переполнении
+    // голова уходит в памятку (сжатие). Раньше история обрезалась здесь по ПОЛНОМУ бюджету
+    // модели — на длинном чате срез схлопывался до одного последнего сообщения, сжатию было
+    // нечего сворачивать, и агент терял задачу («перестаёт нормально работать»).
     let history = chat.messages
-      .filter((m) => m.role === "user" || (m.role === "assistant" && m.content))
+      .filter((m) => {
+        if (!m || !m.content) return false;
+        if (m.role === "user" || m.role === "assistant") return true;
+        // Служебные заметки (перенос задачи из прошлого чата, восстановление после сбоя,
+        // авто-переключение подключения) — тоже часть контекста.
+        return m.role === "system";
+      })
       .map((m) => ({ role: m.role, content: m.content }));
-    try {
-      const budget = AgentCore.contextBudget(settings.provider || "openai", settings.model);
-      history = AgentCore.trimConversation(history, budget);
-    } catch {}
 
     session = { chatId: chat.id, assistantId: assistantMsg.id, segmentIds: [assistantMsg.id] };
     try {
@@ -1757,6 +1786,17 @@
   }
 
   function onAiEvent(ev) {
+    // Прогон запущен другим клиентом (обычно телефоном): у событий нет привязки к
+    // переписке, поэтому в свой чат их не подмешиваем — иначе ответ с телефона
+    // дописывался бы в открытую на ПК переписку. Результат придёт целиком через
+    // chats:reload, когда телефон сохранит историю.
+    if (ev && ev.from === "mobile" && !session) {
+      if (!remoteRunNotified) {
+        remoteRunNotified = true;
+        toast("📱 Задача выполняется с телефона — результат появится здесь сам");
+      }
+      return;
+    }
     const chat = session ? chatsData.chats.find((c) => c.id === session.chatId) : null;
     const aMsg = chat ? chat.messages.find((m) => m.id === session.assistantId) : null;
     switch (ev.type) {
@@ -3302,7 +3342,7 @@
           // Память проекта и точки отката работают только в desktop-приложении.
           result =
             "⚠️ Инструменты памяти проекта (noteSave/noteRead/noteList/noteDelete) и точек отката (checkpointSave/checkpointList/checkpointRollback) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
-        } else if (c.name === "ycStatus" || c.name === "ycList" || c.name === "ycCreate" || c.name === "ycDelete" || c.name === "ycDeploy" || c.name === "ycLogs") {
+        } else if (c.name === "ycStatus" || c.name === "ycList" || c.name === "ycCreate" || c.name === "ycDelete" || c.name === "ycDeploy" || c.name === "ycLogs" || c.name === "ycContainer") {
           result =
             "⚠️ Инструменты Yandex Cloud (ycStatus/ycList/ycCreate/ycDelete) доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
         } else {
@@ -4019,23 +4059,65 @@
   $("btn-new-chat").onclick = () => {
     if (!streaming) createChat();
   };
+  // Контекст для кнопки «Продолжить контекст предыдущего чата»: переносим не только
+  // последний ответ, а суть задачи — последний запрос пользователя, последний ответ
+  // агента и хвост диалога. Ограничено по символам: перенос должен быть компактным,
+  // а не копией всего чата.
+  function buildContinuationContext(prev) {
+    const CONTEXT_LIMIT = 6000;
+    const textOf = (m) => {
+      const c = m && m.content;
+      if (typeof c === "string") return c.trim();
+      if (Array.isArray(c)) {
+        return c.filter((p) => p && p.type === "text").map((p) => p.text || "").join("\n").trim();
+      }
+      return "";
+    };
+    const turns = [];
+    for (const m of prev.messages) {
+      if (!m || m.role === "tool") continue;
+      const t = textOf(m);
+      if (!t) continue;
+      turns.push({ role: m.role, text: t });
+    }
+    let lastUserId = -1;
+    let lastAssistantId = -1;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (lastUserId < 0 && turns[i].role === "user") lastUserId = i;
+      if (lastAssistantId < 0 && turns[i].role === "assistant") lastAssistantId = i;
+      if (lastUserId >= 0 && lastAssistantId >= 0) break;
+    }
+    const lastUser = lastUserId >= 0 ? turns[lastUserId].text : "";
+    const lastAssistant = lastAssistantId >= 0 ? turns[lastAssistantId].text : "";
+    // Хвост собираем с конца: свежие реплики важнее ранних.
+    const tail = [];
+    let used = 900 + lastUser.length + lastAssistant.length;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      if (i === lastUserId || i === lastAssistantId) continue;
+      const t = turns[i];
+      const label = t.role === "user" ? "Пользователь" : t.role === "assistant" ? "Агент" : "Заметка";
+      const part = label + ": " + t.text;
+      if (used + part.length > CONTEXT_LIMIT) break;
+      used += part.length;
+      tail.unshift(part);
+    }
+    const title = prev.title && prev.title !== "Новый чат" ? prev.title : "";
+    const out = ["ПРОДОЛЖЕНИЕ ПРЕДЫДУЩЕГО ЧАТА (перенесено из другого чата — считай сделанное сделанным и не начинай заново)."];
+    if (title) out.push("Тема/задача: " + title);
+    if (lastUser) out.push("", "Последний запрос пользователя:", lastUser.slice(0, 2500));
+    if (lastAssistant) out.push("", "Последний ответ агента:", lastAssistant.slice(0, 2500));
+    if (tail.length) out.push("", "Хвост диалога (последние реплики):", tail.join("\n"));
+    return out.join("\n");
+  }
   $("btn-continue-chat").onclick = () => {
     if (streaming) return;
     const prev = getActiveChat();
     if (!prev || !prev.messages.length) { createChat(); return; }
-    // Берём последний ответ агента как контекст
-    let lastAssistant = "";
-    for (let i = prev.messages.length - 1; i >= 0; i--) {
-      const m = prev.messages[i];
-      if (m && m.role === "assistant" && m.content) {
-        const t = typeof m.content === "string" ? m.content : (m.content || []).filter((p) => p && p.type === "text").map((p) => p.text || "").join("\n");
-        if (t.trim()) { lastAssistant = t.trim(); break; }
-      }
-    }
-    // Плюс заголовок/тему предыдущего чата
-    const title = prev.title || "";
-    const ctx = "ПРОДОЛЖЕНИЕ ПРЕДЫДУЩЕГО ЧАТА\n" + (title ? "Тема/задача: " + title + "\n" : "") + (lastAssistant ? "\nПоследний ответ агента:\n" + lastAssistant.slice(0, 3000) : "\n(Предыдущий чат был пуст)");
-    createChat({ contextMsg: ctx, title: title ? title + " (продолжение)" : "Новый чат" });
+    const title = prev.title && prev.title !== "Новый чат" ? prev.title : "";
+    createChat({
+      contextMsg: buildContinuationContext(prev),
+      title: title ? title + " (продолжение)" : "Новый чат (продолжение)",
+    });
   };
   // ── Yandex Cloud (дашборд + настройки) ──
   const YC_CREATABLE = ["ydb", "lockbox", "containerRegistry", "storage", "dns", "serverlessContainers", "vpc"];
@@ -4117,6 +4199,7 @@
         if (st.folderId) sel.value = st.folderId;
         $("s-yc-allow-create").checked = !!st.allowCreate;
         $("s-yc-allow-delete").checked = !!st.allowDelete;
+        $("s-yc-allow-update").checked = !!st.allowUpdate;
         // Встроенный yc CLI: показываем, стоит ли он (и где) — настройка живёт в папке приложения.
         if (isElectron && api.ycCliStatus) {
           api.ycCliStatus()
@@ -4506,13 +4589,24 @@
     toast("Каталог: " + (f && f.name ? f.name : sel.value));
     ycLoadDashboard(true);
   };
+  // Одна точка сохранения разрешений: чекбоксов три, а вызов один — иначе легко
+  // забыть передать третье поле и молча сбросить его в false.
+  function saveYcPerms() {
+    const create = $("s-yc-allow-create").checked;
+    const del = $("s-yc-allow-delete").checked;
+    const upd = $("s-yc-allow-update").checked;
+    api.ycSetPermissions(create, del, upd);
+    return { create, del, upd };
+  }
   $("s-yc-allow-create").onchange = () => {
-    api.ycSetPermissions($("s-yc-allow-create").checked, $("s-yc-allow-delete").checked);
-    toast($("s-yc-allow-create").checked ? "Агенту разрешено создавать ресурсы" : "Создание агентом выключено");
+    toast(saveYcPerms().create ? "Агенту разрешено создавать ресурсы" : "Создание агентом выключено");
   };
   $("s-yc-allow-delete").onchange = () => {
-    api.ycSetPermissions($("s-yc-allow-create").checked, $("s-yc-allow-delete").checked);
-    toast($("s-yc-allow-delete").checked ? "Агенту разрешено удалять ресурсы" : "Удаление агентом выключено");
+    toast(saveYcPerms().del ? "Агенту разрешено удалять ресурсы" : "Удаление агентом выключено");
+  };
+  $("s-yc-allow-update").onchange = () => {
+    const p = saveYcPerms();
+    toast(p.upd ? "Агенту разрешено менять контейнеры и деплоить ревизии" : "Правка контейнеров агентом выключена");
   };
   if ($("btn-yc-install-cli")) {
     $("btn-yc-install-cli").onclick = async () => {
@@ -5971,7 +6065,7 @@
   $("btn-unstage-selected").onclick = async () => {
     if (!repoRoot || !selectedChanges.size) return;
     for (const f of selectedChanges) {
-      await api.runCommand("git reset HEAD -- " + JSON.stringify(f), repoRoot);
+      await api.gitUnstage(repoRoot, f);
     }
     selectedChanges.clear();
     refreshChanges();
@@ -5986,7 +6080,7 @@
       "Файлы будут удалены с диска и из git. Это необратимо.",
       async () => {
         for (const f of files) {
-          await api.runCommand("git rm -f " + JSON.stringify(f), repoRoot);
+          await api.gitRm(repoRoot, f);
         }
         selectedChanges.clear();
         refreshChanges();
@@ -7519,6 +7613,8 @@
     renderOtaStatus(); // версия кода — сразу в статус-бар
     if (isElectron) {
       api.onAiEvent(onAiEvent);
+      // История чатов общая: телефон сохранил переписку — перечитываем файл.
+      if (typeof api.onChatsReload === "function") api.onChatsReload(() => reloadChatsFromDisk());
       wireGithubEvents();
     }
   });

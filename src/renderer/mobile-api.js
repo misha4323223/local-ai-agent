@@ -92,6 +92,7 @@
     listModels: invoke("ai:models"),
     pickDirectory: invoke("dialog:pickDir"),
     onAiEvent: on("ai:event"),
+    onChatsReload: on("chats:reload"),
 
     githubDeviceStart: invoke("github:deviceStart"),
     githubDeviceCancel: invoke("github:deviceCancel"),
@@ -130,6 +131,9 @@
     gitDiff: invoke("git:diff"),
     gitCommit: invoke("git:commit"),
     gitPush: invoke("git:push"),
+    gitPull: invoke("git:pull"),
+    gitUnstage: invoke("git:unstage"),
+    gitRm: invoke("git:rm"),
 
     githubPickRepo: invoke("github:pickRepo"),
     githubRepos: invoke("github:repos"),
@@ -149,6 +153,52 @@
     devStop: invoke("dev:stop"),
     devStatus: invoke("dev:status"),
     onDevEvent: on("dev:event"),
+
+    // ── Yandex Cloud ──
+    // Этого блока в мобильной копии API не было: телефон показывал «Yandex Cloud
+    // не подключён» и просил ввести токен заново, хотя на ПК каталог уже выбран,
+    // и вообще не мог ни посмотреть статус, ни войти, ни открыть дашборд ресурсов.
+    ycStatus: invoke("yc:status"),
+    ycSetToken: invoke("yc:setToken"),
+    ycFolders: invoke("yc:folders"),
+    ycSetFolder: invoke("yc:setFolder"),
+    ycSetPermissions: invoke("yc:setPermissions"),
+    ycLogout: invoke("yc:logout"),
+    ycResources: invoke("yc:resources"),
+    ycCreate: invoke("yc:create"),
+    ycDelete: invoke("yc:delete"),
+    ycDeploy: invoke("yc:deploy"),
+    ycLogs: invoke("yc:logs"),
+    ycCliStatus: invoke("yc:cliStatus"),
+    ycInstallCli: invoke("yc:installCli"),
+
+    // ── Почта агента ──
+    mailTest: invoke("mail:test"),
+    mailTestSend: invoke("mail:testSend"),
+    mailRecent: invoke("mail:recent"),
+
+    // ── Память диалогов ──
+    memoryStats: invoke("memory:stats"),
+    memoryDays: invoke("memory:days"),
+    memoryOpenDir: invoke("memory:openDir"),
+    memoryClear: invoke("memory:clear"),
+
+    // ── Самообновление кода (применяется на ПК, не на телефоне) ──
+    otaStatus: invoke("ota:status"),
+    otaCheck: invoke("ota:check"),
+    otaRollback: invoke("ota:rollback"),
+    otaOpenDir: invoke("ota:openDir"),
+    otaReset: invoke("ota:reset"),
+
+    // ── Браузер агента: постоянный профиль и свой Chrome по CDP ──
+    browserProfileInfo: invoke("browser:profileInfo"),
+    browserClearProfile: invoke("browser:clearProfile"),
+    browserConnect: invoke("browser:connect"),
+    browserConnectInfo: invoke("browser:connectInfo"),
+
+    // ── G4F (локальный/свой OpenAI-совместимый шлюз) ──
+    g4fTest: invoke("g4f:test"),
+    g4fProbe: invoke("g4f:probe"),
 
     mobileStatus: invoke("mobile:status"),
     mobilePinRegen: invoke("mobile:pinRegen"),

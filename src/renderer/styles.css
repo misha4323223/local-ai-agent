@@ -1061,8 +1061,9 @@ body.resizing-x { cursor: col-resize; user-select: none; }
   #project-panel { width: 280px; min-width: 280px; }
 }
 @media (max-width: 720px) {
-  #sidebar { display: none; }
-  #project-panel { display: none; }
+  /* Сайдбар и панель проекта здесь НЕ скрываем: на телефоне они выезжающие
+     (блок max-width: 900px ниже). Из-за display:none гамбургер на телефоне не
+     открывал ничего — вместе с меню пропадали чаты и кнопка «Настройки». */
   .msg { max-width: 92%; }
 }/* ─── Ход работы: компактный список, как в Replit ─── */
 /* Обёртка (work-wrap) не рисует свою карточку — рамку даёт только .work-group */
@@ -2708,6 +2709,8 @@ body::after {
     bottom: 0;
     z-index: 50;
     width: 276px;
+    display: flex; /* выезжающая панель: display обязателен — его гасил блок max-width: 720px */
+    flex-direction: column;
     transform: translateX(-100%);
     transition: transform 0.22s ease;
     box-shadow: 0 0 50px rgba(0, 0, 0, 0.6);

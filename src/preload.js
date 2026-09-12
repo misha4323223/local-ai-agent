@@ -22,6 +22,10 @@ contextBridge.exposeInMainWorld("api", {
   onAiEvent: (cb) => {
     ipcRenderer.on("ai:event", (_e, ev) => cb(ev));
   },
+  // История чатов изменилась на другом устройстве (телефон сохранил переписку).
+  onChatsReload: (cb) => {
+    ipcRenderer.on("chats:reload", (_e, d) => cb(d));
+  },
 
   // GitHub OAuth (device flow)
   githubDeviceStart: () => ipcRenderer.invoke("github:deviceStart"),
@@ -70,6 +74,9 @@ contextBridge.exposeInMainWorld("api", {
   gitDiff: (dir, file) => ipcRenderer.invoke("git:diff", dir, file),
   gitCommit: (dir, message) => ipcRenderer.invoke("git:commit", dir, message),
   gitPush: (dir) => ipcRenderer.invoke("git:push", dir),
+  gitPull: (dir) => ipcRenderer.invoke("git:pull", dir),
+  gitUnstage: (dir, file) => ipcRenderer.invoke("git:unstage", dir, file),
+  gitRm: (dir, file) => ipcRenderer.invoke("git:rm", dir, file),
 
   // GitHub repo picker (opts: { query, page })
   githubPickRepo: (repoSlug) => ipcRenderer.invoke("github:pickRepo", repoSlug),
@@ -118,7 +125,7 @@ contextBridge.exposeInMainWorld("api", {
   ycSetToken: (token) => ipcRenderer.invoke("yc:setToken", token),
   ycFolders: () => ipcRenderer.invoke("yc:folders"),
   ycSetFolder: (folderId, folderName, cloudId) => ipcRenderer.invoke("yc:setFolder", folderId, folderName, cloudId),
-  ycSetPermissions: (allowCreate, allowDelete) => ipcRenderer.invoke("yc:setPermissions", allowCreate, allowDelete),
+  ycSetPermissions: (allowCreate, allowDelete, allowUpdate) => ipcRenderer.invoke("yc:setPermissions", allowCreate, allowDelete, allowUpdate),
   ycLogout: () => ipcRenderer.invoke("yc:logout"),
   ycResources: () => ipcRenderer.invoke("yc:resources"),
   ycCreate: (serviceKey, name) => ipcRenderer.invoke("yc:create", serviceKey, name),

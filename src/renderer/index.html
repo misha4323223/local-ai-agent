@@ -937,6 +937,13 @@
                   <small>Необратимо, может стереть данные. Выключено по умолчанию.</small>
                 </span>
               </label>
+              <label class="check-row" title="Агент сможет вызывать ycContainer (deploy/rollback/update): создавать ревизии, откатывать их и менять имя, описание и метки контейнера. Новая ревизия сразу получает трафик и тарифицируется.">
+                <input id="s-yc-allow-update" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Разрешить агенту менять контейнеры</b>
+                  <small>Ревизии, откат, имя/описание/метки. Новая ревизия сразу идёт в бой. Выключено по умолчанию.</small>
+                </span>
+              </label>
               <div class="yc-cli-row">
                 <button id="btn-yc-install-cli" class="btn btn-ghost btn-small" title="Скачать официальный yc CLI прямо в папку приложения (системных прав не требует) и добавить в PATH всех команд агента">⬇️ Установить yc CLI</button>
                 <span id="yc-cli-status" class="hint">не проверено</span>

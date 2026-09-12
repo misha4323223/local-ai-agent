@@ -45,7 +45,7 @@
 26. Семантический поиск: semanticSearch(query) ищет по коду проекта по смыслу (стебли слов, camelCase/snake_case, BM25-ранжирование) и показывает сниппеты с номерами строк. Используй его для поиска «где находится X» и «как устроен Y» — быстрее и точнее, чем читать файлы подряд. Точный регулярный поиск — searchFile/searchProject.
 24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList). Память диалогов: когда контекст переполняется, старые шаги сворачиваются в памятку — если в настройках включена галочка «Память диалогов», приложение сохраняет такие памятки локально по датам. memoryList показывает дни и памятки за конкретный день (date: ГГГГ-ММ-ДД), memorySearch ищет по ним слова и фразы. Это помогает вспомнить прошлые сессии: «посмотри, что мы делали 5-го числа».
 27. Самоизменения и OTA: перед любой правкой собственного кода (src/, assets/) сначала создай точку отката checkpointSave(label — «перед самоизменением …»). Файлы src/bootstrap.js и src/ota.js и папка применённого OTA-бандла физически заблокированы: writeFile/editFile/applyPatch вернут ошибку — не пытайся их обойти. После сборки бандла (node scripts/make-ota.js) вызови otaStatus (видно ли обновление) и otaCheck (применить); после применения — validateProject; если после обновления что-то сломалось — otaRollback.
-28. Yandex Cloud: ycStatus (начни отсюда — авторизация, каталог, разрешения агента) / ycList / ycCreate / ycDelete / ycDeploy / ycLogs / ycInstall. Создание и удаление — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Токен и каталог подставляются автоматически (YC_IAM_TOKEN, YC_CLOUD_ID, YC_FOLDER_ID), yc init не нужен. Порядок работы, ключи сервисов и детали деплоя: agentGuide { name: "yc" }.
+28. Yandex Cloud: ycStatus (начни отсюда — авторизация, каталог, разрешения агента) / ycList / ycContainer (обзор, редактор, ревизии, откат — action: overview/revisions/revision/deploy/rollback/update) / ycCreate / ycDelete / ycDeploy / ycLogs / ycInstall. Создание, удаление и правка контейнеров — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Токен и каталог подставляются автоматически (YC_IAM_TOKEN, YC_CLOUD_ID, YC_FOLDER_ID), yc init не нужен. Порядок работы, ключи сервисов и детали деплоя: agentGuide { name: "yc" }.
 29. ВКонтакте (vk.com/vk.ru — домены взаимозаменяемы): браузерные инструменты. Поле ввода — contenteditable, селектор [role=textbox]: browserClick по полю → browserFill(selector: [role=textbox], text: ...) → отправка browserPress(key: Enter) (Shift+Enter — перенос строки). Страницы грузятся лениво — после открытия жди 2–5 секунд и перечитывай browserText; проверка отправки — текст сообщения в конце переписки. Работай в СУЩЕСТВУЮЩЕЙ вкладке браузера (новые открываются без сессии); состояние читай через browserText, а не скриншоты (ВК их обрезает); текст приходит вместе с левым меню — фильтруй по именам/датам. Вход/сессия — только руками пользователя, не обходи. Маршруты, селекторы, сценарии и известные контакты — в гайде, прочитай перед работой: readFile(path: agent-guide:vk).
 30. Анализ переписок (ВК, чаты, письма, файлы): определи КТО человек по уликам в тексте (работа/задачи → коллега; семейное/личное → родственник/друг; услуги/цены/заказы → клиент/поставщик; «Вы» и официальный тон → деловой контакт), выдели СУТЬ (2–4 предложения: о чём разговор, что решено, что ждёт ответа, срочность) и оформи ТАБЛИЦЕЙ: «Человек (профиль) | Кто он | Суть переписки | Важность | Следующий шаг». Для КЛИЕНТОВ дополнительно: профиль (потребность его словами, что обсуждали, бюджет/сроки если видно, возражения, тон) + фундамент для КП (2–4 пункта, что включить в предложение, и следующий логичный шаг). Не выдумывай: чего нет в тексте — «не определено». Длинную историю читай частями (PageUp + browserText). Полная методология — readFile(path: agent-guide:chat-analysis).
 31. Почта (SMTP/IMAP, Настройки → «✉️ Почта»): mailList — прочитать последние письма (отправитель, тема, дата, найденный код), mailCode — вытащить код подтверждения (from — фильтр по отправителю, например «yandex»), mailSend — отправить письмо (КП клиенту, ответ на запрос). Начни с mailList: если почта не настроена или нет разрешения на отправку, инструмент вернёт подсказку — передай её пользователю. Письма уходят с его ящика, поэтому перед отправкой клиенту покажи готовый текст и спроси подтверждение, если пользователь не просил отправить сразу. Пароль приложения не показывай и не проси в чате. Если письмо с кодом ещё не пришло — повтори mailCode через 10–20 секунд (письмо доходит не мгновенно).
@@ -55,7 +55,7 @@
 34. Справочники и память маршрутов: перед работой на незнакомом сайте — agentGuide {} (список), agentGuide { url: "адрес" } (есть ли гайд для сайта), agentGuide { name: "..." } (полный текст): маршруты, подписи кнопок и грабли экономят десятки шагов. ВАЖНО: когда сложный путь пройден УСПЕШНО (регистрация, включение API, публикация, покупка, многошаговая форма) — сохрани его одним вызовом: agentGuide { save: "имя", title: "...", sites: "домен", steps: "1) … 2) подпись кнопки … 3) что ждать" }. Пиши конкретно: подписи кнопок, порядок, что ждать после шага, где грабли. В следующий раз гайд подхватится сам (при browserOpen придёт подсказка).
 35. БАТЧИНГ — не трать раунды на мелочи: несколько НЕЗАВИСИМЫХ операций чтения (2–5 файлов, список папок + поиск, git status + diff + log, несколько страниц) вызывай ВСЕ СРАЗУ в одном ответе — приложение выполнит их параллельно за время одного вызова. Не объединяй то, что зависит от результата предыдущего вызова, и НИКОГДА не объединяй инструменты, которые меняют файлы/состояние или требуют подтверждения: они выполняются строго по одному. Если нужного инструмента нет в списке ниже — вызови findTools { query: "что нужно сделать, словами" }: он найдёт его и включит на всю задачу.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserEval, browserDOM, browserOverlays, browserAct, browserScroll, browserHover, browserNetwork, waitForIdle, agentGuide, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserEval, browserDOM, browserOverlays, browserAct, browserScroll, browserHover, browserNetwork, waitForIdle, agentGuide, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycContainer, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -2116,6 +2116,37 @@
         },
       },
     },
+    {
+      type: "function",
+      function: {
+        name: "ycContainer",
+        description:
+          "Yandex Cloud: работа с Serverless-контейнером «как в консоли» — обзор, редактор, ревизии. action: overview (статус, URL, число ревизий и полные настройки активной) | revisions (список ревизий с фильтром) | revision (детали одной ревизии) | deploy (создать ревизию: настройки берутся из активной ревизии, указанные поля их переопределяют) | rollback (откатить контейнер на выбранную ревизию) | update (имя, описание, метки контейнера). container — имя или id (список: ycList(service: \"serverlessContainers\")). deploy/rollback/update требуют разрешения «Разрешить агенту менять контейнеры» и явной просьбы пользователя: новая ревизия сразу получает трафик и тарифицируется. Образ, переменные окружения и ресурсы меняются ТОЛЬКО новой ревизией — контейнер правится через deploy.",
+        parameters: {
+          type: "object",
+          properties: {
+            action: { type: "string", description: "overview | revisions | revision | deploy | rollback | update" },
+            container: { type: "string", description: "Имя или id контейнера" },
+            revisionId: { type: "string", description: "Id ревизии (для action: revision и rollback; виден в action: revisions)" },
+            image: { type: "string", description: "Образ для новой ревизии, например cr.yandex/<registry-id>/<image>:latest (по умолчанию — из активной ревизии)" },
+            env: { type: "object", description: "Переменные окружения: добавляются к текущим (envReplace: true — заменить набор целиком)" },
+            envReplace: { type: "boolean", description: "Заменить переменные окружения целиком, а не дополнить текущие" },
+            command: { type: "array", items: { type: "string" }, description: "Переопределить ENTRYPOINT образа" },
+            args: { type: "array", items: { type: "string" }, description: "Переопределить CMD образа" },
+            memoryMb: { type: "integer", description: "Память ревизии в МБ, кратно 128 (128–8192)" },
+            cores: { type: "integer", description: "Ядра ревизии (1–4)" },
+            timeoutSec: { type: "integer", description: "Таймаут выполнения, секунды (1–600)" },
+            concurrency: { type: "integer", description: "Одновременных запросов на инстанс" },
+            serviceAccountId: { type: "string", description: "Сервисный аккаунт ревизии" },
+            networkId: { type: "string", description: "Сеть VPC для ревизии (доступ к базам и внутренним сервисам)" },
+            name: { type: "string", description: "Новое имя контейнера (action: update)" },
+            description: { type: "string", description: "Описание контейнера или ревизии" },
+            labels: { type: "object", description: "Метки контейнера key:value (action: update; заменяют весь набор)" },
+          },
+          required: ["action", "container"],
+        },
+      },
+    },
   ];
 
   // ── Контекст-окно: грубая оценка токенов и обрезка истории ──
@@ -2191,18 +2222,20 @@
   function trimConversation(messages, budget) {
     if (!Array.isArray(messages) || !messages.length) return messages || [];
     const limit = Math.max(1500, budget || contextBudget("openai"));
+    // Считаем С КОНЦА: свежие сообщения важнее начала, а старое при переполнении
+    // сворачивается в памятку (compactRemote вызывается раньше и видит голову целиком).
+    // Прежний проход «с начала» тратил бюджет именно на СТАРЫЕ сообщения, а на длинном
+    // чате срез схлопывался до одного последнего сообщения — агент терял задачу.
     let total = 0;
-    let cutFrom = 0;
-    for (let i = 0; i < messages.length; i++) {
-      total += estimateMessageTokens(messages[i]);
-      if (total > limit) {
-        cutFrom = i;
-        break;
-      }
+    let start = messages.length - 1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const w = estimateMessageTokens(messages[i]);
+      // Последнее сообщение оставляем всегда, даже если оно одно больше бюджета.
+      if (i < messages.length - 1 && total + w > limit) break;
+      total += w;
+      start = i;
     }
-    if (cutFrom === 0) return sanitizeToolPairs(messages);
-    // Хвост не трогаем: срез не заходит за последнее user-сообщение, чтобы текущий
-    // виток диалога (включая результаты инструментов) остался целым.
+    // Текущий виток не рвём: последнее user-сообщение и всё после него остаются целиком.
     let lastUser = -1;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "user") {
@@ -2210,11 +2243,12 @@
         break;
       }
     }
-    let start = cutFrom;
-    if (lastUser >= 0 && start < lastUser) start = lastUser;
+    if (lastUser >= 0 && start > lastUser) start = lastUser;
     let kept = messages.slice(start);
-    // Не оставляем «висящий» assistant/token в начале среза без его вопроса
-    while (kept.length > 1 && kept[0] && kept[0].role !== "user") kept = kept.slice(1);
+    // Не оставляем «висящий» assistant/tool в начале среза без его вопроса
+    // Ведущие system-заметки (перенос задачи, восстановление после сбоя) сохраняем:
+    // провайдеры принимают их в начале и склеивают в одну шапку.
+    while (kept.length > 1 && kept[0] && kept[0].role !== "user" && kept[0].role !== "system") kept = kept.slice(1);
     // Санитайзер пар assistant(tool_calls)→tool: выкидывает осиротевшие tool-сообщения
     // (в т.ч. одиночный tool, оставшийся после среза цепочки инструментов).
     kept = sanitizeToolPairs(kept);
@@ -4033,7 +4067,7 @@
       id: "cloud",
       title: "Yandex Cloud",
       keywords: ["yandex", "яндекс", "облак", "cloud", "серверлес", "serverless", "бакет", "s3"],
-      names: ["ycStatus", "ycList", "ycCreate", "ycDelete", "ycDeploy", "ycLogs", "ycInstall"],
+      names: ["ycStatus", "ycList", "ycContainer", "ycCreate", "ycDelete", "ycDeploy", "ycLogs", "ycInstall"],
     },
   ];
 

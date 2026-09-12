@@ -488,8 +488,12 @@ async function waitOperation(oauthToken, operationId, timeoutMs) {
   const base = await endpoint("operation") || KNOWN_ENDPOINTS.operation;
   const deadline = Date.now() + (timeoutMs || 180000);
   let lastMsg = "";
+  let first = true;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2000));
+    // Первая проверка — сразу: операция создания/удаления нередко уже завершена,
+    // а сон до неё добавлял гарантированные 2 секунды к каждому созданию.
+    if (!first) await new Promise((r) => setTimeout(r, 2000));
+    first = false;
     try {
       const j = await fetchJson(base + "/operations/" + encodeURIComponent(operationId), {
         headers: { Authorization: "Bearer " + token },
@@ -575,33 +579,293 @@ async function ensureContainer(oauthToken, folderId, name) {
   return findContainer(oauthToken, folderId, name);
 }
 
-async function containerInfo(oauthToken, containerId) {
+// ── Serverless Containers: глубокий слой (обзор → редактор → ревизии) ───────
+// Раньше здесь был только Container.Get из трёх полей, поэтому «зайти внутрь»
+// контейнера агент не мог. Консоль YC работает так: «Обзор» = Container.Get,
+// «Редактор» = настройки последней ревизии (ListRevisions/GetRevision) плюс
+// Container.Update, «Создать ревизию» = DeployRevision с префиллом из текущей
+// ревизии, «Ревизии» = список с откатом (Container.Rollback). Методы и поля
+// сверены по REST-справочнику:
+//   GET   /containers/v1/containers/{containerId}
+//   PATCH /containers/v1/containers/{containerId}          { updateMask, name, description, labels }
+//   POST  /containers/v1/containers/{containerId}:rollback { revisionId }
+//   GET   /containers/v1/revisions?containerId=…&filter=…
+//   GET   /containers/v1/revisions/{containerRevisionId}
+//   POST  /containers/v1/revisions:deploy
+// Замечание по API: ревизию удалить нельзя (в сервисе нет DeleteRevision) —
+// «переключить» контейнер можно только откатом на другую ревизию.
+async function scBase(oauthToken) {
+  return (await endpoint("serverless-containers")) || KNOWN_ENDPOINTS["serverless-containers"];
+}
+
+// Полный объект контейнера: id, folderId, createdAt, name, description, labels,
+// url, status (CREATING | ACTIVE | DELETING | ERROR).
+async function getContainer(oauthToken, containerId) {
+  const id = String(containerId || "").trim();
+  if (!id) throw new Error("Не указан id контейнера.");
   const token = await getIamToken(oauthToken);
-  const base = await endpoint("serverless-containers") || KNOWN_ENDPOINTS["serverless-containers"];
-  const j = await fetchJson(base + "/containers/v1/containers/" + encodeURIComponent(containerId), {
+  const base = await scBase(oauthToken);
+  const j = await fetchJson(base + "/containers/v1/containers/" + encodeURIComponent(id), {
     headers: { Authorization: "Bearer " + token },
   }, 20000);
-  return { id: j.id, name: j.name, url: j.url, status: j.status };
+  return j || {};
+}
+
+// Краткая карточка контейнера (совместима с прежним containerInfo).
+async function containerInfo(oauthToken, containerId) {
+  const c = await getContainer(oauthToken, containerId);
+  return {
+    id: c.id,
+    name: c.name,
+    url: c.url,
+    status: c.status,
+    description: c.description || "",
+    labels: c.labels || {},
+    folderId: c.folderId || "",
+    createdAt: c.createdAt || "",
+  };
+}
+
+// Редактор контейнера: имя, описание, метки. updateMask перечисляет ТОЛЬКО те
+// поля, которые реально меняем: без него сервис сбросил бы остальные поля в
+// значения по умолчанию, то есть правка меток стирала бы описание.
+async function updateContainer(oauthToken, containerId, patch) {
+  const id = String(containerId || "").trim();
+  if (!id) throw new Error("Не указан id контейнера.");
+  const p = patch || {};
+  const body = {};
+  const mask = [];
+  if (p.name != null) { body.name = String(p.name).trim(); mask.push("name"); }
+  if (p.description != null) { body.description = String(p.description).slice(0, 256); mask.push("description"); }
+  if (p.labels != null) {
+    const labels = {};
+    for (const k of Object.keys(p.labels || {})) labels[String(k)] = String(p.labels[k]);
+    body.labels = labels;
+    mask.push("labels");
+  }
+  if (!mask.length) throw new Error("Нечего менять: укажи name, description или labels.");
+  body.updateMask = mask.join(",");
+  const token = await getIamToken(oauthToken);
+  const base = await scBase(oauthToken);
+  const j = await fetchJson(base + "/containers/v1/containers/" + encodeURIComponent(id), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify(body),
+  }, 30000);
+  await waitOperation(oauthToken, j && j.id, 120000);
+  return getContainer(oauthToken, id);
+}
+
+// Ревизии контейнера (или всего каталога). От свежих к старым.
+// filter: только по полям Revision.status и Revision.runtime, например status="ACTIVE".
+async function listRevisions(oauthToken, opts) {
+  const o = opts || {};
+  const containerId = String(o.containerId || "").trim();
+  const folderId = String(o.folderId || "").trim();
+  if (!containerId && !folderId) throw new Error("Нужен containerId или folderId.");
+  const token = await getIamToken(oauthToken);
+  const base = await scBase(oauthToken);
+  const q = new URLSearchParams();
+  if (containerId) q.set("containerId", containerId);
+  else q.set("folderId", folderId);
+  q.set("pageSize", String(Math.min(Math.max(parseInt(o.pageSize, 10) || 100, 1), 1000)));
+  if (o.filter) q.set("filter", String(o.filter));
+  const j = await fetchJson(base + "/containers/v1/revisions?" + q.toString(), {
+    headers: { Authorization: "Bearer " + token },
+  }, 25000);
+  return Array.isArray(j && j.revisions) ? j.revisions : [];
+}
+
+async function getRevision(oauthToken, revisionId) {
+  const id = String(revisionId || "").trim();
+  if (!id) throw new Error("Не указан id ревизии.");
+  const token = await getIamToken(oauthToken);
+  const base = await scBase(oauthToken);
+  const j = await fetchJson(base + "/containers/v1/revisions/" + encodeURIComponent(id), {
+    headers: { Authorization: "Bearer " + token },
+  }, 20000);
+  return j || {};
+}
+
+// Откат контейнера на выбранную ревизию (в консоли — «сделать активной»).
+async function rollbackContainer(oauthToken, containerId, revisionId) {
+  const cid = String(containerId || "").trim();
+  const rid = String(revisionId || "").trim();
+  if (!cid || !rid) throw new Error("Нужны containerId и revisionId (список ревизий — action: revisions).");
+  const token = await getIamToken(oauthToken);
+  const base = await scBase(oauthToken);
+  const j = await fetchJson(base + "/containers/v1/containers/" + encodeURIComponent(cid) + ":rollback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify({ revisionId: rid }),
+  }, 30000);
+  await waitOperation(oauthToken, j && j.id, 180000);
+  return true;
+}
+
+// Длительность вида "30s" → 30 (секунды).
+function parseDurationSec(d) {
+  const m = /^([0-9.]+)s$/.exec(String(d || ""));
+  if (!m) return null;
+  const n = parseFloat(m[1]);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+// Сводка ревизии — ровно то, что показывает «Редактор» в консоли, в нормальном
+// виде (байты → МБ, длительность → секунды), чтобы агент не пересчитывал в уме.
+function revisionSummary(rev) {
+  const r = rev || {};
+  const img = r.image || {};
+  const res = r.resources || {};
+  const mem = parseInt(res.memory, 10);
+  const num = (v) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : null; };
+  return {
+    id: r.id || "",
+    containerId: r.containerId || "",
+    status: r.status || "",
+    createdAt: r.createdAt || "",
+    description: r.description || "",
+    image: img.imageUrl || "",
+    imageDigest: img.imageDigest || "",
+    command: (img.command && img.command.command) || [],
+    args: (img.args && img.args.args) || [],
+    workingDir: img.workingDir || "",
+    env: img.environment || {},
+    memoryMb: Number.isFinite(mem) ? Math.round(mem / 1024 / 1024) : null,
+    cores: num(res.cores),
+    coreFraction: num(res.coreFraction),
+    timeoutSec: parseDurationSec(r.executionTimeout),
+    concurrency: num(r.concurrency),
+    serviceAccountId: r.serviceAccountId || "",
+    networkId: (r.connectivity && r.connectivity.networkId) || "",
+    minInstances: (r.provisionPolicy && num(r.provisionPolicy.minInstances)) || 0,
+    secrets: Array.isArray(r.secrets)
+      ? r.secrets.map((s) => ({ id: s.id || "", versionId: s.versionId || "", key: s.key || "", environmentVariable: s.environmentVariable || "" }))
+      : [],
+    logGroupId: (r.logOptions && r.logOptions.logGroupId) || "",
+    logDisabled: !!(r.logOptions && r.logOptions.disabled),
+    logMinLevel: (r.logOptions && r.logOptions.minLevel) || "",
+    maxInstancesPerZone: (r.scalingPolicy && num(r.scalingPolicy.zoneInstancesLimit)) || 0,
+    maxRequestsPerZone: (r.scalingPolicy && num(r.scalingPolicy.zoneRequestsLimit)) || 0,
+    runtime: r.runtime && r.runtime.task ? "task" : "http",
+    mounts: Array.isArray(r.mounts)
+      ? r.mounts.map((m) => ({ path: m.mountPointPath || "", mode: m.mode || "", bucketId: (m.objectStorage && m.objectStorage.bucketId) || "" }))
+      : [],
+    storageMounts: Array.isArray(r.storageMounts)
+      ? r.storageMounts.map((m) => ({ bucketId: m.bucketId || "", prefix: m.prefix || "", path: m.mountPointPath || "", readOnly: !!m.readOnly }))
+      : [],
+  };
+}
+
+// «Создать ревизию» как в консоли: настройки берутся из последней ревизии, а то,
+// что передали явно — их переопределяет. Переменные окружения ДОБАВЛЯЮТСЯ к
+// прежним (envReplace: true — заменить набор целиком).
+function revisionToDeployOpts(rev, overrides) {
+  const s = revisionSummary(rev);
+  const o = overrides || {};
+  const pick = (v, d) => (v == null || v === "" ? d : v);
+  return {
+    imageUrl: pick(o.imageUrl, s.image),
+    memoryMb: pick(o.memoryMb, s.memoryMb || 256),
+    cores: pick(o.cores, s.cores || 1),
+    coreFraction: pick(o.coreFraction, s.coreFraction || 100),
+    timeoutSec: pick(o.timeoutSec, s.timeoutSec || 30),
+    concurrency: pick(o.concurrency, s.concurrency || 1),
+    serviceAccountId: pick(o.serviceAccountId, s.serviceAccountId),
+    networkId: pick(o.networkId, s.networkId),
+    minInstances: pick(o.minInstances, s.minInstances || 0),
+    env: o.envReplace === true ? (o.env || {}) : Object.assign({}, s.env, o.env || {}),
+    command: o.command != null ? o.command : s.command,
+    args: o.args != null ? o.args : s.args,
+    workingDir: pick(o.workingDir, s.workingDir),
+    secrets: o.secrets != null ? o.secrets : s.secrets,
+    runtime: pick(o.runtime, s.runtime || "http"),
+    maxInstancesPerZone: pick(o.maxInstancesPerZone, s.maxInstancesPerZone || 0),
+    maxRequestsPerZone: pick(o.maxRequestsPerZone, s.maxRequestsPerZone || 0),
+    logGroupId: pick(o.logGroupId, s.logGroupId),
+    logDisabled: o.logDisabled != null ? !!o.logDisabled : s.logDisabled,
+    logMinLevel: pick(o.logMinLevel, s.logMinLevel),
+    mounts: o.mounts != null ? o.mounts : s.mounts,
+    storageMounts: o.storageMounts != null ? o.storageMounts : s.storageMounts,
+    description: o.description,
+    folderId: o.folderId,
+  };
 }
 
 // Деплой ревизии контейнера (POST /containers/v1/revisions:deploy).
-// opts: { containerId, folderId, imageUrl, serviceAccountId?, memoryMb?, cores?, env?, timeoutSec? }
+// opts: { containerId, folderId, imageUrl, description?, serviceAccountId?, memoryMb?,
+//   cores?, coreFraction?, timeoutSec?, concurrency?, env?, command?, args?, workingDir?,
+//   networkId?, minInstances?, secrets?, logOptions?, scalingPolicy?, storageMounts?,
+//   mounts?, runtime?, asyncInvocationServiceAccountId? }
 async function deployContainerRevision(oauthToken, opts) {
+  const o = opts || {};
+  const containerId = String(o.containerId || "").trim();
+  if (!containerId) throw new Error("Не указан containerId — для какого контейнера создавать ревизию.");
+  const imageUrl = String(o.imageUrl || "").trim();
+  if (!imageUrl) throw new Error("Не указан образ (imageUrl) для ревизии, например cr.yandex/<registry-id>/<image>:latest.");
   const token = await getIamToken(oauthToken);
-  const base = await endpoint("serverless-containers") || KNOWN_ENDPOINTS["serverless-containers"];
-  const memoryMb = Math.max(128, Math.min(parseInt(opts.memoryMb, 10) || 256, 4096));
-  const memory = memoryMb * 1024 * 1024; // кратно 128 МБ
-  const cores = Math.min(Math.max(parseInt(opts.cores, 10) || 1, 1), 4);
+  const base = await scBase(oauthToken);
+  const memoryMb = Math.max(128, Math.min(parseInt(o.memoryMb, 10) || 256, 8192));
+  const cores = Math.min(Math.max(parseInt(o.cores, 10) || 1, 1), 4);
+  // Доля ядра: у многоядерных ревизий сервис принимает только 100%.
+  const coreFraction = cores > 1 ? 100 : Math.min(Math.max(parseInt(o.coreFraction, 10) || 100, 5), 100);
+  const timeoutSec = Math.min(Math.max(parseInt(o.timeoutSec, 10) || 30, 1), 600);
   const body = {
-    containerId: opts.containerId,
-    description: "deploy " + new Date().toISOString(),
-    resources: { memory: String(memory), cores: String(cores), coreFraction: "100" },
-    executionTimeout: (opts.timeoutSec || 30) + "s",
-    imageSpec: { imageUrl: opts.imageUrl, environment: opts.env || {} },
-    concurrency: "1",
+    containerId,
+    description: String(o.description || "deploy " + new Date().toISOString()).slice(0, 256),
+    resources: { memory: String(memoryMb * 1024 * 1024), cores: String(cores), coreFraction: String(coreFraction) },
+    executionTimeout: timeoutSec + "s",
+    imageSpec: { imageUrl, environment: o.env || {} },
+    concurrency: String(Math.max(parseInt(o.concurrency, 10) || 1, 1)),
   };
-  if (opts.serviceAccountId) body.serviceAccountId = opts.serviceAccountId;
-  if (opts.folderId) body.logOptions = { folderId: opts.folderId };
+  if (Array.isArray(o.command) && o.command.length) body.imageSpec.command = { command: o.command.map(String) };
+  if (Array.isArray(o.args) && o.args.length) body.imageSpec.args = { args: o.args.map(String) };
+  if (o.workingDir) body.imageSpec.workingDir = String(o.workingDir);
+  if (o.serviceAccountId) body.serviceAccountId = String(o.serviceAccountId);
+  // Сеть: без неё ревизия не видит ни VPC, ни управляемые базы.
+  if (o.networkId) body.connectivity = { networkId: String(o.networkId) };
+  const minInst = parseInt(o.minInstances, 10) || 0;
+  if (minInst > 0) body.provisionPolicy = { minInstances: String(minInst) };
+  if (Array.isArray(o.secrets) && o.secrets.length) {
+    body.secrets = o.secrets
+      .map((s) => {
+        if (!s || !s.id || !s.key || !s.environmentVariable) return null;
+        const out = { id: String(s.id), key: String(s.key), environmentVariable: String(s.environmentVariable) };
+        if (s.versionId) out.versionId = String(s.versionId);
+        return out;
+      })
+      .filter(Boolean);
+  }
+  const logOpts = {};
+  if (o.logDisabled) logOpts.disabled = true;
+  if (o.logGroupId) logOpts.logGroupId = String(o.logGroupId);
+  else if (o.folderId) logOpts.folderId = String(o.folderId);
+  if (o.logMinLevel) logOpts.minLevel = String(o.logMinLevel).toUpperCase();
+  if (Object.keys(logOpts).length) body.logOptions = logOpts;
+  const zoneInst = parseInt(o.maxInstancesPerZone, 10) || 0;
+  const zoneReq = parseInt(o.maxRequestsPerZone, 10) || 0;
+  if (zoneInst || zoneReq) {
+    body.scalingPolicy = { zoneInstancesLimit: String(zoneInst), zoneRequestsLimit: String(zoneReq) };
+  }
+  if (Array.isArray(o.storageMounts) && o.storageMounts.length) {
+    body.storageMounts = o.storageMounts
+      .filter((m) => m && m.bucketId && m.mountPointPath)
+      .map((m) => ({ bucketId: String(m.bucketId), prefix: String(m.prefix || ""), readOnly: !!m.readOnly, mountPointPath: String(m.mountPointPath) }));
+  }
+  if (Array.isArray(o.mounts) && o.mounts.length) {
+    body.mounts = o.mounts
+      .filter((m) => m && m.mountPointPath && m.bucketId)
+      .map((m) => ({
+        mountPointPath: String(m.mountPointPath),
+        mode: String(m.mode || "READ_ONLY").toUpperCase() === "READ_WRITE" ? "READ_WRITE" : "READ_ONLY",
+        objectStorage: { bucketId: String(m.bucketId), prefix: String(m.prefix || "") },
+      }));
+  }
+  // Режим task: процесс из ENTRYPOINT запускается на каждый запрос (иначе http-сервер).
+  if (String(o.runtime || "").toLowerCase() === "task") body.runtime = { task: {} };
+  if (o.asyncInvocationServiceAccountId) {
+    body.asyncInvocationConfig = { serviceAccountId: String(o.asyncInvocationServiceAccountId) };
+  }
   const j = await fetchJson(base + "/containers/v1/revisions:deploy", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
@@ -685,6 +949,13 @@ module.exports = {
   findContainer,
   ensureContainer,
   containerInfo,
+  getContainer,
+  updateContainer,
+  listRevisions,
+  getRevision,
+  rollbackContainer,
+  revisionSummary,
+  revisionToDeployOpts,
   deployContainerRevision,
   findServiceAccount,
   ensureServiceAccount,

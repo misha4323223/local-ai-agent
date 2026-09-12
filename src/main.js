@@ -74,6 +74,11 @@ ipcMain.handle = (channel, fn) => {
   return _ipcHandleOrig(channel, fn);
 };
 const mobileBridge = new MobileBridge({ handlerMap: ipcHandlerMap });
+
+// Кто запустил текущий прогон агента: "desktop" (окно на ПК), "mobile" (клиент
+// мобильного моста — у него фиктивное событие IPC с sender.id = 0). Клиентов
+// теперь несколько, и события чужого прогона нельзя подмешивать в свой чат.
+let activeRunOrigin = "desktop";
 const ota = require("./ota.js"); // локальный self-update (OTA)
 const selfDev = require("./self-dev.js"); // защита критичной инфраструктуры самообновления
 
@@ -147,6 +152,7 @@ const DEFAULT_SETTINGS = {
   ycFolderName: "", // имя каталога для отображения
   ycAllowAgentCreate: false, // агенту ЗАПРЕЩЕНО создавать ресурсы, пока пользователь явно не включит
   ycAllowAgentDelete: false, // удаление ресурсов агентом — только с явного разрешения
+  ycAllowAgentUpdate: false, // менять настройки контейнеров, деплоить ревизии и откатывать их — тоже только с явного разрешения
 
   // Память диалогов: когда контекст переполняется, агент сворачивает старые шаги
   // в памятку — здесь такая памятка сохраняется локально по датам в
@@ -4157,7 +4163,8 @@ async function executeTool(name, args, settings) {
           return (
             "Yandex Cloud · каталог «" + cfg.folderName + "» (" + cfg.folderId + ")\n" +
             "Создание агентом: " + (cfg.allowCreate ? "разрешено" : "ЗАПРЕЩЕНО — включи в Настройках → Yandex Cloud") + "\n" +
-            "Удаление агентом: " + (cfg.allowDelete ? "разрешено" : "ЗАПРЕЩЕНО — включи в Настройках → Yandex Cloud") + "\n\nРесурсы:\n" +
+            "Удаление агентом: " + (cfg.allowDelete ? "разрешено" : "ЗАПРЕЩЕНО — включи в Настройках → Yandex Cloud") + "\n" +
+            "Правка контейнеров (ycContainer: ревизии, откат, настройки): " + (cfg.allowUpdate ? "разрешено" : "ЗАПРЕЩЕНО — включи в Настройках → Yandex Cloud") + "\n\nРесурсы:\n" +
             rows.join("\n") +
             "\n\nСоздание: ycCreate(service, name). Доступны: " + yandexCloud.creatableKeys().join(", ") + ". Удаление: ycDelete(service, id) — id виден в ycList."
           );
@@ -4296,6 +4303,122 @@ async function executeTool(name, args, settings) {
             "\n\nПроверь доступ: открыть URL в браузере или curl. Логи: ycLogs(service: \"serverlessContainers\", id: \"" + cont.id + "\"). Повторный деплой той же папки обновит ревизию.";
         } catch (e) {
           return "Деплой не завершился: " + ((e && e.message) || String(e));
+        }
+      }
+      case "ycContainer": {
+        const cfg = ycConfig(loadSettings());
+        if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → «☁️ Yandex Cloud».";
+        const action = String(args.action || "overview").trim().toLowerCase();
+        const ref = String(args.container || args.id || "").trim();
+        if (!ref) return "Ошибка: укажи container — имя или id контейнера. Список: ycList(service: \"serverlessContainers\").";
+        // Чтение разрешено всегда; смена настроек и ревизии — только с чекбоксом.
+        if ((action === "deploy" || action === "rollback" || action === "update") && !cfg.allowUpdate) {
+          return "⛔ Менять контейнеры и деплоить ревизии агенту ЗАПРЕЩЕНО. Скажи пользователю включить в Настройках → «☁️ Yandex Cloud» чекбокс «Разрешить агенту менять контейнеры». Чтение доступно и сейчас: action overview / revisions / revision.";
+        }
+        try {
+          const cont = await ycFindContainerByRef(cfg, ref);
+          const who = "Контейнер «" + (cont.name || cont.id) + "» (" + cont.id + ")";
+          const line = "URL: " + (cont.url || "— (публичный доступ не настроен)");
+          const logsHint = "Логи: ycLogs(service: \"serverlessContainers\", id: \"" + cont.id + "\").";
+
+          if (action === "overview") {
+            const { revs, active } = await ycActiveRevision(cfg, cont.id);
+            const head = [
+              who,
+              "Статус: " + (cont.status || "—") + (cont.description ? " · " + cont.description : ""),
+              "Создан: " + (cont.createdAt || "—"),
+              line,
+              logsHint,
+            ];
+            if (!revs.length) {
+              return head.join("\n") + "\n\nРевизий нет: контейнер создан, но ни разу не деплоился. Создать ревизию: ycContainer { action: \"deploy\", container: \"" + (cont.name || cont.id) + "\", image: \"cr.yandex/<registry-id>/<image>:tag\" }.";
+            }
+            head.push("Ревизий: " + revs.length + " · активная — " + (active ? active.id : "—"));
+            return head.join("\n") + "\n\nНастройки активной ревизии (вкладка «Редактор»):\n" + ycRevisionDetails(yandexCloud.revisionSummary(active)) +
+              "\n\nСписок ревизий: ycContainer { action: \"revisions\", container: \"" + (cont.name || cont.id) + "\" }.";
+          }
+
+          if (action === "revisions") {
+            const revs = await yandexCloud.listRevisions(cfg.oauth, {
+              containerId: cont.id,
+              pageSize: 100,
+              filter: args.filter ? String(args.filter) : "",
+            });
+            if (!revs.length) return who + "\n\nРевизий нет (фильтр: " + (args.filter || "нет") + ").";
+            const activeId = (revs.find((r) => r.status === "ACTIVE") || revs[0]).id;
+            const limit = Math.min(Math.max(parseInt(args.limit, 10) || 15, 1), 100);
+            const rows = revs.slice(0, limit).map((r) => ycRevisionLine(yandexCloud.revisionSummary(r), r.id === activeId));
+            return who + "\n" + line + "\n\nРевизии (свежие сверху), всего " + revs.length + ":\n" + rows.join("\n") +
+              "\n\nДетали: ycContainer { action: \"revision\", container: \"…\", revisionId: \"…\" }. Откат: action \"rollback\" (нужно разрешение).";
+          }
+
+          if (action === "revision") {
+            const rid = String(args.revisionId || args.revision || "").trim();
+            if (!rid) return "Ошибка: укажи revisionId — id виден в action: revisions.";
+            const rev = await yandexCloud.getRevision(cfg.oauth, rid);
+            return who + "\n\n" + ycRevisionDetails(yandexCloud.revisionSummary(rev));
+          }
+
+          if (action === "deploy") {
+            const { active } = await ycActiveRevision(cfg, cont.id);
+            const opts = yandexCloud.revisionToDeployOpts(active, {
+              imageUrl: args.image || args.imageUrl,
+              memoryMb: args.memoryMb,
+              cores: args.cores,
+              coreFraction: args.coreFraction,
+              timeoutSec: args.timeoutSec,
+              concurrency: args.concurrency,
+              serviceAccountId: args.serviceAccountId,
+              networkId: args.networkId,
+              minInstances: args.minInstances,
+              maxInstancesPerZone: args.maxInstancesPerZone,
+              env: ycJsonArg(args.env),
+              envReplace: args.envReplace === true,
+              command: ycJsonArg(args.command),
+              args: ycJsonArg(args.args),
+              secrets: ycJsonArg(args.secrets),
+              mounts: ycJsonArg(args.mounts),
+              storageMounts: ycJsonArg(args.storageMounts),
+              runtime: args.runtime,
+              logGroupId: args.logGroupId,
+              logMinLevel: args.logMinLevel,
+              description: args.description,
+              folderId: cfg.folderId,
+            });
+            if (!opts.imageUrl) {
+              return "Ошибка: у новой ревизии нет образа. Контейнер «" + (cont.name || cont.id) + "» ещё не деплоился — укажи image, например cr.yandex/<registry-id>/<image>:latest (реестр: ycList(service: \"containerRegistry\")).";
+            }
+            await yandexCloud.deployContainerRevision(cfg.oauth, Object.assign({ containerId: cont.id }, opts));
+            const after = await ycActiveRevision(cfg, cont.id);
+            const src = active ? "настройки взяты из активной ревизии " + active.id + " (указанные поля переопределены)" : "первая ревизия контейнера";
+            return "✅ Ревизия контейнера «" + (cont.name || cont.id) + "» развёрнута: " + src + ".\n" + line + "\n\n" + ycRevisionDetails(yandexCloud.revisionSummary(after.active || {})) +
+              "\n\n" + logsHint + " Проверь вызов по URL. Откат: ycContainer { action: \"rollback\", container: \"" + (cont.name || cont.id) + "\", revisionId: \"" + (active ? active.id : "") + "\" }.";
+          }
+
+          if (action === "rollback") {
+            const rid = String(args.revisionId || args.revision || "").trim();
+            if (!rid) return "Ошибка: укажи revisionId, на которую откатить (список: action: revisions).";
+            await yandexCloud.rollbackContainer(cfg.oauth, cont.id, rid);
+            const after = await ycActiveRevision(cfg, cont.id);
+            return "✅ Контейнер «" + (cont.name || cont.id) + "» откачен на ревизию " + rid + ".\nАктивная ревизия теперь: " + ((after.active && after.active.id) || "—") + "\n" + line + "\n\n" + logsHint;
+          }
+
+          if (action === "update") {
+            const patchObj = {};
+            if (args.name != null) patchObj.name = args.name;
+            if (args.description != null) patchObj.description = args.description;
+            const labels = ycJsonArg(args.labels);
+            if (labels) patchObj.labels = labels;
+            const updated = await yandexCloud.updateContainer(cfg.oauth, cont.id, patchObj);
+            const labelKeys = Object.keys(updated.labels || {});
+            return "✅ Контейнер обновлён: «" + (updated.name || cont.name) + "»" + (updated.description ? " — " + updated.description : "") +
+              (labelKeys.length ? "\nМетки: " + labelKeys.map((k) => k + "=" + updated.labels[k]).join(", ") : "") +
+              "\n\nВажно: образ, переменные окружения и ресурсы правятся ТОЛЬКО новой ревизией — action \"deploy\" (текущие настройки подставятся сами). " + line;
+          }
+
+          return "Ошибка: неизвестное действие ycContainer «" + action + "». Доступно: overview, revisions, revision, deploy, rollback, update.";
+        } catch (e) {
+          return "Yandex Cloud (ycContainer, action=" + action + "): " + ((e && e.message) || String(e));
         }
       }
       case "ycLogs": {
@@ -5117,6 +5240,13 @@ function createWindow() {
   // дополнительно транслируются клиентам мобильного моста по WebSocket.
   const _wcSend = mainWindow.webContents.send.bind(mainWindow.webContents);
   mainWindow.webContents.send = (ch, ev) => {
+    // Клиентов теперь несколько (окно на ПК + телефоны), и прогон агента может
+    // быть чужим. У событий нет привязки к переписке, поэтому помечаем их тем,
+    // кто запустил прогон: иначе ответ с телефона подмешивался бы в открытый чат
+    // на ПК, а плашки «сжатие контекста» и превью всплывали бы не там.
+    if (ch === "ai:event" && ev && typeof ev === "object" && ev.from === undefined) {
+      ev = { ...ev, from: activeRunOrigin };
+    }
     try {
       mobileBridge.broadcast(ch, ev);
     } catch {}
@@ -5593,10 +5723,24 @@ ipcMain.handle("ota:openDir", () => ota.openDir());
 ipcMain.handle("ota:reset", (_e, removeSource) => ota.reset(!!removeSource, loadSettings()));
 
 ipcMain.handle("chats:load", () => loadChats());
-ipcMain.handle("chats:save", (_e, d) => {
+ipcMain.handle("chats:save", (e, d) => {
   saveChats(d);
+  notifyChatsSaved(e);
   return true;
 });
+
+// История чатов — ОДИН файл на всех клиентов (окно на ПК + телефоны). Раньше, когда
+// историю сохранял телефон, окно на ПК продолжало показывать свою копию: ответ,
+// написанный с телефона, появлялся на ПК только после перезапуска окна.
+// Просим остальные клиенты перечитать файл; тому, кто сохранил, сигнал не шлём.
+// Клиент мобильного моста приходит с фиктивным sender (id = 0) — это и есть «не ПК».
+function notifyChatsSaved(e) {
+  try {
+    const senderId = e && e.sender && typeof e.sender.id === "number" ? e.sender.id : 0;
+    if (senderId && mainWindow && senderId === mainWindow.webContents.id) return;
+    if (mainWindow) mainWindow.webContents.send("chats:reload", { at: Date.now() });
+  } catch {}
+}
 
 // Синхронное сохранение при закрытии окна: renderer успевает записать данные на диск.
 ipcMain.on("chats:saveSync", (e, d) => {
@@ -5604,8 +5748,9 @@ ipcMain.on("chats:saveSync", (e, d) => {
   e.returnValue = true;
 });
 
-ipcMain.handle("ai:send", async (_e, messages, opts) => {
+ipcMain.handle("ai:send", async (e, messages, opts) => {
   const settings = loadSettings();
+  activeRunOrigin = e && e.sender && e.sender.id ? "desktop" : "mobile";
   global.__agentStopRequested = false;
   global.__agentRunning = true;
   try {
@@ -6464,6 +6609,7 @@ function ycConfig(s) {
     folderName: String(s.ycFolderName || "").trim(),
     allowCreate: !!s.ycAllowAgentCreate,
     allowDelete: !!s.ycAllowAgentDelete,
+    allowUpdate: !!s.ycAllowAgentUpdate,
   };
 }
 
@@ -6486,6 +6632,96 @@ const YC_RESOURCE_TYPES = {
 // Чтение логов Cloud Logging ВНУТРЕННИМ API приложения — внешний yc CLI не нужен.
 // Лог-группы перечисляются по REST, записи читаются по gRPC: у LogReadingService
 // нет HTTP-привязки, поэтому «POST /logging/v1/logs/read» не существует.
+// ── Serverless Containers: обзор, редактор и ревизии для агента ──────────────
+// Контейнер ищется по имени (точное совпадение) или по id — как в консоли.
+async function ycFindContainerByRef(cfg, ref) {
+  const q = String(ref || "").trim();
+  if (!q) throw new Error("укажи имя или id контейнера (список: ycList(service: \"serverlessContainers\")).");
+  if (cfg.folderId) {
+    try {
+      const byName = await yandexCloud.findContainer(cfg.oauth, cfg.folderId, q);
+      if (byName) return byName;
+    } catch {}
+  }
+  return await yandexCloud.getContainer(cfg.oauth, q);
+}
+
+// Активная ревизия = та, что сейчас обслуживает трафик. Именно из неё консоль
+// (и мы) берём префилл для «Создать ревизию».
+async function ycActiveRevision(cfg, containerId) {
+  const revs = await yandexCloud.listRevisions(cfg.oauth, { containerId, pageSize: 100 });
+  const active = revs.find((r) => r.status === "ACTIVE") || revs[0] || null;
+  return { revs, active };
+}
+
+// Аргументы вида "{\"A\":\"1\"}" приходят от модели строкой так же часто, как
+// объектом — принимаем оба вида, но не падаем на мусоре.
+function ycJsonArg(v) {
+  if (v == null) return undefined;
+  if (typeof v === "object") return v;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return undefined;
+    try {
+      const j = JSON.parse(t);
+      return j && typeof j === "object" ? j : undefined;
+    } catch (e) {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+// Одна строка списка ревизий: id, статус, дата, образ, ресурсы.
+function ycRevisionLine(s, isCurrent) {
+  const bits = [];
+  bits.push(isCurrent ? "★ активна" : s.status || "—");
+  bits.push(s.createdAt ? String(s.createdAt).replace("T", " ").slice(0, 19) : "—");
+  bits.push(s.image || "—");
+  const res = [];
+  if (s.memoryMb) res.push(s.memoryMb + " МБ");
+  if (s.cores) res.push(s.cores + (s.cores > 1 ? " ядра" : " ядро"));
+  if (res.length) bits.push(res.join(" / "));
+  bits.push("таймаут " + (s.timeoutSec || 30) + " с");
+  if (s.concurrency) bits.push("конкурентность " + s.concurrency);
+  return "• " + s.id + " — " + bits.join(" · ");
+}
+
+// Полные настройки ревизии — то, что в консоли видно во вкладке «Редактор».
+function ycRevisionDetails(s) {
+  const lines = [];
+  lines.push("Ревизия " + s.id + " — " + (s.status || "—") + (s.createdAt ? " · создана " + s.createdAt : ""));
+  if (s.description) lines.push("Описание: " + s.description);
+  lines.push("Образ: " + (s.image || "—"));
+  if (s.imageDigest) lines.push("Дайджест образа: " + s.imageDigest);
+  if (s.command.length) lines.push("ENTRYPOINT: " + s.command.join(" "));
+  if (s.args.length) lines.push("CMD: " + s.args.join(" "));
+  if (s.workingDir) lines.push("Рабочая папка: " + s.workingDir);
+  const res = [];
+  if (s.memoryMb) res.push(s.memoryMb + " МБ памяти");
+  if (s.cores) res.push(s.cores + " ядро(а)");
+  if (s.coreFraction) res.push("доля ядра " + s.coreFraction + "%");
+  lines.push("Ресурсы: " + (res.length ? res.join(", ") : "—"));
+  lines.push("Таймаут: " + (s.timeoutSec || 30) + " с" + (s.concurrency ? " · конкурентность " + s.concurrency : ""));
+  lines.push("Сервисный аккаунт: " + (s.serviceAccountId || "— (нет)"));
+  lines.push("Сеть: " + (s.networkId || "— (нет доступа в VPC)"));
+  lines.push("Мин. инстансов: " + (s.minInstances || 0) + (s.maxInstancesPerZone ? " · лимит инстансов на зону: " + s.maxInstancesPerZone : ""));
+  lines.push("Режим: " + (s.runtime === "task" ? "task (процесс на каждый запрос)" : "http (сервер внутри контейнера)"));
+  const envKeys = Object.keys(s.env || {});
+  lines.push("Переменные окружения (" + envKeys.length + "): " + (envKeys.length ? envKeys.join(", ") : "нет"));
+  if (s.secrets.length) {
+    lines.push("Секреты Lockbox (" + s.secrets.length + "): " + s.secrets.map((x) => (x.environmentVariable || "?") + " ← " + x.id + "/" + x.key).join(", "));
+  }
+  if (s.storageMounts.length) {
+    lines.push("Монтирования Object Storage: " + s.storageMounts.map((m) => m.bucketId + (m.prefix ? "/" + m.prefix : "") + " → " + m.path + (m.readOnly ? " (только чтение)" : "")).join(", "));
+  }
+  if (s.mounts.length) {
+    lines.push("Дополнительные диски: " + s.mounts.map((m) => (m.bucketId || "диск") + " → " + m.path + (m.mode ? " (" + m.mode + ")" : "")).join(", "));
+  }
+  lines.push("Логи: " + (s.logDisabled ? "выключены" : s.logGroupId ? "лог-группа " + s.logGroupId : "в группу каталога") + (s.logMinLevel ? ", уровень " + s.logMinLevel : ""));
+  return lines.join("\n");
+}
+
 async function readYcLogsText(cfg, serviceKey, resourceId, args) {
   const a = args || {};
   if (!cfg.folderId) throw new Error("не выбран каталог (Настройки → Yandex Cloud).");
@@ -6613,6 +6849,7 @@ ipcMain.handle("yc:status", async () => {
     folderName: cfg.folderName,
     allowCreate: cfg.allowCreate,
     allowDelete: cfg.allowDelete,
+    allowUpdate: cfg.allowUpdate,
     oauthUrl: YANDEX_OAUTH_URL,
     clouds: [],
     folders: [],
@@ -6704,11 +6941,12 @@ ipcMain.handle("yc:setFolder", (_e, folderId, folderName, cloudId) => {
   return { ok: true };
 });
 
-ipcMain.handle("yc:setPermissions", (_e, allowCreate, allowDelete) => {
+ipcMain.handle("yc:setPermissions", (_e, allowCreate, allowDelete, allowUpdate) => {
   const merged = {
     ...loadSettings(),
     ycAllowAgentCreate: !!allowCreate,
     ycAllowAgentDelete: !!allowDelete,
+    ycAllowAgentUpdate: !!allowUpdate,
   };
   saveSettings(merged);
   return { ok: true };
@@ -7258,6 +7496,56 @@ ipcMain.handle("git:commitDetail", async (_e, dir, hash) => {
     files.push({ path: p, additions: add, deletions: del, status });
   }
   return { ok: true, hash: meta[0] || "", message: meta[1] || "", author: meta[2] || "", date: meta[3] || "", files };
+});
+
+// Путь файла внутри репозитория: принимаем абсолютный или относительный, но
+// никогда не выходим за пределы рабочей папки — «удалить» не должно трогать чужое.
+function gitRelFile(dir, file) {
+  const d = sanitizeDir(dir);
+  if (!d) return { ok: false, error: "Папка не найдена" };
+  const raw = String(file || "").trim();
+  if (!raw) return { ok: false, error: "Файл не указан" };
+  const abs = path.resolve(path.isAbsolute(raw) ? raw : path.join(d, raw));
+  const rel = path.relative(d, abs);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { ok: false, error: "Файл вне рабочей папки: " + raw };
+  }
+  return { ok: true, dir: d, rel: rel.split(path.sep).join("/") };
+}
+
+// Подтянуть изменения с GitHub (кнопка в панели проекта). Только fast-forward:
+// конфликтный merge из интерфейса — это молча потерянная работа агента.
+ipcMain.handle("git:pull", async (_e, dir) => {
+  const d = sanitizeDir(dir);
+  if (!d) return { ok: false, error: "Папка не найдена" };
+  const r = await runGit(d, ["pull", "--ff-only"], loadSettings());
+  return r.ok ? { ok: true, out: r.out || "Изменения подтянуты." } : { ok: false, error: r.err || "Не удалось подтянуть изменения" };
+});
+
+// Убрать файл из индекса (кнопка «Убрать из staged»): git reset HEAD -- <файл>.
+ipcMain.handle("git:unstage", async (_e, dir, file) => {
+  const prep = gitRelFile(dir, file);
+  if (!prep.ok) return prep;
+  const r = await runGit(prep.dir, ["reset", "HEAD", "--", prep.rel], loadSettings());
+  return r.ok ? { ok: true, out: "Файл убран из индекса." } : { ok: false, error: r.err };
+});
+
+// Удалить выбранные файлы с диска и из git (кнопка «Удалить выбранные»).
+ipcMain.handle("git:rm", async (_e, dir, file) => {
+  const prep = gitRelFile(dir, file);
+  if (!prep.ok) return prep;
+  const r = await runGit(prep.dir, ["rm", "-f", "--", prep.rel], loadSettings());
+  if (r.ok) return { ok: true, out: "Файл удалён." };
+  const abs = path.join(prep.dir, prep.rel);
+  try {
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+      fs.unlinkSync(abs);
+      return { ok: true, out: "Файл удалён с диска (в git его не было)." };
+    }
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+  return { ok: false, error: r.err };
 });
 
 ipcMain.handle("git:revert", async (_e, dir, hash) => {
