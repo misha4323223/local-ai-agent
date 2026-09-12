@@ -37,20 +37,21 @@
 17. Запуск проекта: запускай проект ТОЛЬКО через встроенный терминал приложения (инструменты runCommand / startBackground / shellStart) — не проси пользователя запускать проект вручную и не открывай внешние терминалы. Dev-сервер по умолчанию запускай на порту 5000 (http://localhost:5000), если в конфиге проекта явно не задан другой порт (проверь package.json / .env / конфиги). После запуска проверь готовность через проверь через checkUrl/checkPort и сообщи пользователю адрес.
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
-20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), установка скачанного установщика — installExe (умеет .exe, .msi и .zip; спросит подтверждение). ВАЖНО про оболочку: по умолчанию на Windows команды идут в cmd.exe, на macOS/Linux — в sh. Для PowerShell и bash есть параметр shell у runCommand и startBackground: shell: "powershell" — настоящий PowerShell с включённым UTF-8 (кириллица, $, кавычки и 2>$null работают как в консоли, обёртка powershell -Command не нужна), shell: "bash" — bash (на Windows это Git Bash).
+20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), установка скачанного установщика — installExe (умеет .exe, .msi и .zip; спросит подтверждение). ВАЖНО про оболочку: по умолчанию на Windows команды идут в cmd.exe, на macOS/Linux — в sh. Для PowerShell и bash есть параметр shell у runCommand и startBackground: shell: "powershell" — настоящий PowerShell с включённым UTF-8 (кириллица, $, кавычки и 2>$null работают как в консоли, обёртка powershell -Command не нужна), shell: "bash" — bash (на Windows это Git Bash, ставится вместе с Git for Windows), sh ищется там же. Если не знаешь, какие оболочки есть на машине, вызови shellsStatus — он покажет доступные с путями и подсказкой, что установить; не выясняй это методом проб (bash/sh на Windows без Git for Windows отсутствуют).
 21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url) и СРАЗУ зови browserSnapshot — это карта кнопок и полей: ref (e1, e2…), роль и видимое имя (filter сужает список). Дальше действуй по ref, а НЕ перебирай селекторы: browserClick { ref: "e2" }, browserFill { ref: "e4", text: "..." }, browserSelect { ref: "e5", value: "..." }. Можно и словами: browserClick { name: "Войти" } (видимый текст кнопки), role+name («button» + «Войти»), для полей — label/placeholder; selector (CSS #id/.class, text=Текст, xpath=//...) тоже работает. Если элемент не найден, инструмент НЕ молчит, а вернёт похожие элементы с их ref — кликай по ним и не угадывай селекторы вслепую. После перехода на другую страницу ref устаревают — сделай browserSnapshot заново. Клавиши — browserPress (Enter), текст страницы — browserText, вкладки — browserStatus, скриншот — browserScreenshot. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Если нужны СВОИ входы пользователя (его ВК, его почта, его кабинеты) — начни с browserConnect: приложение подключится к его Chrome по порту отладки и подхватит открытые вкладки, дальше те же browserSnapshot/browserClick/browserFill работают в них, а браузер пользователя не закрывается (browserClose с tabId: "all" лишь отключает агента). Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
 22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — карта окна: кнопки/вкладки/поля со СТАБИЛЬНЫМ ref (e12), ролью и видимым именем, appClick — кликнуть по ref (или по видимому тексту: text «Сохранить»), appFill — ввести текст в поле по ref/label, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать элемента по ref/тексту, appScreenshot — скриншот окна (разбирается vision-моделью). ВАЖНО: номер [N] устаревает при любой перерисовке окна (после «↻ обновить», смены вкладки клик уходил в чужой элемент) — всегда бери ref из appRead и не полагайся на номер. Если действие не нашло элемент, инструмент сам вернёт свежую карту с ref — просто повтори по ней. appSelect/appPress — выбрать из списка/нажать клавишу, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
 23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
 25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
 26. Семантический поиск: semanticSearch(query) ищет по коду проекта по смыслу (стебли слов, camelCase/snake_case, BM25-ранжирование) и показывает сниппеты с номерами строк. Используй его для поиска «где находится X» и «как устроен Y» — быстрее и точнее, чем читать файлы подряд. Точный регулярный поиск — searchFile/searchProject.
-24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList).
+24. Память проекта и точки отката: заметки (noteSave/noteRead/noteList/noteDelete) — твоя долговременная память о проекте, она переживает перезапуск приложения. Сохраняй решения, архитектуру, договорённости и важные выводы; в начале новой сессии прочитай их через noteRead. Перед серией рискованных правок или рефакторингом создавай точку отката checkpointSave(label); если что-то сломалось — верни всё разом через checkpointRollback(id) (список — checkpointList). Память диалогов: когда контекст переполняется, старые шаги сворачиваются в памятку — если в настройках включена галочка «Память диалогов», приложение сохраняет такие памятки локально по датам. memoryList показывает дни и памятки за конкретный день (date: ГГГГ-ММ-ДД), memorySearch ищет по ним слова и фразы. Это помогает вспомнить прошлые сессии: «посмотри, что мы делали 5-го числа».
 27. Самоизменения и OTA: перед любой правкой собственного кода (src/, assets/) сначала создай точку отката checkpointSave(label — «перед самоизменением …»). Файлы src/bootstrap.js и src/ota.js и папка применённого OTA-бандла физически заблокированы: writeFile/editFile/applyPatch вернут ошибку — не пытайся их обойти. После сборки бандла (node scripts/make-ota.js) вызови otaStatus (видно ли обновление) и otaCheck (применить); после применения — validateProject; если после обновления что-то сломалось — otaRollback.
-28. Yandex Cloud: инструменты ycStatus / ycList / ycCreate / ycDelete / ycDeploy / ycLogs / ycInstall. Начни с ycStatus — авторизация (Настройки → «☁️ Yandex Cloud»), каталог, разрешения агента. Создание/удаление ресурсов — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Создать можно: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc. Деплой — ycDeploy (directory, name, public): Docker-образ → Container Registry → Serverless Container → URL (нужен Docker). Логи — ycLogs (id, service необязателен): читаются внутренним API Cloud Logging, внешний yc CLI НЕ нужен. Если в песочнице нужен сам yc CLI (например, команда yc в терминале) — вызови ycInstall: он скачает официальный бинарь в папку приложения и добавит в PATH. Токен и каталог уже подставляются автоматически (YC_TOKEN / YC_CLOUD_ID / YC_FOLDER_ID), yc init не нужен. Результат проверяй через ycList.
+28. Yandex Cloud: инструменты ycStatus / ycList / ycCreate / ycDelete / ycDeploy / ycLogs / ycInstall. Начни с ycStatus — авторизация (Настройки → «☁️ Yandex Cloud»), каталог, разрешения агента. Создание/удаление ресурсов — только по явной просьбе пользователя и при включённых чекбоксах разрешений (ресурсы платные, удаление необратимо). Создать можно: ydb, lockbox, containerRegistry, storage, dns, serverlessContainers, vpc. Деплой — ycDeploy (directory, name, public): Docker-образ → Container Registry → Serverless Container → URL (нужен Docker). Логи — ycLogs (id, service необязателен): читаются внутренним API Cloud Logging — записи по gRPC с хоста log-reading, список групп по REST — внешний yc CLI НЕ нужен. Если в песочнице нужен сам yc CLI (например, команда yc в терминале) — вызови ycInstall: он скачает официальный бинарь в папку приложения и добавит в PATH. Токен и каталог уже подставляются автоматически (YC_IAM_TOKEN — свежий IAM-токен, YC_CLOUD_ID, YC_FOLDER_ID), yc init не нужен. Результат проверяй через ycList.
 29. ВКонтакте (vk.com/vk.ru — домены взаимозаменяемы): браузерные инструменты. Поле ввода — contenteditable, селектор [role=textbox]: browserClick по полю → browserFill(selector: [role=textbox], text: ...) → отправка browserPress(key: Enter) (Shift+Enter — перенос строки). Страницы грузятся лениво — после открытия жди 2–5 секунд и перечитывай browserText; проверка отправки — текст сообщения в конце переписки. Работай в СУЩЕСТВУЮЩЕЙ вкладке браузера (новые открываются без сессии); состояние читай через browserText, а не скриншоты (ВК их обрезает); текст приходит вместе с левым меню — фильтруй по именам/датам. Вход/сессия — только руками пользователя, не обходи. Маршруты, селекторы, сценарии и известные контакты — в гайде, прочитай перед работой: readFile(path: agent-guide:vk).
 30. Анализ переписок (ВК, чаты, письма, файлы): определи КТО человек по уликам в тексте (работа/задачи → коллега; семейное/личное → родственник/друг; услуги/цены/заказы → клиент/поставщик; «Вы» и официальный тон → деловой контакт), выдели СУТЬ (2–4 предложения: о чём разговор, что решено, что ждёт ответа, срочность) и оформи ТАБЛИЦЕЙ: «Человек (профиль) | Кто он | Суть переписки | Важность | Следующий шаг». Для КЛИЕНТОВ дополнительно: профиль (потребность его словами, что обсуждали, бюджет/сроки если видно, возражения, тон) + фундамент для КП (2–4 пункта, что включить в предложение, и следующий логичный шаг). Не выдумывай: чего нет в тексте — «не определено». Длинную историю читай частями (PageUp + browserText). Полная методология — readFile(path: agent-guide:chat-analysis).
 31. Почта (SMTP/IMAP, Настройки → «✉️ Почта»): mailList — прочитать последние письма (отправитель, тема, дата, найденный код), mailCode — вытащить код подтверждения (from — фильтр по отправителю, например «yandex»), mailSend — отправить письмо (КП клиенту, ответ на запрос). Начни с mailList: если почта не настроена или нет разрешения на отправку, инструмент вернёт подсказку — передай её пользователю. Письма уходят с его ящика, поэтому перед отправкой клиенту покажи готовый текст и спроси подтверждение, если пользователь не просил отправить сразу. Пароль приложения не показывай и не проси в чате. Если письмо с кодом ещё не пришло — повтори mailCode через 10–20 секунд (письмо доходит не мгновенно).
+32. План работ (todoWrite): многошаговую задачу (от 3 шагов: «собери/починь/проверь», рефакторинг, диагностика) начинай с todoWrite — составь план из 3–7 коротких пунктов. Он показывается пользователю панелью-чеклистом с прогрессом, поэтому не дублируй его в тексте ответа. После КАЖДОГО выполненного пункта вызывай todoWrite снова, присылая полный список: текущий пункт — in_progress, сделанные — done, сорвавшийся — failed с пометкой note (по какой причине). Работай строго по плану и не расширяй объём самовольно; если по ходу выясняется, что план неверен — перепиши его тем же инструментом. Когда все пункты done — коротко подведи итог. В режиме плана («📋 План-режим») todoWrite обязателен: сначала покажи план и жди команды пользователя.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -258,6 +259,14 @@
           },
           required: ["command"],
         },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "shellsStatus",
+        description: "Показать, какие оболочки реально доступны на машине: cmd, powershell, pwsh, bash, sh — с путями и подсказкой, что установить, если чего-то нет. Вызывай ПЕРЕД первым запуском команд с параметром shell (особенно bash/sh на Windows — они появляются только вместе с Git for Windows), чтобы не выяснять доступность пробами и ошибками.",
+        parameters: { type: "object", properties: {} },
       },
     },
     {
@@ -1589,6 +1598,68 @@
     {
       type: "function",
       function: {
+        name: "todoWrite",
+        description:
+          "План работ для многошаговой задачи: показывается пользователю отдельной панелью-чеклистом с прогрессом и виден между перезапусками. " +
+          "Вызывай В НАЧАЛЕ многошаговой задачи (от 3 шагов) и повторно — после каждого выполненного шага, присылая ПОЛНЫЙ список с обновлёнными статусами. " +
+          "tasks: массив пунктов (до 7). Каждый пункт — либо строка с текстом, либо объект { text, status, note }, где status: pending (ожидает), in_progress (в работе), done (готово), failed (не удалось), note — короткая пометка (например, причина ошибки). " +
+          "Ровно один пункт может быть in_progress — тот, который делаешь сейчас. Не пересказывай план в тексте ответа: он и так виден пользователю.",
+        parameters: {
+          type: "object",
+          properties: {
+            tasks: {
+              type: "array",
+              description: "Полный список пунктов плана (до 7). Строка или объект { text, status, note }.",
+              items: {
+                type: "object",
+                properties: {
+                  text: { type: "string", description: "Короткий пункт плана" },
+                  status: { type: "string", description: "pending | in_progress | done | failed" },
+                  note: { type: "string", description: "Короткая пометка к пункту (необязательно)" },
+                },
+                required: ["text"],
+              },
+            },
+            title: { type: "string", description: "Название плана (необязательно), например «Починка ycLogs»" },
+          },
+          required: ["tasks"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "memoryList",
+        description:
+          "Дневник сжатых памяток контекста (память диалогов). Без date — список дней с количеством памяток; с date (ГГГГ-ММ-ДД) — памятки за этот день: время, провайдер/модель, рабочая папка и текст. Это то, что агент сворачивал в памятку, когда контекст переполнялся, — помогает вспомнить, что делали в прошлые сессии. Работает, только если в настройках включена галочка «Память диалогов» (по умолчанию выключена).",
+        parameters: {
+          type: "object",
+          properties: {
+            date: { type: "string", description: "Дата ГГГГ-ММ-ДД (необязательно; без неё — список дней)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "memorySearch",
+        description:
+          "Поиск по дневнику сжатых памяток контекста (память диалогов): найти, о чём говорили и что делали раньше. Возвращает дату, время, число совпадений и фрагмент памятки. Можно ограничить одной датой (date) и задать limit. Используй, когда пользователь спрашивает «что мы делали 5-го числа» или «когда мы правили X».",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Что искать — слово или фраза" },
+            date: { type: "string", description: "Ограничить датой ГГГГ-ММ-ДД (необязательно)" },
+            limit: { type: "number", description: "Сколько совпадений вернуть (по умолчанию 20)" },
+          },
+          required: ["query"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
         name: "checkpointSave",
         description: "Создать точку отката: полный снимок текстовых файлов рабочей директории (без .git, node_modules, dist, build и т.п.). Делай ПЕРЕД серией рискованных правок или рефакторингом — потом можно вернуть всё разом через checkpointRollback(id). Хранится до 15 чекпоинтов, старые вытесняются.",
         parameters: {
@@ -1816,7 +1887,7 @@
       type: "function",
       function: {
         name: "ycInstall",
-        description: "Yandex Cloud: установить официальный yc CLI внутрь приложения (папка userData/bin, системных прав не требует) и добавить его в PATH всех команд агента. Нужен, только если в песочнице требуется сама команда yc (логи через ycLogs работают и без него). Токен и каталог подставляются автоматически (YC_TOKEN / YC_CLOUD_ID / YC_FOLDER_ID), поэтому yc init не нужен. force=true — переустановить поверх имеющегося.",
+        description: "Yandex Cloud: установить официальный yc CLI внутрь приложения (папка userData/bin, системных прав не требует) и добавить его в PATH всех команд агента. Нужен, только если в песочнице требуется сама команда yc (логи через ycLogs работают и без него). Токен и каталог подставляются автоматически (YC_IAM_TOKEN — свежий IAM-токен, YC_CLOUD_ID, YC_FOLDER_ID), поэтому yc init не нужен. Если yc ответит «The token is invalid» — повтори вызов через минуту: приложение продлевает IAM само. force=true — переустановить поверх имеющегося.",
         parameters: {
           type: "object",
           properties: {
@@ -2227,6 +2298,103 @@
     return s.push(text) + s.finish();
   }
 
+  // ── План работ (todoWrite): нормализация пунктов ──────────────────────────
+  // Принимает что угодно (строки, объекты, JSON-строку) и возвращает чистый
+  // список: до 7 пунктов, допустимые статусы, уникальные id. Никогда не бросает.
+  const PLAN_STATUSES = ["pending", "in_progress", "done", "failed"];
+  const PLAN_MAX_ITEMS = 7;
+  const PLAN_STATUS_ALIASES = {
+    pending: "pending", todo: "pending", new: "pending", open: "pending", waiting: "pending",
+    ожидает: "pending", ожидание: "pending", запланировано: "pending", план: "pending",
+    in_progress: "in_progress", inprogress: "in_progress", progress: "in_progress", doing: "in_progress",
+    active: "in_progress", current: "in_progress", running: "in_progress",
+    в_работе: "in_progress", вработе: "in_progress", работа: "in_progress", выполняется: "in_progress",
+    done: "done", complete: "done", completed: "done", ok: "done", success: "done", finished: "done",
+    готово: "done", выполнено: "done", сделано: "done", завершено: "done",
+    failed: "failed", fail: "failed", error: "failed", blocked: "failed",
+    ошибка: "failed", не_удалось: "failed", неудалось: "failed", провал: "failed",
+  };
+
+  function normalizePlanStatus(v) {
+    const k = String(v == null ? "" : v).trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (PLAN_STATUS_ALIASES[k]) return PLAN_STATUS_ALIASES[k];
+    return "pending";
+  }
+
+  function normalizePlanTasks(raw) {
+    let list = raw;
+    if (list && !Array.isArray(list) && typeof list === "object") {
+      // Модель часто присылает { tasks: [...] } или { items: [...] } целиком.
+      list = list.tasks || list.items || list.steps || list.plan || list.todos || null;
+    }
+    if (typeof list === "string") {
+      const t = list.trim();
+      try {
+        const parsed = JSON.parse(t);
+        list = Array.isArray(parsed) ? parsed : (parsed && (parsed.tasks || parsed.items || parsed.steps)) || null;
+      } catch {
+        // Свободный текст: каждая значимая строка — пункт (снимаем «- », «1. », «[ ]»).
+        list = t.split(/\r?\n/).map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim()).filter(Boolean);
+      }
+    }
+    if (!Array.isArray(list)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const it of list) {
+      let text = "";
+      let status = "pending";
+      let note = "";
+      if (it && typeof it === "object") {
+        text = String(it.text || it.title || it.task || it.name || it.step || "").trim();
+        status = normalizePlanStatus(it.status || it.state || it.done);
+        note = String(it.note || it.comment || it.detail || "").trim();
+      } else {
+        text = String(it == null ? "" : it).trim().replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim();
+      }
+      // Строка вида «- [x] шаг» / «☑ шаг» — статус прямо в тексте.
+      const cb = text.match(/^\[([ xX\-\/])\]\s*/);
+      if (cb) {
+        text = text.slice(cb[0].length).trim();
+        if (cb[1].toLowerCase() === "x") status = "done";
+        else if (cb[1] === "/") status = "in_progress";
+      }
+      const mark = text.match(/^(✅|✔|☑|❌|⚠️|⚠|🔄|⏳|⬜)\s*/);
+      if (mark) {
+        text = text.slice(mark[0].length).trim();
+        const ch = mark[1];
+        if (ch === "✅" || ch === "✔" || ch === "☑") status = "done";
+        else if (ch === "❌" || ch === "⚠️" || ch === "⚠") status = "failed";
+        else if (ch === "🔄" || ch === "⏳") status = "in_progress";
+      }
+      // Обрезаем служебное: длинные пункты не нужны, они ломают слабые модели.
+      if (text.length > 160) text = text.slice(0, 157).trim() + "…";
+      if (note.length > 120) note = note.slice(0, 117).trim() + "…";
+      if (!text) continue;
+      const key = text.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ id: "t" + (out.length + 1), text, status, note });
+      if (out.length >= PLAN_MAX_ITEMS) break;
+    }
+    // Ровно один шаг может быть «в работе»: если модель пометила несколько
+    // (частая ошибка слабых моделей), оставляем первый, остальные понижаем.
+    let seenActive = false;
+    for (const it of out) {
+      if (it.status !== "in_progress") continue;
+      if (seenActive) it.status = "pending";
+      else seenActive = true;
+    }
+    return out;
+  }
+
+  function planSummary(tasks) {
+    const items = Array.isArray(tasks) ? tasks : [];
+    const total = items.length;
+    const done = items.filter((t) => t && t.status === "done").length;
+    const failed = items.filter((t) => t && t.status === "failed").length;
+    const active = items.find((t) => t && t.status === "in_progress");
+    return { total, done, failed, active: active ? active.text : "" };
+  }
   const TOOL_ALIASES = {
     createfile: "writeFile",
     create_file: "writeFile",
@@ -2250,6 +2418,11 @@
     editfile: "editFile",
     run_command: "runCommand",
     runcommand: "runCommand",
+    shells_status: "shellsStatus",
+    shellsstatus: "shellsStatus",
+    shell_status: "shellsStatus",
+    check_shells: "shellsStatus",
+    shells: "shellsStatus",
     browser_open: "browserOpen",
     browser_snapshot: "browserSnapshot",
     browsersnapshot: "browserSnapshot",
@@ -2265,6 +2438,12 @@
     browser_wait: "browserWait",
     browser_close: "browserClose",
     browser_status: "browserStatus",
+    memory_list: "memoryList",
+    memorylist: "memoryList",
+    memory_days: "memoryList",
+    memory_search: "memorySearch",
+    memorysearch: "memorySearch",
+    context_memory: "memoryList",
     browser_clear_profile: "browserClearProfile",
     browserclearprofile: "browserClearProfile",
     browser_connect: "browserConnect",
@@ -2535,6 +2714,16 @@
     downloadandextract: "downloadAndExtract",
     download_zip: "downloadAndExtract",
     extract_archive: "downloadAndExtract",
+    todo_write: "todoWrite",
+    todowrite: "todoWrite",
+    todo: "todoWrite",
+    todos: "todoWrite",
+    plan: "todoWrite",
+    write_plan: "todoWrite",
+    writeplan: "todoWrite",
+    update_plan: "todoWrite",
+    updateplan: "todoWrite",
+    plan_tasks: "todoWrite",
   };
   const KNOWN_TOOLS = TOOL_DEFINITIONS.map((t) => t.function.name);
 
@@ -3253,7 +3442,7 @@
   // ── Динамические инструменты: при тесном контексте шлём только ядро ──
   const CORE_TOOL_NAMES = new Set([
     "createFolder", "readFile", "writeFile", "listDirectory", "readFileLines", "editFile",
-    "runCommand", "runCommandOutput", "retryCommand", "timeoutCommand",
+    "runCommand", "runCommandOutput", "retryCommand", "timeoutCommand", "shellsStatus",
     "webSearch", "webFetch", "searchFile", "searchProject", "listFiles",
     "fileOutline", "readFileStructure", "explainCode", "undoEdit",
     "startBackground", "listBackground", "backgroundOutput", "sendInput", "stopBackground",
@@ -3261,6 +3450,7 @@
     "previewUI", "diffView", "askUser", "analyzeImage", "generateImage", "screenshotCapture",
     "listProcesses", "killProcess", "clipboardRead", "clipboardWrite", "screenshotDesktop",
     "registryRead", "registryWrite", "openPath", "wingetSearch", "installExe",
+    "memoryList", "memorySearch", "todoWrite",
   ]);
   const CORE_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter((t) => CORE_TOOL_NAMES.has(t.function && t.function.name));
   // Если окно контекста >= 26k — шлём все инструменты; иначе только ядро (~36 вместо 74).
@@ -3384,6 +3574,10 @@
     const settings = (opts && opts.settings) || {};
     const emit = (opts && opts.emit) || (() => {});
     const planMode = !!(opts && opts.planMode);
+    // onMemo — необязательный хук: получает текст только что созданной памятки и
+    // сообщения, из которых она свёрнута. main.js пишет по нему локальный дневник
+    // (память диалогов по датам). Ошибка хука не должна ломать работу агента.
+    const onMemo = (opts && opts.onMemo) || null;
     let compacted = false;
     let compactMemo = null;
     return {
@@ -3408,6 +3602,17 @@
                   "ПАМЯТКА ПРЕДЫДУЩЕГО КОНТЕКСТА (сжато, чтобы экономить токены; это резюме старых шагов):\n" +
                   String(memoText).trim(),
               };
+              if (onMemo) {
+                try {
+                  onMemo({
+                    text: String(memoText).trim(),
+                    messages,
+                    provider: settings.provider || "",
+                    model: settings.model || "",
+                    ts: Date.now(),
+                  });
+                } catch {}
+              }
               if (emit) emit({ type: "compact", text: "🧠 Контекст сжат: старые шаги свернуты в памятку — токены экономятся." });
             }
           } catch {}
@@ -3485,6 +3690,10 @@
     stripThinking,
     normalizeToolName,
     normalizeToolArgs,
+    normalizePlanTasks,
+    normalizePlanStatus,
+    planSummary,
+    PLAN_MAX_ITEMS,
     extractToolCallsFromText,
     // транспорт провайдеров
     buildChatRequest,

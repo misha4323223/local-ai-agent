@@ -409,6 +409,20 @@
     if (!d || !Array.isArray(d.chats)) return d || { chats: [], activeId: null };
     for (const c of d.chats) {
       if (!Array.isArray(c.messages)) c.messages = [];
+      // План работ сохраняется вместе с чатом. Битые пункты (старый формат,
+      // ручная правка файла) чистим тем же нормализатором, что и данные модели.
+      // Защищается try/catch: sanitizeChats работает с файлом чатов при запуске и
+      // не должен падать ни при каких данных (битый chats.json — не повод не стартовать).
+      try {
+        // Поле трогаем только если оно есть: чаты без плана не должны менять форму
+        // (иначе каждый запуск перезаписывал бы весь файл истории).
+        if (c.plan !== undefined) {
+          const pi = c.plan && typeof c.plan === "object" && Array.isArray(c.plan.items) ? normalizePlanTasks(c.plan.items) : [];
+          if (pi.length) c.plan = { title: String(c.plan.title || ""), source: c.plan.source === "auto" ? "auto" : "model", items: pi, updatedAt: Number(c.plan.updatedAt) || Date.now() };
+          else c.plan = null;
+        }
+        if (Array.isArray(c.planHistory)) c.planHistory = c.planHistory.slice(0, PLAN_ARCHIVE_LIMIT);
+      } catch { c.plan = null; c.planHistory = []; }
       let interrupted = false;
       for (const m of c.messages) {
         if (!m.pending) continue;
@@ -553,6 +567,245 @@
     persistChats();
   }
 
+  // ─────────── План работ: модель (todoWrite) + авто-шаги из инструментов ───────────
+  // Панель-чеклист над панелью действий. Источник пунктов бывает двух видов:
+  //  • source: "model" — план составила модель инструментом todoWrite (её статусы);
+  //  • source: "auto"  — модель плана не дала, показываем сами шаги инструментов.
+  // Поэтому прогресс виден всегда: «плана вперёд» нет только там, где его не дала модель.
+  // Функции ниже чистые: они меняют только переданный объект чата и ничего не рисуют —
+  // отрисовку и запись на диск делают вызывающие места (так это и тестируется).
+  const PLAN_ICON = { pending: "⬜", in_progress: "🔄", done: "✅", failed: "⚠️" };
+  const PLAN_TEXT = { pending: "ожидает", in_progress: "в работе", done: "готово", failed: "не удалось" };
+  const PLAN_ARCHIVE_LIMIT = 5;
+  const PLAN_AUTO_MAX = 40;
+
+  function planProgress(items) {
+    const list = Array.isArray(items) ? items : [];
+    const total = list.length;
+    const done = list.filter((i) => i && i.status === "done").length;
+    const failed = list.filter((i) => i && i.status === "failed").length;
+    const active = list.find((i) => i && i.status === "in_progress");
+    const percent = total ? Math.round(((done + failed) / total) * 100) : 0;
+    return { total, done, failed, percent, active: active ? active.text : "", finished: total > 0 && done + failed === total };
+  }
+
+  function planArchive(chat, plan) {
+    if (!chat || !plan || !Array.isArray(plan.items) || !plan.items.length) return;
+    if (!Array.isArray(chat.planHistory)) chat.planHistory = [];
+    chat.planHistory.unshift({
+      title: plan.title || "",
+      source: plan.source || "model",
+      items: plan.items,
+      updatedAt: plan.updatedAt || Date.now(),
+    });
+    if (chat.planHistory.length > PLAN_ARCHIVE_LIMIT) chat.planHistory.length = PLAN_ARCHIVE_LIMIT;
+  }
+
+  // План от модели (todoWrite). Слабая модель может прислать мусор — нормализатор
+  // вернёт пустой список, и такой «план» просто не появится.
+  function planFromModel(chat, ev) {
+    if (!chat) return false;
+    const items = normalizePlanTasks(ev && ev.tasks);
+    if (!items.length) return false;
+    // Заменяя план модели, предыдущий убираем в историю (не теряем контекст).
+    if (chat.plan && chat.plan.source === "model") planArchive(chat, chat.plan);
+    chat.plan = {
+      title: String((ev && ev.title) || "").trim().slice(0, 80),
+      source: "model",
+      items,
+      updatedAt: Date.now(),
+    };
+    return true;
+  }
+
+  // Шаг из реального вызова инструмента. Работает, только когда модель своего
+  // плана не дала, — иначе получилась бы вторая, конфликтующая нумерация.
+  function planAutoStep(chat, ev) {
+    if (!chat) return false;
+    if (chat.plan && chat.plan.source === "model") return false;
+    const items = chat.plan && chat.plan.source === "auto" && Array.isArray(chat.plan.items) ? chat.plan.items.slice() : [];
+    // Начался новый шаг — значит предыдущий закончился.
+    for (const it of items) if (it.status === "in_progress") it.status = "done";
+    const name = String((ev && ev.name) || "шаг");
+    items.push({
+      id: "a" + (items.length + 1) + "-" + Date.now().toString(36),
+      text: (typeof TOOL_LABEL === "object" && TOOL_LABEL[name]) || name,
+      status: "in_progress",
+      note: "",
+      tool: name,
+    });
+    if (items.length > PLAN_AUTO_MAX) items.splice(0, items.length - PLAN_AUTO_MAX);
+    chat.plan = { title: "Ход работы", source: "auto", items, updatedAt: Date.now() };
+    return true;
+  }
+
+  // Результат шага: закрываем его фактическим итогом.
+  function planAutoResult(chat, ev, ok) {
+    if (!chat || !chat.plan || !Array.isArray(chat.plan.items)) return false;
+    const name = String((ev && ev.name) || "");
+    if (chat.plan.source === "auto") {
+      for (let i = chat.plan.items.length - 1; i >= 0; i--) {
+        const it = chat.plan.items[i];
+        if (it.status !== "in_progress") continue;
+        if (it.tool && name && it.tool !== name) continue;
+        it.status = ok ? "done" : "failed";
+        it.note = ok ? "" : "инструмент вернул ошибку";
+        chat.plan.updatedAt = Date.now();
+        return true;
+      }
+      return false;
+    }
+    // План модели: статусы ведёт она. Но если её текущий шаг фактически упал —
+    // показываем ⚠️, а не «в работе»: слепо доверять плану нельзя.
+    if (!ok) {
+      for (let i = chat.plan.items.length - 1; i >= 0; i--) {
+        const it = chat.plan.items[i];
+        if (it.status !== "in_progress") continue;
+        it.status = "failed";
+        if (!it.note) it.note = "шаг не удался — см. результат инструмента";
+        chat.plan.updatedAt = Date.now();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Новый запрос пользователя: завершённый план — в историю, незавершённый
+  // остаётся (агент продолжает работу), авто-шаги начинаются заново.
+  function planRotate(chat) {
+    if (!chat || !chat.plan) return false;
+    if (chat.plan.source === "auto") { chat.plan = null; return true; }
+    if (planProgress(chat.plan.items).finished) { planArchive(chat, chat.plan); chat.plan = null; return true; }
+    return false;
+  }
+  // ─────────── /План работ ───────────
+  // Панель плана: отдельный контейнер над панелью действий — она не сбрасывается
+  // вместе с ходом работ и не уезжает при прокрутке списка действий.
+  let planCollapsed = false;
+  function renderPlanPanel() {
+    const host = $("plan-panel");
+    if (!host) return;
+    const chat = getActiveChat();
+    const plan = chat && chat.plan && Array.isArray(chat.plan.items) && chat.plan.items.length ? chat.plan : null;
+    if (!plan) {
+      host.classList.add("hidden");
+      host.innerHTML = "";
+      return;
+    }
+    const pr = planProgress(plan.items);
+    host.classList.remove("hidden");
+    host.innerHTML = "";
+    const group = document.createElement("div");
+    group.className = "plan-group" + (pr.finished ? " finished" : "") + (planCollapsed ? "" : " expanded");
+
+    const head = document.createElement("div");
+    head.className = "plan-head";
+    head.title = "Показать/скрыть план работ";
+    head.onclick = (e) => {
+      e.stopPropagation();
+      planCollapsed = !planCollapsed;
+      renderPlanPanel();
+    };
+    const dot = document.createElement("span");
+    dot.className = "plan-dot";
+    const title = document.createElement("span");
+    title.className = "plan-title";
+    title.textContent = plan.source === "auto" ? "📋 Ход работы" : "📋 " + (plan.title || "План работ");
+    const count = document.createElement("span");
+    count.className = "plan-count";
+    count.textContent = pr.done + "/" + pr.total + (pr.failed ? " ⚠" + pr.failed : "");
+    count.title = "Готово " + pr.done + " из " + pr.total + (pr.failed ? ", не удалось: " + pr.failed : "");
+    head.appendChild(dot);
+    head.appendChild(title);
+    head.appendChild(count);
+    // Кнопка «выполнить план» — только когда план составлен моделью и ждёт запуска
+    // (в режиме плана инструменты не выполнялись).
+    if (planPending(chat)) {
+      const run = document.createElement("button");
+      run.className = "btn btn-primary btn-small plan-run";
+      run.textContent = "▶ Выполнить";
+      run.onclick = (e) => {
+        e.stopPropagation();
+        if (streaming) return;
+        for (let i = chat.messages.length - 1; i >= 0; i--) {
+          if (chat.messages[i].role === "assistant") { chat.messages[i].plan = false; break; }
+        }
+        const inp = $("input");
+        inp.value = "Выполни план, который ты составил. Обновляй его через todoWrite после каждого шага.";
+        autoResize();
+        sendMessage();
+      };
+      head.appendChild(run);
+    }
+    const clear = document.createElement("button");
+    clear.className = "plan-clear";
+    clear.textContent = "✕";
+    clear.title = "Убрать план с экрана (уйдёт в историю планов чата)";
+    clear.onclick = (e) => {
+      e.stopPropagation();
+      planArchive(chat, chat.plan);
+      chat.plan = null;
+      renderPlanPanel();
+      persistChatsSoon();
+    };
+    const chev = document.createElement("span");
+    chev.className = "plan-chev";
+    chev.textContent = planCollapsed ? "▸" : "▾";
+    head.appendChild(clear);
+    head.appendChild(chev);
+    group.appendChild(head);
+
+    const bar = document.createElement("div");
+    bar.className = "plan-bar";
+    const fill = document.createElement("div");
+    fill.className = "plan-fill";
+    fill.style.width = pr.percent + "%";
+    bar.appendChild(fill);
+    group.appendChild(bar);
+
+    const body = document.createElement("div");
+    body.className = "plan-body";
+    if (plan.source === "auto") {
+      const hint = document.createElement("div");
+      hint.className = "plan-hint";
+      hint.textContent = "план не задан — показываю выполненные шаги";
+      body.appendChild(hint);
+    }
+    for (const it of plan.items) {
+      const row = document.createElement("div");
+      row.className = "plan-item " + (PLAN_ICON[it.status] ? "st-" + it.status : "st-pending");
+      const ic = document.createElement("span");
+      ic.className = "plan-ic";
+      ic.textContent = PLAN_ICON[it.status] || PLAN_ICON.pending;
+      const tx = document.createElement("span");
+      tx.className = "plan-txt";
+      tx.textContent = it.text;
+      row.appendChild(ic);
+      row.appendChild(tx);
+      if (it.note) {
+        const nt = document.createElement("span");
+        nt.className = "plan-note";
+        nt.textContent = it.note;
+        row.appendChild(nt);
+      } else {
+        row.title = PLAN_TEXT[it.status] || "";
+      }
+      body.appendChild(row);
+    }
+    group.appendChild(body);
+    host.appendChild(group);
+  }
+
+  // Ждёт ли план запуска: последний ответ ассистента помечен режимом плана.
+  function planPending(chat) {
+    if (!chat || !Array.isArray(chat.messages)) return false;
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+      const m = chat.messages[i];
+      if (m.role !== "assistant") continue;
+      return !!m.plan;
+    }
+    return false;
+  }
   // ─────────────── Рендер ───────────────
   function renderSidebar() {
     const list = $("chat-list");
@@ -592,6 +845,7 @@
   function renderMessages() {
     maybeRestoreUndoButton();
     updateModelNeeded();
+    renderPlanPanel();
     const wrap = $("messages");
     wrap.innerHTML = "";
     msgEls.clear();
@@ -654,6 +908,17 @@
   // ─── Размышления модели (как в Replit) — блок над ответом, свёртывается по клику ───
   // При стриминге раскрыт и обновляется вживую; по завершении автоматически
   // сворачивается в одну строку (если пользователь сам не открыл его кликом).
+  // Автопрокрутка размышлений: текст растёт — блок сам едет вниз, читать
+  // конец вручную не нужно. Если пользователь отлистал вверх (читает ранее
+  // написанное) — не выдёргиваем его и возвращаемся к автопрокрутке, когда он
+  // снова окажется у конца.
+  function thinkAutoScroll(body, force) {
+    if (!body) return;
+    if (!force && body.dataset && body.dataset.pinned === "0") return;
+    if (body.dataset) body.dataset.pinned = "1";
+    body.scrollTop = body.scrollHeight;
+  }
+
   function ensureThinkBox(el, text) {
     let box = el.querySelector(".think");
     if (!box) {
@@ -676,11 +941,19 @@
       const body = document.createElement("div");
       body.className = "think-body";
       body.textContent = text || "";
+      // Следим, у конца ли пользователь: ушёл вверх — автопрокрутку не навязываем.
+      body.addEventListener("scroll", () => {
+        const nearEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+        body.dataset.pinned = nearEnd ? "1" : "0";
+      });
       head.onclick = (e) => {
         e.stopPropagation();
         box.classList.add("user"); // управление вручную — автосворачивание больше не трогает блок
-        chev.textContent = box.classList.toggle("collapsed") ? "▸" : "▾";
+        const collapsed = box.classList.toggle("collapsed");
+        chev.textContent = collapsed ? "▸" : "▾";
+        if (!collapsed) thinkAutoScroll(body, true); // развернули — сразу показываем конец
       };
+      thinkAutoScroll(body, true);
       box.appendChild(head);
       box.appendChild(body);
       const bubble = el.querySelector(".bubble");
@@ -688,7 +961,10 @@
       else el.appendChild(box);
     } else {
       const body = box.querySelector(".think-body");
-      if (body && body.textContent !== (text || "")) body.textContent = text || "";
+      if (body && body.textContent !== (text || "")) {
+        body.textContent = text || "";
+        thinkAutoScroll(body); // текст вырос — едем вниз вместе с ним
+      }
     }
     return box;
   }
@@ -1189,6 +1465,7 @@
     const text = input.value.trim();
     if (!text || streaming) return;
     lastUndoCount = 0; // новый запуск — счётчик отката обнуляется
+    if (planRotate(getActiveChat())) renderPlanPanel();
     if (!settings.model) {
       // У чипов-действий («Создать файл» и т.п.) не получается выполнить задачу
       // без модели — показываем понятное сообщение в настройках.
@@ -1333,6 +1610,15 @@
         }
         break;
       }
+      case "plan": {
+        // Модель вызвала todoWrite — показываем её план панелью-чеклистом.
+        if (planFromModel(chat, ev)) {
+          planCollapsed = false;
+          renderPlanPanel();
+          persistChatsSoon();
+        }
+        break;
+      }
       case "tool_start":
         if (!chat) break;
         chat.messages.push({ id: uid(), role: "tool", toolName: ev.name, toolArgs: ev.args, toolResult: null, pending: true, createdAt: Date.now() });
@@ -1340,6 +1626,7 @@
         const work = ensureWorkGroup();
         if (toolEl && toolEl.classList) toolEl.classList.add("in-work");
         work.body.appendChild(toolEl);
+        if (planAutoStep(chat, ev)) renderPlanPanel();
         planAdd(ev);
         scrollBottom();
         persistChatsSoon();
@@ -1358,6 +1645,7 @@
             break;
           }
         }
+        if (planAutoResult(chat, ev, toolOk)) renderPlanPanel();
         planSet(ev, toolOk);
         persistChatsSoon();
         // Агент изменил файлы или git — обновляем панель проекта
@@ -1401,6 +1689,17 @@
       }
       case "context": {
         renderContext(ev);
+        break;
+      }
+      case "memory": {
+        // Памятка контекста сохранена в локальный дневник (память диалогов) — плашка
+        if (ev.text) {
+          const mnote = document.createElement("div");
+          mnote.className = "vision-note";
+          mnote.textContent = ev.text;
+          $("messages").appendChild(mnote);
+          scrollBottom();
+        }
         break;
       }
       case "compact": {
@@ -2770,6 +3069,19 @@
           const secs = Math.max(1, Math.min(parseInt((c.args && c.args.seconds) || "5", 10) || 5, 300));
           await new Promise((r) => setTimeout(r, secs * 1000));
           result = "OK — подождал " + secs + " с. Теперь перепроверь состояние (checkPort/checkUrl/backgroundOutput).";
+        } else if (c.name === "todoWrite") {
+          // План работ — чистая структура, работает и в веб-превью.
+          const webTasks = AgentCore.normalizePlanTasks(c.args && (c.args.tasks != null ? c.args.tasks : c.args.items));
+          if (!webTasks.length) {
+            result = "Ошибка: план пуст — пришли непустой массив tasks (до 7 пунктов).";
+          } else {
+            onEvent({ type: "plan", tasks: webTasks, title: String((c.args && c.args.title) || "").slice(0, 80) });
+            const wp = AgentCore.planSummary(webTasks);
+            result =
+              "OK — план показан пользователю: " + wp.done + " из " + wp.total + " готово" +
+              (wp.failed ? ", сбоев: " + wp.failed : "") +
+              ". Продолжай со следующего пункта и после каждого шага вызывай todoWrite заново с полным списком.";
+          }
         } else if (c.name === "semanticSearch") {
           result =
             "⚠️ Семантический поиск (semanticSearch) доступен только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
@@ -2883,6 +3195,9 @@
     $("s-gh-token").value = settings.githubToken || "";
     $("s-allow-agent-push").checked = !!settings.allowAgentPush;
     $("s-agent-auto-commit").checked = settings.agentAutoCommit !== false;
+    $("s-context-memory").checked = settings.contextMemory === true;
+    $("s-context-memory-days").value = settings.contextMemoryDays || 30;
+    renderMemoryStatus();
     $("s-browser-profile").checked = settings.browserProfile !== false;
     renderBrowserProfileInfo();
     if ($("s-browser-connect")) {
@@ -2935,6 +3250,8 @@
     settings.githubToken = $("s-gh-token").value.trim();
     settings.allowAgentPush = !!$("s-allow-agent-push").checked;
     settings.agentAutoCommit = !!$("s-agent-auto-commit").checked;
+    settings.contextMemory = !!$("s-context-memory").checked;
+    settings.contextMemoryDays = Math.max(1, Math.min(3650, parseInt($("s-context-memory-days").value, 10) || 30));
     settings.browserProfile = !!$("s-browser-profile").checked;
     if ($("s-browser-connect")) {
       settings.browserConnect = !!$("s-browser-connect").checked;
@@ -3318,18 +3635,53 @@
   function renderContext(ev) {
     const el = $("ctx-indicator");
     if (!el || !$("ctx-fill") || !$("ctx-text")) return;
-    const pct = Math.max(0, Math.min(100, parseInt(ev && ev.percent, 10) || 0));
     const used = Number((ev && ev.used) || 0);
     const budget = Number((ev && ev.budget) || 0);
+    // Процент считаем от бюджета: при переполнении он честно больше 100, а не
+    // «упирается» в 100 (раньше при 62 000 из 50 000 показывалось «100%»).
+    const pct = budget > 0 ? Math.round((used / budget) * 100) : Math.max(0, parseInt(ev && ev.percent, 10) || 0);
+    const barPct = Math.max(0, Math.min(100, pct));
     const fill = $("ctx-fill");
-    fill.style.width = pct + "%";
-    fill.classList.toggle("warn", pct >= 75 && pct < 92);
-    fill.classList.toggle("danger", pct >= 92);
+    fill.style.width = barPct + "%";
+    fill.classList.toggle("warn", barPct >= 75 && barPct < 92);
+    fill.classList.toggle("danger", barPct >= 92);
     $("ctx-text").textContent = "🧠 " + fmtTokens(used) + " / " + fmtTokens(budget) + " · " + pct + "%";
     el.classList.add("visible");
     el.title =
       "Контекст модели: занято " + used.toLocaleString("ru-RU") + " из " + budget.toLocaleString("ru-RU") +
-      " токенов (" + pct + "%). История и схема инструментов. При заполнении старая часть автоматически сжимается в памятку.";
+      " токенов (" + pct + "%). Это история переписки и схема инструментов; оценка приблизительная (по символам), а не точный счёт токенов модели." +
+      (pct > 100
+        ? " Сейчас занято БОЛЬШЕ бюджета: текущий шаг (твоё сообщение и результаты инструментов) не сжимается и уходит целиком. Перед следующим запросом история снова обрезается до бюджета, а при переполнении старая часть сворачивается в памятку."
+        : " При заполнении старая часть автоматически сжимается в памятку.");
+  }
+
+  // 🧠 Память диалогов: включена ли и сколько памяток уже сохранено.
+  async function renderMemoryStatus() {
+    const el = $("memory-status");
+    if (!el) return;
+    const dirEl = $("memory-dir");
+    const on = !!(($("s-context-memory") || {}).checked);
+    if (!on) {
+      el.textContent = "Выключено: сжатые памятки на диск не пишутся. Включи галочку — и агент сможет вспоминать прошлые сессии по датам.";
+      if (dirEl) dirEl.textContent = "—";
+      return;
+    }
+    if (!isElectron || !api.memoryStats) {
+      el.textContent = "Память диалогов работает в desktop-приложении (в веб-превью недоступна).";
+      return;
+    }
+    try {
+      const r = await api.memoryStats();
+      if (dirEl && r && r.dir) dirEl.textContent = r.dir;
+      if (!r || !r.days) {
+        el.textContent = "Памяток пока нет — они появятся, когда контекст переполнится и старые шаги свернутся в памятку.";
+        return;
+      }
+      const kb = r.bytes ? " · " + (r.bytes / 1024).toFixed(0) + " КБ" : "";
+      el.textContent = "Сохранено дней: " + r.days + " · памяток: " + r.memos + kb + (r.newest ? " · последняя запись " + r.newest : "") + " · храним " + (r.keepDays || 30) + " дн.";
+    } catch {
+      el.textContent = "Не удалось прочитать состояние памяти диалогов.";
+    }
   }
 
   // Состояние постоянного профиля браузера агента: включён ли и есть ли папка на диске.
@@ -3515,6 +3867,13 @@
     try {
       const st = await api.ycStatus();
       ycStatusCache = st;
+      // Держим локальный объект настроек синхронным: иначе устаревший ycFolderId
+      // из формы мог бы затереть только что выбранный каталог при «Сохранить».
+      if (st) {
+        if (st.folderId !== undefined) settings.ycFolderId = st.folderId;
+        if (st.folderName !== undefined) settings.ycFolderName = st.folderName;
+        if (st.cloudId !== undefined) settings.ycCloudId = st.cloudId;
+      }
       const acc = $("yc-conn-account");
       if (st.loggedIn && st.iamOk) {
         $("yc-conn-status").textContent = "✅ Подключено" + (st.folderName ? " · каталог «" + st.folderName + "»" : "");
@@ -3925,6 +4284,10 @@
     const sel = $("s-yc-folder");
     const f = (ycStatusCache && ycStatusCache.folders || []).find((x) => x.id === sel.value);
     api.ycSetFolder(sel.value, (f && f.name) || sel.value, (f && f.cloudId) || (ycStatusCache && ycStatusCache.cloudId) || "");
+    // Каталог сохранён в main — отражаем это и в локальном объекте настроек.
+    settings.ycFolderId = sel.value;
+    settings.ycFolderName = (f && f.name) || sel.value;
+    settings.ycCloudId = (f && f.cloudId) || (ycStatusCache && ycStatusCache.cloudId) || "";
     ycStatusCache = null;
     ycServicesCache = null;
     toast("Каталог: " + (f && f.name ? f.name : sel.value));
@@ -6831,6 +7194,30 @@
   $("btn-ota-open").onclick = () => {
     if (isElectron) api.otaOpenDir();
   };
+  // ── 🧠 Память диалогов: открыть папку и очистить дневник ──
+  if ($("btn-memory-open")) $("btn-memory-open").onclick = async () => {
+    if (!isElectron || !api.memoryOpenDir) {
+      toast("Память диалогов доступна в приложении на ПК");
+      return;
+    }
+    const r = await api.memoryOpenDir();
+    if (r && r.ok) toast("Открываю папку памяти диалогов");
+    else toast("⚠ Не удалось открыть папку" + (r && r.error ? ": " + r.error : ""));
+  };
+  if ($("btn-memory-clear")) $("btn-memory-clear").onclick = () => {
+    if (!isElectron || !api.memoryClear) return;
+    confirmModal(
+      "Удалить все сохранённые памятки?",
+      "Будут удалены все дни дневника памяти диалогов. Переписка в чатах и заметки проекта не затрагиваются.",
+      () => {
+        api.memoryClear("").then((r) => {
+          toast(r && r.ok ? "🧠 " + r.message : "⚠ Ошибка очистки памяти диалогов");
+          renderMemoryStatus();
+        });
+      }
+    );
+  };
+  if ($("s-context-memory")) $("s-context-memory").addEventListener("change", renderMemoryStatus);
   $("btn-toggle-vision-key").onclick = () => toggleKey("s-vision-key");
   $("btn-toggle-serper-key").onclick = () => toggleKey("s-serper-key");
   if ($("btn-mail-eye")) $("btn-mail-eye").onclick = () => toggleKey("s-mail-pass");

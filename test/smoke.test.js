@@ -1374,20 +1374,21 @@ async function testYcDiagnosis() {
 
   const realFetch = global.fetch;
   try {
-    await test("yc: адреса сервисов — logging/logGroups и существующий хост Postbox", async () => {
+    await test("yc: адреса сервисов — logging/logGroups и SES-путь Postbox", async () => {
       const lg = yc.SERVICES.find((s) => s.key === "logging");
       assert.strictEqual(lg.listPath, "/logging/v1/logGroups", "неверный путь лог-групп");
       const f = makeFetch((url) => {
         if (url.includes("/endpoints")) return { body: {} }; // нет списка эндпоинтов → фолбэк
         if (url.includes("/iam/v1/tokens")) return { body: iamBody() };
-        return { body: { addresses: [] } };
+        return { body: { Identities: [] } };
       });
       global.fetch = f;
       yc.resetIamCache();
       await yc.listService("oauth", "folder1", yc.serviceByKey("postbox"));
       const url = f.calls.find((u) => u.includes("postbox"));
-      assert.ok(/^https:\/\/postbox\.cloud\.yandex\.net\//.test(url), "неверный адрес Postbox: " + url);
-      assert.ok(url.includes("folderId=folder1"), "нет folderId: " + url);
+      assert.ok(/^https:\/\/postbox\.cloud\.yandex\.net\/v2\/email\/identities/.test(url), "неверный адрес Postbox: " + url);
+      // folderId у SES-API нет: свои параметры (PageSize), см. отдельный тест.
+      assert.ok(!url.includes("folderId="), "SES-запрос получил непонятный ему folderId: " + url);
     });
 
     await test("yc: сетевой сбой повторяется (2 попытки), 403 — нет и подписан адресом", async () => {
@@ -1436,7 +1437,9 @@ async function testYcDiagnosis() {
       yc.resetIamCache();
       const res = await yc.resourcesStatus("oauth", "f1");
       assert.deepStrictEqual(res.map((s) => s.key), yc.SERVICES.map((s) => s.key), "порядок карточек поехал");
-      assert.ok(f.stats().maxInflight <= 3, "залп запросов: " + f.stats().maxInflight);
+      // Пачка из 3 + не больше одного фонового запроса каталога эндпоинтов.
+      assert.ok(f.stats().maxInflight <= 4, "залп запросов: " + f.stats().maxInflight);
+      assert.ok(f.calls.filter((u) => u.includes("/endpoints")).length <= 1, "каталог эндпоинтов дёргается повторно");
       const broken = res.filter((s) => !s.ok);
       assert.ok(broken.length > 0 && broken.every((s) => /Сеть:|Таймаут:|\[/.test(s.error)), "непонятная ошибка: " + (broken[0] || {}).error);
       assert.ok(res.find((s) => s.key === "vpc" && s.ok), "vpc должен был ответить");
@@ -1800,9 +1803,52 @@ async function testSessionExtras() {
     assert.strictEqual(ctx.fmtTokens(20000), "20k");
   });
 
+  await test("контекст: переполнение показывается честно (>100%), а не «100%»", () => {
+    ctx.renderContext({ used: 62000, budget: 50000, percent: 100 });
+    assert.strictEqual(dom["ctx-text"].textContent, "🧠 62k / 50k · 124%");
+    assert.strictEqual(dom["ctx-fill"].style.width, "100%", "полоска должна упираться в 100%");
+    assert.ok(cls.has("danger"), "нет красного при переполнении");
+    assert.ok(/БОЛЬШЕ бюджета/.test(dom["ctx-indicator"].title), "нет объяснения переполнения");
+    assert.ok(/приблизительная/.test(dom["ctx-indicator"].title), "нет оговорки про оценку");
+    assert.ok(/текущий шаг/.test(dom["ctx-indicator"].title), "не сказано, что текущий шаг не сжимается");
+    // Без бюджета падаем на присланный процент
+    ctx.renderContext({ used: 100, budget: 0, percent: 40 });
+    assert.strictEqual(dom["ctx-text"].textContent, "🧠 100 / 0 · 40%");
+  });
+
   await test("контекст: индикатор скрыт по умолчанию (до первого ответа)", () => {
     assert.ok(/\.ctx-indicator \{[\s\S]{0,80}display: none;/.test(cssSrc), "нет скрытого состояния в styles.css");
     assert.ok(/\.ctx-indicator\.visible \{ display: flex; \}/.test(cssSrc), "нет класса visible");
+  });
+
+  await test("ход работ: заголовок панели липкий, размышления прокручиваются сами", () => {
+    const headRule = (cssSrc.match(/\.work-group\.expanded \.work-head \{[\s\S]{0,300}?\}/) || [])[0] || "";
+    assert.ok(/position: sticky/.test(headRule), "заголовок панели действий не липкий — свернуть можно только пролистав наверх");
+    assert.ok(/top: 0/.test(headRule), "нет привязки к верху панели");
+    assert.ok(/z-index/.test(headRule), "заголовок не поднят над строками действий");
+    assert.ok(/background/.test(headRule), "нет плотного фона — строки будут просвечивать сквозь заголовок");
+    assert.ok(appSrc.includes("function thinkAutoScroll(body, force)"), "нет автопрокрутки размышлений");
+    assert.ok(/thinkAutoScroll\(body\); \/\/ текст вырос/.test(appSrc), "автопрокрутка не вызывается при стриминге");
+    assert.ok(/thinkAutoScroll\(body, true\)/.test(appSrc), "разворот блока не показывает конец размышлений");
+    assert.ok(appSrc.includes("body.dataset.pinned"), "нет учёта ручной прокрутки пользователя");
+
+    // Поведенчески — на настоящем коде app.js: тянем вниз, но не выдёргиваем
+    // пользователя, который сам читает выше.
+    const t0 = appSrc.indexOf("function thinkAutoScroll(body, force) {");
+    const t1 = appSrc.indexOf("\n  }\n", t0);
+    assert.ok(t0 > 0 && t1 > t0, "не нашёл thinkAutoScroll в app.js");
+    const thinkAutoScroll = new Function(appSrc.slice(t0, t1 + 4) + "\nreturn thinkAutoScroll;")();
+    const mkBody = () => ({ dataset: {}, scrollTop: 0, scrollHeight: 900, clientHeight: 200 });
+    const a = mkBody();
+    thinkAutoScroll(a);
+    assert.strictEqual(a.scrollTop, 900, "текст вырос, а блок не поехал вниз");
+    assert.strictEqual(a.dataset.pinned, "1", "не запомнили, что пользователь у конца");
+    const b = mkBody();
+    b.dataset.pinned = "0"; // пользователь отлистал вверх и читает
+    thinkAutoScroll(b);
+    assert.strictEqual(b.scrollTop, 0, "выдёргнули пользователя из чтения");
+    thinkAutoScroll(b, true);
+    assert.strictEqual(b.scrollTop, 900, "принудительная прокрутка (разворот блока) не сработала");
   });
 
   await test("профиль браузера: разметка, preload и обработчики согласованы", () => {
@@ -2335,6 +2381,35 @@ async function testYandexCloud() {
   const ycLogs = require(path.join(ROOT, "src", "yc-logs.js"));
   const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
   const http2 = require("http2");
+  const yc = require(path.join(ROOT, "src", "yandex-cloud.js"));
+  const ycSrc = fs.readFileSync(path.join(ROOT, "src", "yandex-cloud.js"), "utf8");
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+  // Тот же простой мок сети, что и в yc-тестах выше: считает запросы и «в полёте».
+  const makeFetch = (route) => {
+    let inflight = 0;
+    let maxInflight = 0;
+    const calls = [];
+    const f = async (url, opts) => {
+      inflight++;
+      maxInflight = Math.max(maxInflight, inflight);
+      calls.push(String(url));
+      try {
+        const r = route(String(url), opts) || {};
+        if (r.throw) throw r.throw;
+        return {
+          ok: r.status ? r.status < 400 : true,
+          status: r.status || 200,
+          async text() { return r.body == null ? "" : JSON.stringify(r.body); },
+        };
+      } finally {
+        inflight--;
+      }
+    };
+    f.calls = calls;
+    f.stats = () => ({ maxInflight, count: calls.length });
+    return f;
+  };
 
   await test("yc-logs: протобаф — критерий запроса и разбор ответа (уровень, ресурс, время)", () => {
     const req = ycLogs.buildReadRequest({
@@ -2530,10 +2605,15 @@ async function testYandexCloud() {
     const main = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
     assert.ok(main.includes('require("./yc-cli.js")') && main.includes('require("./yc-logs.js")'), "модули не подключены");
     assert.ok(/function ycAutoEnv\(s\)/.test(main), "нет ycAutoEnv");
-    assert.ok(/out\.YC_TOKEN = cfg\.oauth/.test(main), "токен не подставляется");
+    // yc CLI принимает в YC_TOKEN/YC_IAM_TOKEN только IAM-токен: OAuth там даёт
+    // «The token is invalid», поэтому в env идёт свежий IAM из обмена OAuth→IAM.
+    assert.ok(/out\.YC_IAM_TOKEN = iam/.test(main) && /out\.YC_TOKEN = iam/.test(main), "свежий IAM не подставляется");
+    assert.ok(!/out\.YC_TOKEN = cfg\.oauth/.test(main), "в YC_TOKEN по-прежнему кладётся OAuth-токен");
+    assert.ok(/const iam = ycIamEnvToken\(cfg\)/.test(main), "нет проверки свежести снимка IAM");
+    assert.ok(/getIamTokenInfo\(cfg\.oauth\)/.test(main), "IAM берётся без срока жизни");
     assert.ok(/out\.YC_CLOUD_ID = cfg\.cloudId/.test(main), "cloudId не подставляется");
     assert.ok(/out\.YC_FOLDER_ID = cfg\.folderId/.test(main), "folderId не подставляется");
-    assert.ok(main.includes("agentEnv = { ...userAgentEnv, ...ycAutoEnv(s) }"), "окружение не собирается из двух частей");
+    assert.ok(main.includes("agentEnv = { ...userAgentEnv, ...ycAutoEnv(lastAgentEnvSettings) }"), "окружение не собирается из двух частей");
     assert.ok(main.includes("applyAgentEnv(s);"), "loadSettings не пересобирает окружение");
     assert.ok(main.includes("applyAgentEnv(merged);"), "смена настроек не пересобирает окружение");
     // Автоподстановка не должна оседать в настройках: сохраняем только пользовательское.
@@ -2592,7 +2672,7 @@ async function testYandexCloud() {
     const code = main.slice(s0, s1);
 
     const mkApi = (logGroup) => {
-      const captured = { token: "", svc: "", read: null };
+      const captured = { token: "", svcs: [], read: null };
       const sandbox = {
         yandexCloud: {
           getIamToken: async (t) => {
@@ -2600,8 +2680,9 @@ async function testYandexCloud() {
             return "iam-1";
           },
           endpoint: async (svc) => {
-            captured.svc = svc;
-            return "https://logging.test";
+            captured.svcs.push(svc);
+            // Разные адреса намеренно разные: REST-группы и gRPC-чтение — разные хосты.
+            return svc === "log-reading" ? "https://reader.test" : "https://logging.test";
           },
         },
         ycLogs: {
@@ -2620,8 +2701,9 @@ async function testYandexCloud() {
     assert.strictEqual(ok.api.YC_RESOURCE_TYPES.serverlessContainers, "serverless.container");
     const text = await ok.api.readYcLogsText({ oauth: "y0", folderId: "f1" }, "serverlessContainers", "cont-9", { limit: 7, sinceHours: 12 });
     assert.strictEqual(ok.captured.token, "y0", "IAM-токен должен браться из настроек");
-    assert.strictEqual(ok.captured.svc, "logging", "адрес берётся у сервиса logging");
-    assert.strictEqual(ok.captured.read.baseUrl, "https://logging.test");
+    assert.deepStrictEqual(ok.captured.svcs, ["logging", "log-reading"], "адреса берутся у сервисов logging и log-reading");
+    assert.strictEqual(ok.captured.read.baseUrl, "https://logging.test", "группы читаются не с logging");
+    assert.strictEqual(ok.captured.read.grpcBaseUrl, "https://reader.test", "записи читаются не с log-reading");
     assert.strictEqual(ok.captured.read.folderId, "f1");
     assert.deepStrictEqual(ok.captured.read.resourceIds, ["cont-9"]);
     assert.deepStrictEqual(ok.captured.read.resourceTypes, ["serverless.container"], "тип ресурса выводится из ключа сервиса");
@@ -2637,6 +2719,213 @@ async function testYandexCloud() {
     const empty = mkApi({ logGroupId: "g", logGroupName: "", entries: [] });
     const emptyText = await empty.api.readYcLogsText({ oauth: "y", folderId: "f" }, "", "id", {});
     assert.ok(/Логов за последние 3 ч нет/.test(emptyText), "сообщение: " + emptyText);
+  });
+
+  // ── Адреса Cloud Logging разведены: REST-группы ≠ gRPC-чтение ──────────────
+  await test("yc-logs: чтение идёт на log-reading, группы — на logging (это два разных хоста)", async () => {
+    assert.ok(
+      /"log-reading": "https:\/\/reader\.logging\.yandexcloud\.net"/.test(ycSrc),
+      "в KNOWN_ENDPOINTS нет log-reading — при недоступном каталоге читать логи нечем"
+    );
+    assert.ok(/"log-ingestion": "https:\/\/ingester\.logging\.yandexcloud\.net"/.test(ycSrc), "нет log-ingestion");
+
+    // Живой gRPC-сервер отвечает только за «чтение», а список групп приходит из
+    // ПОДСТАВНОГО REST (другой адрес) — если бы код послал gRPC на REST-хост, чтения не было бы.
+    const resource = Buffer.concat([ycLogs.pbString(1, "serverless.container"), ycLogs.pbString(2, "cont-7")]);
+    const entry = Buffer.concat([ycLogs.pbString(1, "u"), ycLogs.pbMessage(2, resource), ycLogs.pbInt(6, 3), ycLogs.pbString(7, "log line")]);
+    const respBuf = Buffer.concat([ycLogs.pbString(1, "grp"), ycLogs.pbMessage(2, entry)]);
+    let seenAuthority = "";
+    const server = http2.createServer();
+    server.on("stream", (stream, headers) => {
+      seenAuthority = String(headers[":authority"] || "");
+      const h = Buffer.alloc(5);
+      h.writeUInt8(0, 0);
+      h.writeUInt32BE(respBuf.length, 1);
+      stream.respond({ ":status": 200, "content-type": "application/grpc+proto", "grpc-status": "0" });
+      stream.end(Buffer.concat([h, respBuf]));
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const port = server.address().port;
+    let restUrl = "";
+    try {
+      const res = await ycLogs.readLogs({
+        iamToken: "t",
+        baseUrl: "https://logging.api.cloud.yandex.net",
+        grpcBaseUrl: "http://127.0.0.1:" + port,
+        folderId: "folder-1",
+        limit: 5,
+        fetchImpl: async (u) => {
+          restUrl = String(u);
+          return { ok: true, status: 200, text: async () => JSON.stringify({ groups: [{ id: "grp", name: "default" }] }) };
+        },
+      });
+      assert.ok(restUrl.startsWith("https://logging.api.cloud.yandex.net/logging/v1/logGroups"), "группы ушли не на REST-хост: " + restUrl);
+      assert.strictEqual(seenAuthority, "127.0.0.1:" + port, "gRPC ушёл не на grpcBaseUrl: " + seenAuthority);
+      assert.strictEqual(res.entries.length, 1);
+      assert.strictEqual(res.entries[0].message, "log line");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+
+    // Известен id группы — REST-запрос за списком не нужен вовсе.
+    let restCalls = 0;
+    const srv2 = http2.createServer();
+    srv2.on("stream", (stream) => {
+      const h = Buffer.alloc(5);
+      h.writeUInt8(0, 0);
+      h.writeUInt32BE(respBuf.length, 1);
+      stream.respond({ ":status": 200, "content-type": "application/grpc+proto", "grpc-status": "0" });
+      stream.end(Buffer.concat([h, respBuf]));
+    });
+    await new Promise((r) => srv2.listen(0, "127.0.0.1", r));
+    try {
+      const res2 = await ycLogs.readLogs({
+        iamToken: "t",
+        baseUrl: "https://logging.api.cloud.yandex.net",
+        grpcBaseUrl: "http://127.0.0.1:" + srv2.address().port,
+        folderId: "f",
+        logGroupId: "grp-known",
+        fetchImpl: async () => {
+          restCalls++;
+          return { ok: true, status: 200, text: async () => "{}" };
+        },
+      });
+      assert.strictEqual(restCalls, 0, "лишний REST-запрос при известном id группы");
+      assert.strictEqual(res2.logGroupId, "grp-known");
+      assert.strictEqual(res2.entries.length, 1);
+    } finally {
+      await new Promise((r) => srv2.close(r));
+    }
+  });
+
+  await test("yc: catalog не ждётся — первый запрос уходит сразу, каталог догружается в фоне", async () => {
+    const realFetch = global.fetch;
+    try {
+      // Каталог эндпоинтов «висит» — адрес всё равно должен вернуться мгновенно.
+      global.fetch = () => new Promise(() => {});
+      const t0 = Date.now();
+      const guard = () => new Promise((r) => setTimeout(() => r("__timeout__"), 1500));
+      const addr = await Promise.race([yc.endpoint("log-reading"), guard()]);
+      const ms = Date.now() - t0;
+      assert.strictEqual(addr, "https://reader.logging.yandexcloud.net", "адрес: " + addr);
+      assert.ok(ms < 600, "endpoint ждал сеть " + ms + " мс");
+      // Второй сервис из выверенного списка тоже отдаётся мгновенно.
+      const addr2 = await Promise.race([yc.endpoint("log-ingestion"), guard()]);
+      assert.strictEqual(addr2, "https://ingester.logging.yandexcloud.net", "адрес: " + addr2);
+      // Адрес сервиса, которого нет в KNOWN, и правда требует каталога — в этом и
+      // смысл фолбэка, поэтому такой id здесь не проверяем (сеть подделана «висящей»).
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("yc: в env идёт свежий IAM (YC_IAM_TOKEN/YC_TOKEN), OAuth туда не попадает", () => {
+    const i0 = mainSrc.indexOf("let ycIamEnv = null; // { token, expiresAtMs, forOauth }");
+    const i1 = mainSrc.indexOf("// Пересобрать окружение без сети");
+    assert.ok(i0 > 0 && i1 > i0, "не нашёл блок IAM-окружения в main.js");
+    const box = { yc: null };
+    const mod = new Function(
+      "ycConfig",
+      mainSrc.slice(i0, i1) + "\nreturn { ycAutoEnv, ycIamEnvToken, setIam: (v) => { ycIamEnv = v; } };"
+    )((s) => s);
+    const cfg = { oauth: "OAUTH-SECRET", cloudId: "b1g", folderId: "f1" };
+
+    // Пока IAM не получен — переменных с токеном нет вовсе (раньше сюда попадал OAuth).
+    const out = mod.ycAutoEnv(cfg);
+    assert.strictEqual(out.YC_CLOUD_ID, "b1g");
+    assert.strictEqual(out.YC_FOLDER_ID, "f1");
+    assert.ok(!("YC_TOKEN" in out), "OAuth утёк в YC_TOKEN");
+    assert.ok(!("YC_IAM_TOKEN" in out), "пустой IAM попал в env");
+
+    // Свежий IAM подставляется в оба имени.
+    mod.setIam({ token: "IAM-FRESH", expiresAtMs: Date.now() + 3600 * 1000, forOauth: "OAUTH-SECRET" });
+    const out2 = mod.ycAutoEnv(cfg);
+    assert.strictEqual(out2.YC_IAM_TOKEN, "IAM-FRESH");
+    assert.strictEqual(out2.YC_TOKEN, "IAM-FRESH");
+    assert.strictEqual(mod.ycIamEnvToken(cfg), "IAM-FRESH");
+
+    // Просроченный — не подставляем (yc CLI сказал бы «The token is invalid»).
+    mod.setIam({ token: "IAM-OLD", expiresAtMs: Date.now() - 1000, forOauth: "OAUTH-SECRET" });
+    assert.strictEqual(mod.ycIamEnvToken(cfg), "");
+    assert.ok(!("YC_IAM_TOKEN" in mod.ycAutoEnv(cfg)), "просроченный IAM ушёл в env");
+
+    // Токен от другого OAuth-аккаунта не используем.
+    mod.setIam({ token: "IAM-OTHER", expiresAtMs: Date.now() + 3600 * 1000, forOauth: "ДРУГОЙ" });
+    assert.strictEqual(mod.ycIamEnvToken(cfg), "");
+  });
+
+  await test("yc: ycInstall пересобирает окружение, а токен продлевается заранее", () => {
+    assert.ok(
+      /applyAgentEnv\(loadSettings\(\)\);\n          const iamReady/.test(mainSrc),
+      "после установки yc CLI окружение не пересобирается"
+    );
+    assert.ok(/applyAgentEnv\(loadSettings\(\)\);/.test(mainSrc), "нет пересборки окружения в ycInstall");
+    assert.ok(/getIamTokenInfo\(cfg\.oauth\)/.test(mainSrc), "main.js не берёт срок жизни IAM");
+    assert.ok(/YC_IAM_REFRESH_MARGIN = 5 \* 60 \* 1000/.test(mainSrc), "нет запаса на продление IAM");
+    assert.ok(/ycIamTimer\.unref/.test(mainSrc), "таймер продления держит процесс");
+    assert.ok(/Date\.now\(\) - ycIamLastTryTs < 60 \* 1000/.test(mainSrc), "нет ограничения частоты обращений к IAM");
+    // Тексты (промпт и интерфейс) больше не обещают YC_TOKEN как OAuth.
+    assert.ok(/YC_IAM_TOKEN — свежий IAM/.test(coreSrc), "промпт не упоминает YC_IAM_TOKEN");
+    assert.ok(!/автоматически \(YC_TOKEN \/ YC_CLOUD_ID/.test(coreSrc), "в промпте остался старый текст про YC_TOKEN");
+  });
+
+  await test("yc: Postbox спрашивается как SES v2 (путь, заголовок, диагностика 403)", async () => {
+    const pb = yc.serviceByKey("postbox");
+    assert.strictEqual(pb.listPath, "/v2/email/identities", "Postbox: неверный путь (был выдуманный /postbox/v1/addresses)");
+    assert.strictEqual(pb.listKey, "Identities");
+    assert.strictEqual(pb.auth, "subject");
+    assert.strictEqual(pb.query, "ses");
+    assert.strictEqual(yc.serviceQuery(pb, "folder1"), "?PageSize=100", "SES не понимает folderId/pageSize");
+
+    const realFetch = global.fetch;
+    try {
+      let seenUrl = "";
+      let seenHeaders = {};
+      const iamJson = () => ({ iamToken: "t", expiresAt: new Date(Date.now() + 3600e3).toISOString() });
+      global.fetch = makeFetch((url, opts) => {
+        if (url.includes("/endpoints")) return { body: {} };
+        if (url.includes("/iam/v1/tokens")) return { body: iamJson() };
+        seenUrl = String(url);
+        seenHeaders = (opts && opts.headers) || {};
+        return { body: { Identities: ["mail.example.ru"] } };
+      });
+      yc.resetIamCache();
+      const r = await yc.listService("oauth", "folder1", pb);
+      assert.strictEqual(r.count, 1, "адреса Postbox не разобрались: " + JSON.stringify(r.items));
+      assert.strictEqual(r.items[0], "mail.example.ru");
+      assert.ok(/^https:\/\/postbox\.cloud\.yandex\.net\/v2\/email\/identities\?PageSize=100$/.test(seenUrl), "URL: " + seenUrl);
+      assert.strictEqual(seenHeaders["X-YaCloud-SubjectToken"], "t", "IAM не ушёл в X-YaCloud-SubjectToken");
+      assert.ok(!seenHeaders.Authorization, "Postbox не принимает Authorization");
+
+      // 403 объясняется причиной (нужен сервисный аккаунт), а не «Нет доступа».
+      global.fetch = makeFetch((url) => {
+        if (url.includes("/endpoints")) return { body: {} };
+        if (url.includes("/iam/v1/tokens")) return { body: iamJson() };
+        return { status: 403, body: { message: "Forbidden" } };
+      });
+      yc.resetIamCache();
+      const err403 = await yc.listService("oauth", "f1", pb).then(() => null, (e) => e);
+      assert.ok(err403 && /сервисн[а-яё]*\s+аккаунт/i.test(err403.message), "непонятная ошибка: " + (err403 && err403.message));
+      assert.ok(/postbox\.viewer/.test(err403.message), "нет роли в подсказке: " + err403.message);
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("yc: сводка быстрее — короткий таймаут без повторов, облака и каталоги параллельно", () => {
+    const ycSrc2 = fs.readFileSync(path.join(ROOT, "src", "yandex-cloud.js"), "utf8");
+    assert.ok(
+      /Object\.assign\(\{ timeoutMs: 12000, retries: 1 \}, opts \|\| \{\}\)/.test(ycSrc2),
+      "у дашборда нет короткого таймаута по умолчанию"
+    );
+    // Последовательный вызов по-прежнему может себе позволить 2 попытки и 25 с.
+    assert.ok(/o\.retries == null \? 2 :/.test(ycSrc2), "сломан запасной путь с повторами");
+    assert.ok(/async function retryNet\(fn, tries\)/.test(ycSrc2), "нет повторов для облаков/каталогов");
+    assert.ok(/listClouds\(cfg\.oauth\);\n    const foldersP = cfg\.cloudId/.test(mainSrc), "облака и каталоги по-прежнему последовательны");
+    assert.ok(/await yandexCloud\.getIamToken\(cfg\.oauth\);\n    const cloudsP/.test(mainSrc), "обмен токена не вынесен до параллельных запросов");
+    // Каталог эндпоинтов не тормозит запуск.
+    assert.ok(/if \(known\) \{\n    primeEndpoints\(\);\n    return known;/.test(ycSrc2) === false || /primeEndpoints\(\)/.test(ycSrc2), "нет фонового прогрева каталога");
+    assert.ok(/PRIME_MIN_INTERVAL/.test(ycSrc2), "нет ограничения на частые обращения к каталогу");
   });
 
 }
@@ -2655,9 +2944,9 @@ async function testShellAndCdp() {
   const h1 = mainFull.indexOf("// Запуск произвольной команды в терминале");
   assert.ok(h0 > 0 && h1 > h0, "не нашёл блок оболочек в main.js");
   const helpers = mainFull.slice(h0, h1);
-  const mkHelpers = (findProgram) =>
-    new Function("fs", "path", "process", "findProgram", helpers + "; return { normalizeShell, powershellArgs, resolveShell };")(
-      fs, path, process, findProgram
+  const mkHelpers = (findProgram, fsImpl) =>
+    new Function("fs", "path", "process", "findProgram", helpers + "; return { normalizeShell, powershellArgs, resolveShell, findGitShell, shellsStatus, shellsBrief };")(
+      fsImpl || fs, path, process, findProgram
     );
   const H = mkHelpers((name) => ({ found: true, path: "/usr/bin/" + name }));
 
@@ -2691,6 +2980,90 @@ async function testShellAndCdp() {
     assert.ok(/shellArgs: bgShell\.args/.test(bg), "startBackground не передаёт оболочку");
     assert.ok(mainFull.includes('shell: { type: "string", description: "Оболочка: cmd') === false, "описание в main.js не нужно");
     assert.ok(/shell: "powershell"/.test(core2) || /shell: \\"powershell\\"/.test(core2), "нет описания shell у инструмента runCommand");
+  });
+
+  // ── Оболочки: bash/sh через Git for Windows + справочник shellsStatus ────
+  await test("shell: sh и bash находят Git-оболочку и объясняют отсутствие", () => {
+    const noShells = mkHelpers(() => ({ found: false, reason: "нет" }), { existsSync: () => false });
+    for (const kind of ["bash", "sh"]) {
+      const r = noShells.resolveShell("echo hi", kind);
+      assert.strictEqual(r.kind, kind);
+      assert.ok(r.shellHint.length > 10, "нет подсказки для " + kind + ": «" + r.shellHint + "»");
+      assert.ok(r.shellHint.includes(kind), "подсказка не называет оболочку: " + r.shellHint);
+      assert.strictEqual(r.shell, kind, "при отсутствии не должно быть молчаливого отката в другую оболочку");
+    }
+    if (process.platform === "win32") {
+      assert.ok(noShells.resolveShell("x", "sh").shellHint.includes("Git for Windows"), "нет совета про Git for Windows для sh");
+    }
+    // Git-бинарь найден → путь подставляется, подсказки нет, bash идёт с -lc
+    const withGit = mkHelpers(
+      (n) => (n === "bash" ? { found: true, path: "C:\\Git\\bin\\bash.exe" } : { found: false, reason: "нет" }),
+      { existsSync: () => false }
+    );
+    const rb = withGit.resolveShell("echo $HOME", "bash");
+    assert.strictEqual(rb.shell, "C:\\Git\\bin\\bash.exe", "путь Git-оболочки не подставлен: " + rb.shell);
+    assert.strictEqual(rb.shellHint, "");
+    assert.deepStrictEqual(rb.args, ["-lc", "echo $HOME"]);
+    if (process.platform !== "win32") {
+      // На Unix sh живёт в /bin/sh — это не ошибка и подсказки быть не должно
+      const unixSh = mkHelpers(() => ({ found: false, reason: "нет" }), { existsSync: (p) => p === "/bin/sh" });
+      const rs = unixSh.resolveShell("echo hi", "sh");
+      assert.strictEqual(rs.shellHint, "", "на Unix /bin/sh не должен считаться отсутствующим");
+      assert.ok(/bin\/sh/.test(rs.shell), "нет пути к sh: " + rs.shell);
+    }
+    assert.strictEqual(noShells.resolveShell("x", "bash").missing, true, "нет флага missing у bash");
+    assert.strictEqual(withGit.resolveShell("echo $HOME", "bash").missing, false, "найденный bash помечен отсутствующим");
+    const allOk = mkHelpers(() => ({ found: true, path: "/usr/bin/sh" }), { existsSync: () => true });
+    assert.strictEqual(allOk.resolveShell("echo hi", "").missing, false, "оболочка по умолчанию не может быть missing");
+  });
+
+  await test("shellsStatus: агент видит доступные оболочки и получает советы по установке", () => {
+    const win = process.platform === "win32";
+    const all = mkHelpers((n) => ({ found: true, path: "/usr/bin/" + n }), { existsSync: () => true });
+    const st = all.shellsStatus();
+    const kinds = st.map((s) => s.kind);
+    const expected = win ? ["cmd", "powershell", "pwsh", "bash", "sh"] : ["sh", "powershell", "pwsh", "bash"];
+    assert.deepStrictEqual(kinds, expected, "состав отчёта: " + kinds.join(","));
+    assert.strictEqual(st.filter((s) => s.def).length, 1, "должна быть ровно одна оболочка по умолчанию");
+    assert.strictEqual(st[0].def, true, "оболочка по умолчанию идёт первой");
+    assert.ok(st.every((s) => s.available), "всё найдено, а отчёт говорит иначе: " + JSON.stringify(st));
+
+    const none = mkHelpers(() => ({ found: false, reason: "нет" }), { existsSync: () => false });
+    const st2 = none.shellsStatus();
+    assert.ok(st2.every((s) => !s.available), "ничего не найдено, а отчёт говорит обратное");
+    for (const s of st2) assert.ok(s.hint.length > 5, "нет совета для отсутствующей " + s.kind);
+
+    const brief = all.shellsBrief();
+    assert.ok(/^по умолчанию /.test(brief), "строка САММАРИ не начинается с «по умолчанию»: " + brief);
+    assert.ok(brief.includes("доступно: "), "нет списка доступного: " + brief);
+    assert.ok(brief.includes("powershell"), "в САММАРИ нет powershell");
+  });
+
+  await test("shellsStatus: инструмент, промпт, ядро инструментов и САММАРИ проекта согласованы", () => {
+    assert.ok(/name: "shellsStatus"/.test(core2), "нет описания инструмента");
+    assert.ok(/timeoutCommand, shellsStatus, checkInstalledProgram/.test(core2), "нет в списке инструментов промпта");
+    assert.ok(/"shellsStatus",/.test(core2), "нет в ядре инструментов (тесный контекст)");
+    assert.ok(/shells_status: "shellsStatus"/.test(core2), "нет алиаса");
+    assert.ok(/вызови shellsStatus/.test(core2), "промпт не велит проверять доступные оболочки");
+    assert.ok(/case "shellsStatus": \{/.test(mainFull), "нет диспетчера в main.js");
+    assert.ok(/parts\.push\("Оболочки: " \+ shellsBrief\(\)\)/.test(mainFull), "нет строки оболочек в САММАРИ проекта");
+  });
+
+  await test("startBackground: без оболочки честная ошибка, а не «OK, PID undefined»", () => {
+    const bg = mainFull.slice(mainFull.indexOf('case "startBackground"'), mainFull.indexOf('case "listBackground"'));
+    assert.ok(/if \(bgShell\.missing\)/.test(bg), "нет предпроверки оболочки");
+    assert.ok(/фоновый процесс НЕ запущен/.test(bg), "нет понятного текста отказа");
+    assert.ok(bg.indexOf("bgShell.missing") < bg.indexOf("bgSpawn("), "предпроверка должна идти до запуска процесса");
+    assert.ok(/shellsStatus/.test(bg), "отказ не подсказывает shellsStatus");
+    assert.ok(/sh\.missing === true/.test(mainFull), "runTerminalCommand игнорирует флаг missing");
+    const H = mkHelpers(() => ({ found: false, reason: "нет" }), { existsSync: () => false });
+    assert.strictEqual(H.resolveShell("x", "bash").missing, true, "bash без Git не помечен отсутствующим");
+    assert.strictEqual(H.resolveShell("x", "sh").missing, true, "sh без Git не помечен отсутствующим");
+    const allOk = mkHelpers(() => ({ found: true, path: "/usr/bin/sh" }), { existsSync: () => true });
+    assert.strictEqual(allOk.resolveShell("echo hi", "").missing, false, "оболочка по умолчанию не может быть missing");
+    const gitOk = mkHelpers(() => ({ found: true, path: "/usr/bin/bash" }), { existsSync: () => true });
+    assert.strictEqual(gitOk.resolveShell("x", "bash").missing, false, "найденная оболочка помечена отсутствующей");
+    assert.strictEqual(gitOk.resolveShell("x", "powershell").missing, false, "powershell не блокируется по PATH");
   });
 
   // ── spawnRaw: системные коды ошибок сохраняются ─────────────────────────
@@ -2873,12 +3246,567 @@ async function testShellAndCdp() {
 }
 
 // ── Запуск ──────────────────────────────────────────────────────────────────
+// ── Память диалогов: сжатые памятки контекста по датам ─────────────────────
+async function testContextMemory() {
+  const store = require(path.join(ROOT, "src", "agent-store.js"));
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+  const preloadSrc = fs.readFileSync(path.join(ROOT, "src", "preload.js"), "utf8");
+  const htmlSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+
+  await test("память: выключено по умолчанию, инструменты, IPC и UI на месте", () => {
+    assert.ok(/contextMemory: false,/.test(mainSrc), "нет contextMemory: false (должно быть выключено по умолчанию)");
+    assert.ok(/contextMemoryDays: 30/.test(mainSrc), "нет contextMemoryDays");
+    assert.ok(/case "memoryList"/.test(mainSrc) && /case "memorySearch"/.test(mainSrc), "нет диспетчера memoryList/memorySearch");
+    assert.ok(/onMemo: \(m\) => saveContextMemo\(settings, m, emit\)/.test(mainSrc), "runAi не подключает onMemo");
+    assert.ok(/function saveContextMemo\(settings, entry, emit\)/.test(mainSrc), "нет saveContextMemo");
+    for (const ch of ["memory:stats", "memory:days", "memory:openDir", "memory:clear"]) {
+      assert.ok(mainSrc.includes('ipcMain.handle("' + ch + '"'), "нет IPC " + ch);
+    }
+    for (const fn of ["memoryStats", "memoryDays", "memoryOpenDir", "memoryClear"]) {
+      assert.ok(preloadSrc.includes(fn + ":"), "нет preload." + fn);
+    }
+    assert.ok(/name: "memoryList"/.test(coreSrc) && /name: "memorySearch"/.test(coreSrc), "нет описаний инструментов");
+    assert.ok(/noteDelete, memoryList, memorySearch, (todoWrite, )?checkpointSave/.test(coreSrc), "инструменты не в списке промпта");
+    assert.ok(/"memoryList", "memorySearch",/.test(coreSrc), "память не в ядре инструментов (тесный контекст)");
+    assert.ok(/memory_list: "memoryList"/.test(coreSrc), "нет алиасов инструментов");
+    assert.ok(htmlSrc.includes('id="s-context-memory"'), "нет галочки в настройках");
+    assert.ok(htmlSrc.includes('data-tab="memory"') && htmlSrc.includes('data-tab-body="memory"'), "нет вкладки настроек");
+    assert.ok(appSrc.includes('settings.contextMemory = !!$("s-context-memory").checked'), "галочка не сохраняется");
+    assert.ok(appSrc.includes("renderMemoryStatus"), "нет отображения статуса памяти");
+  });
+
+  await test("память: сохранение, список дней, чтение и поиск", () => {
+    const ud = tmpdir("ctxmem-");
+    const r1 = store.contextMemorySave(ud, {
+      ts: new Date(2026, 8, 5, 14, 3, 0).getTime(),
+      memo: "Мы делали деплой в Yandex Cloud и починили ycLogs.",
+      messages: [
+        { role: "user", content: "задеплой контейнер" },
+        { role: "assistant", content: "готово, URL получен", tool_calls: [{ function: { name: "ycDeploy" } }] },
+      ],
+      provider: "openai",
+      model: "gpt-4o",
+      workDir: "C:/proj/domofon",
+    });
+    assert.strictEqual(r1.ok, true, r1.error);
+    assert.strictEqual(r1.day, "2026-09-05");
+    assert.strictEqual(r1.count, 1);
+    store.contextMemorySave(ud, { ts: new Date(2026, 8, 5, 18, 0, 0).getTime(), memo: "Починили Postbox.", messages: [], provider: "openai" });
+    store.contextMemorySave(ud, { ts: new Date(2026, 8, 3, 10, 0, 0).getTime(), memo: "Обсуждали браузер и CDP.", messages: [], provider: "anthropic", model: "claude" });
+
+    const days = store.contextMemoryDays(ud);
+    assert.deepStrictEqual(days.map((d) => d.date), ["2026-09-05", "2026-09-03"], "дни неверны: " + JSON.stringify(days));
+    assert.strictEqual(days[0].count, 2);
+
+    const day = store.contextMemoryRead(ud, "2026-09-05");
+    assert.strictEqual(day.ok, true, day.error);
+    assert.strictEqual(day.count, 2);
+    assert.strictEqual(day.memos[0].time, "18:00", "свежая памятка должна идти первой");
+    assert.ok(day.memos[0].memo.includes("Postbox"));
+    assert.strictEqual(day.memos[1].messages, 2, "число сжатых сообщений потеряно");
+    assert.strictEqual(store.contextMemoryRead(ud, "не-дата").ok, false);
+
+    const search = store.contextMemorySearch(ud, { query: "ycLogs" });
+    assert.strictEqual(search.ok, true, search.error);
+    assert.strictEqual(search.count, 1);
+    assert.strictEqual(search.matches[0].date, "2026-09-05");
+    assert.ok(/ycLogs/.test(search.matches[0].snippet), "фрагмент не найден: " + search.matches[0].snippet);
+    assert.strictEqual(store.contextMemorySearch(ud, { query: "Починили", date: "2026-09-03" }).count, 0, "фильтр по дате не работает");
+    assert.strictEqual(store.contextMemorySearch(ud, { query: "" }).ok, false);
+    assert.strictEqual(store.contextMemorySearch(ud, { query: "задеплой" }).count, 1, "поиск не заглядывает в сжатые шаги");
+
+    const md = fs.readFileSync(path.join(store.contextMemoryDir(ud), "2026-09-05", "day.md"), "utf8");
+    assert.ok(/# Сжатые памятки контекста за 2026-09-05/.test(md), "нет заголовка day.md");
+    assert.ok(md.includes("Мы делали деплой в Yandex Cloud"), "day.md не содержит памятку");
+    assert.ok(md.includes("ycDeploy"), "day.md не содержит имён инструментов");
+  });
+
+  await test("память: секреты маскируются в памятке и в шагах", () => {
+    const ud = tmpdir("ctxmem-sec-");
+    const r = store.contextMemorySave(ud, {
+      memo: "Ключ sk-proj-abcdefghijklmnopqrstuvwxyz0123 и AIzaSyA1234567890abcdefghijklmnopqrstuvw",
+      messages: [{ role: "user", content: "Bearer abcdefghijklmnopqrstuvwxyz123456" }],
+      provider: "openai",
+    });
+    assert.strictEqual(r.ok, true, r.error);
+    const text = JSON.stringify(store.contextMemoryRead(ud, r.day));
+    assert.ok(!text.includes("sk-proj-abcdefghijklmnopqrstuvwxyz0123"), "ключ OpenAI не замаскирован");
+    assert.ok(!text.includes("AIzaSyA1234567890abcdefghijklmnopqrstuvw"), "ключ Google не замаскирован");
+    assert.ok(!text.includes("abcdefghijklmnopqrstuvwxyz123456"), "Bearer-токен не замаскирован");
+    assert.ok(text.includes("[секрет скрыт]"), "нет пометки о маскировке");
+    // строки с NUL-байтами и приватные ключи не ломают запись
+    const pk = store.redactSecrets("-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----");
+    assert.ok(!pk.includes("MIIabc"), "приватный ключ не скрыт");
+  });
+
+  await test("память: автоочистка старых дней, статистика и ручная очистка", () => {
+    const ud = tmpdir("ctxmem-prune-");
+    for (let i = 1; i <= 5; i++) {
+      store.contextMemorySave(ud, { ts: new Date(2026, 7, i, 12, 0, 0).getTime(), memo: "день " + i, messages: [], provider: "openai" });
+    }
+    assert.strictEqual(store.contextMemoryDays(ud).length, 5);
+    const pr = store.contextMemoryPrune(ud, 2);
+    assert.strictEqual(pr.removed, 3, "удалено не то число дней: " + pr.removed);
+    assert.deepStrictEqual(store.contextMemoryDays(ud).map((d) => d.date), ["2026-08-05", "2026-08-04"]);
+
+    const st = store.contextMemoryStats(ud);
+    assert.strictEqual(st.days, 2);
+    assert.strictEqual(st.memos, 2);
+    assert.ok(st.bytes > 0, "не посчитан размер");
+    assert.strictEqual(st.newest, "2026-08-05");
+    assert.strictEqual(st.oldest, "2026-08-04");
+    assert.ok(st.dir.includes("context-memory"), "неверная папка: " + st.dir);
+
+    const cl = store.contextMemoryClear(ud, "2026-08-05");
+    assert.strictEqual(cl.removedDays, 1);
+    assert.strictEqual(cl.removedMemos, 1);
+    assert.strictEqual(store.contextMemoryClear(ud, "").removedDays, 1);
+    assert.strictEqual(store.contextMemoryDays(ud).length, 0);
+    assert.strictEqual(store.contextMemoryStats(ud).days, 0);
+    assert.strictEqual(store.contextMemoryClear(ud, "плохо").ok, false);
+  });
+
+  await test("память: пустая памятка файлов не создаёт", () => {
+    const ud = tmpdir("ctxmem-empty-");
+    const r = store.contextMemorySave(ud, { memo: "   ", provider: "openai" });
+    assert.strictEqual(r.ok, false);
+    assert.ok(!fs.existsSync(store.contextMemoryDir(ud)), "создана пустая папка");
+  });
+
+  // ── Хук onMemo в реальном createContextManager ───────────────────────────
+  const realFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, opts) => {
+    calls.push(String(url));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: "ПАМЯТКА: починили ycLogs и деплой." } }] }),
+    };
+  };
+  try {
+    const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+    await test("память: createContextManager зовёт onMemo при сжатии; ошибка хука не ломает сжатие", async () => {
+      const big = "строчка контекста ".repeat(120);
+      const messages = [{ role: "system", content: "sys" }];
+      for (let i = 0; i < 10; i++) {
+        messages.push({ role: "user", content: big + " u" + i });
+        messages.push({ role: "assistant", content: big + " a" + i });
+      }
+      messages.push({ role: "user", content: "текущий вопрос" });
+      const settings = { provider: "openai", model: "gpt-4o", openaiUrl: "https://example.invalid/v1", openaiApiKey: "k" };
+      const got = [];
+      const cm = core.createContextManager({ settings, planMode: false, onMemo: (m) => got.push(m) });
+      const out = await cm.manage(messages, 4000);
+      assert.strictEqual(got.length, 1, "onMemo не вызван (или вызван не раз): " + got.length);
+      assert.ok(/ПАМЯТКА/.test(got[0].text), "текст памятки не передан");
+      assert.strictEqual(got[0].provider, "openai");
+      assert.strictEqual(got[0].model, "gpt-4o");
+      assert.ok(Array.isArray(got[0].messages) && got[0].messages.length >= 10, "исходные сообщения не переданы");
+      assert.ok(calls.length >= 1, "нет запроса на сжатие");
+      assert.ok(Array.isArray(out) && out.length, "manage вернул пусто");
+      assert.ok(out.some((m) => String(m.content || "").includes("ПАМЯТКА")), "памятка не попала в контекст");
+
+      const cm2 = core.createContextManager({ settings, planMode: false });
+      await cm2.manage(messages, 4000);
+      assert.strictEqual(got.length, 1, "вызвался чужой хук");
+
+      const cm3 = core.createContextManager({ settings, planMode: false, onMemo: () => { throw new Error("бум"); } });
+      const out3 = await cm3.manage(messages, 4000);
+      assert.ok(Array.isArray(out3) && out3.length, "ошибка хука сломала manage");
+    });
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
+// ── Каталог Yandex Cloud: сохранение настроек не должно его стирать ────────
+// Симптом: интерфейс каталог видит, а агент — нет; помогало «обновить и сохранить»
+// дважды. Причина: объект настроек интерфейса, загруженный ДО автовыбора каталога,
+// при сохранении приносил пустой ycFolderId и стирал выбор в main.
+async function testYcFolderPersistence() {
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+
+  const a = mainSrc.indexOf('ipcMain.handle("settings:set"');
+  const endMark = "  saveSettings(merged);\n  mobileBridge.applySettings(merged);\n  return merged;\n});";
+  const e = a < 0 ? -1 : mainSrc.indexOf(endMark, a);
+  assert.ok(a > 0 && e > a, "не нашёл обработчик settings:set в main.js");
+  const code = mainSrc.slice(a, e + endMark.length);
+
+  const prevSettings = {
+    workingDir: "/proj",
+    ycFolderId: "b1g2folder",
+    ycFolderName: "prod",
+    ycCloudId: "b1g2cloud",
+    ycAllowAgentCreate: false,
+    ycAllowAgentDelete: false,
+    sitePasswords: [{ id: "a" }],
+    mailPassword: "secret",
+  };
+  let handle = null;
+  const saved = [];
+  new Function(
+    "ipcMain", "loadSettings", "normalizeSettings", "applyAgentEnv",
+    "applyBrowserSettings", "saveSettings", "mobileBridge", "lastAgentRepoDir",
+    code
+  )(
+    { handle: (ch, cb) => { handle = cb; } },
+    () => ({ ...prevSettings }),
+    (x) => ({ ...x }),
+    () => {},
+    () => {},
+    (x) => { saved.push(x); },
+    { applySettings: () => {} },
+    null
+  );
+  assert.strictEqual(typeof handle, "function", "обработчик settings:set не зарегистрировался");
+
+  await test("настройки: сохранение из интерфейса не стирает каталог Yandex Cloud", () => {
+    // Ровно тот случай, из-за которого агент видел «каталог не выбран»:
+    // интерфейс присылает свой устаревший объект с пустыми yc-полями.
+    const merged = handle(null, {
+      workingDir: "/proj",
+      ycFolderId: "",
+      ycFolderName: "",
+      ycCloudId: "",
+      ycAllowAgentCreate: true,
+      someOther: 1,
+    });
+    assert.strictEqual(merged.ycFolderId, "b1g2folder", "каталог стёрт сохранением настроек");
+    assert.strictEqual(merged.ycFolderName, "prod", "имя каталога стёрто");
+    assert.strictEqual(merged.ycCloudId, "b1g2cloud", "облако стёрто");
+    assert.strictEqual(merged.someOther, 1, "обычные поля должны сохраняться");
+    // Разрешения агента менять можно — они есть в форме
+    assert.strictEqual(merged.ycAllowAgentCreate, true, "разрешение агента не применилось");
+    // Защита паролей/почты осталась на месте
+    assert.deepStrictEqual(merged.sitePasswords, [{ id: "a" }], "sitePasswords затёрты");
+    assert.strictEqual(merged.mailPassword, "secret", "mailPassword затёрт");
+    // Устаревший, но НЕпустой каталог тоже не должен перебивать актуальный
+    const merged2 = handle(null, { ycFolderId: "old-folder", ycFolderName: "old", ycCloudId: "old-cloud" });
+    assert.strictEqual(merged2.ycFolderId, "b1g2folder", "устаревший каталог перебил актуальный");
+    // И записано это в настройки, а не только возвращено
+    assert.strictEqual(saved[saved.length - 1].ycFolderId, "b1g2folder", "в файл ушёл стёртый каталог");
+  });
+
+  await test("настройки: актуальный Yandex Cloud попадает в САММАРИ проекта, UI держит синхрон", () => {
+    assert.ok(/function ycBriefLine\(s\)/.test(mainSrc), "нет ycBriefLine");
+    assert.ok(/const ycLine = ycBriefLine\(loadSettings\(\)\)/.test(mainSrc), "YC-строка читает не свежие настройки");
+    assert.ok(/parts\.push\(ycLine\)/.test(mainSrc), "строка YC не попадает в САММАРИ проекта");
+    assert.ok(/Yandex Cloud: каталог «/.test(mainSrc), "нет формулировки про каталог");
+    assert.ok(/каталог НЕ выбран/.test(mainSrc), "нет строки для случая «каталог не выбран»");
+    assert.ok(/settings\.ycFolderId = st\.folderId/.test(appSrc), "UI не синхронизирует каталог из статуса");
+    assert.ok(/settings\.ycFolderId = sel\.value/.test(appSrc), "UI не синхронизирует каталог при выборе");
+    // Инструменты по-прежнему читают свежие настройки, а не снимок начала ответа
+    const ycCases = mainSrc.slice(mainSrc.indexOf('case "ycStatus"'), mainSrc.indexOf('case "ycInstall"'));
+    assert.ok(/ycConfig\(loadSettings\(\)\)/.test(ycCases), "yc-инструменты читают устаревший снимок настроек");
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// План работ агента (todoWrite): чистая логика, хранение, панель, связки.
+// ─────────────────────────────────────────────────────────────────────────────
+async function testPlanPanel() {
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+  const htmlSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "index.html"), "utf8");
+  const cssSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "styles.css"), "utf8");
+  const AgentCore = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+
+  // ── Срез блока плана: чистые функции + отрисовка (без остального приложения) ──
+  const p0 = appSrc.indexOf("  // ─────────── План работ:");
+  const p1 = appSrc.indexOf("  // ─────────────── Рендер ───────────────", p0);
+  assert.ok(p0 > 0 && p1 > p0, "не нашёл блок плана в app.js (маркеры съехали)");
+  const planSrc = appSrc.slice(p0, p1);
+
+  // Игрушечный DOM: ровно те свойства, которые нужны панели.
+  const mkEl = (tag) => {
+    let cls = new Set();
+    let html = "";
+    const el = {
+      tag,
+      children: [],
+      textContent: "",
+      style: {},
+      title: "",
+      onclick: null,
+      appendChild(ch) {
+        el.children.push(ch);
+        return ch;
+      },
+      querySelector() {
+        return null;
+      },
+    };
+    // className и classList должны быть одним состоянием: панель ставит классы
+    // строкой (className) и читает их через classList.contains.
+    Object.defineProperty(el, "className", {
+      get: () => Array.from(cls).join(" "),
+      set: (v) => { cls = new Set(String(v).split(/\s+/).filter(Boolean)); },
+    });
+    Object.defineProperty(el, "innerHTML", {
+      get: () => html,
+      set: (v) => { html = String(v); if (!v) el.children.length = 0; },
+    });
+    el.classList = {
+      add: (c) => cls.add(c),
+      remove: (c) => cls.delete(c),
+      contains: (c) => cls.has(c),
+      toggle: (c, on) => (on === undefined ? (cls.has(c) ? cls.delete(c) : cls.add(c)) : on ? cls.add(c) : cls.delete(c)),
+    };
+    return el;
+  };
+  const nodeText = (n) => (n && n.textContent ? n.textContent : "") + " " + ((n && n.children) || []).map(nodeText).join(" ");
+  const hosts = {};
+  let activeChat = null;
+
+  const deps = {
+    $: (id) => (hosts[id] = hosts[id] || mkEl("div")),
+    document: { createElement: mkEl },
+    getActiveChat: () => activeChat,
+    streaming: false,
+    sendMessage: () => {},
+    autoResize: () => {},
+    persistChatsSoon: () => {},
+    normalizePlanTasks: AgentCore.normalizePlanTasks,
+    TOOL_LABEL: { runCommand: "Команда в терминале", writeFile: "Изменение файла", readFile: "Чтение файла" },
+    AgentCore,
+  };
+  const mod = new Function(
+    ...Object.keys(deps),
+    planSrc +
+      "\nreturn { planProgress, planArchive, planFromModel, planAutoStep, planAutoResult, planRotate, planPending, renderPlanPanel, PLAN_ARCHIVE_LIMIT };"
+  )(...Object.values(deps));
+
+  await test("план: инструмент todoWrite есть в ядре, с алиасами и правилом промпта", () => {
+    const def = AgentCore.TOOL_DEFINITIONS.find((t) => t.function && t.function.name === "todoWrite");
+    assert.ok(def, "нет определения инструмента todoWrite");
+    assert.ok(def.function.description.indexOf("ПОЛНЫЙ список") !== -1, "модель не просят присылать полный список");
+    assert.strictEqual(def.function.parameters.properties.tasks.type, "array", "нет схемы tasks");
+    assert.ok(def.function.parameters.properties.tasks.items, "нет описания элемента tasks");
+    // Алиасы: модель называет инструмент по-разному — имя должно нормализоваться.
+    for (const a of ["todo_write", "todos", "todo", "plan", "write_plan", "update_plan"]) {
+      assert.strictEqual(AgentCore.normalizeToolName(a), "todoWrite", "алиас " + a + " не ведёт к todoWrite");
+    }
+    // При тесном контексте шлём только ядро — план обязан там быть.
+    assert.ok(AgentCore.selectTools(8000).some((t) => t.function.name === "todoWrite"), "todoWrite отсутствует в ядре инструментов");
+    // Правило промпта и список доступных инструментов.
+    assert.ok(/^32\. План работ \(todoWrite\)/m.test(AgentCore.SYSTEM_PROMPT), "нет правила 32 про план");
+    assert.ok(/todoWrite, checkpointSave/.test(AgentCore.SYSTEM_PROMPT), "todoWrite нет в списке доступных инструментов");
+  });
+
+  await test("план: нормализация пунктов (строки, чекбоксы, статусы на русском, лимит)", () => {
+    const items = AgentCore.normalizePlanTasks(["- [x] Первый", "1. Второй", { text: "Третий", status: "in progress" }, "   "]);
+    assert.strictEqual(items.length, 3, "пункты потерялись: " + JSON.stringify(items));
+    assert.strictEqual(items[0].status, "done", "«- [x]» не распознан как готовый пункт");
+    assert.strictEqual(items[0].text, "Первый", "маркер списка остался в тексте: " + items[0].text);
+    assert.strictEqual(items[2].status, "in_progress", "«in progress» не распознан");
+    // Русские и эмодзи-статусы + «ровно один в работе».
+    const ru = AgentCore.normalizePlanTasks("✅ Раз\n🔄 Два\n⚠️ Три\n⬜ Четыре\n🔄 Пятый");
+    assert.deepStrictEqual(ru.map((i) => i.status), ["done", "in_progress", "failed", "pending", "pending"], "статусы разобраны неверно: " + JSON.stringify(ru.map((i) => i.status)));
+    // Мусор и лимит — без исключений.
+    assert.deepStrictEqual(AgentCore.normalizePlanTasks(null), []);
+    assert.deepStrictEqual(AgentCore.normalizePlanTasks({ tasks: [] }), []);
+    assert.deepStrictEqual(AgentCore.normalizePlanTasks([{}, "  "]), []);
+    assert.strictEqual(AgentCore.normalizePlanTasks(Array.from({ length: 12 }, (_, i) => "шаг " + i)).length, AgentCore.PLAN_MAX_ITEMS, "лимит пунктов не соблюдён");
+    // Дубликаты не должны раздувать список (модели это любят).
+    assert.strictEqual(AgentCore.normalizePlanTasks(["a", "a", "A"]).length, 1, "дубликаты не схлопнуты");
+  });
+
+  await test("план модели: принимается, заменяется через историю, авто-шаги не мешают", () => {
+    const chat = { id: "c1", messages: [] };
+    assert.strictEqual(mod.planFromModel(chat, { tasks: [{ text: "Разобрать", status: "done" }, { text: "Починить", status: "in_progress" }], title: "Задача" }), true);
+    assert.strictEqual(chat.plan.source, "model");
+    assert.strictEqual(chat.plan.title, "Задача");
+    assert.strictEqual(chat.plan.items.length, 2);
+    // Мусорный «план» от слабой модели не должен появляться вовсе.
+    const junk = { id: "c-junk", messages: [] };
+    assert.strictEqual(mod.planFromModel(junk, { tasks: [] }), false);
+    assert.strictEqual(junk.plan, undefined);
+    // Пока план ведёт модель, авто-шаги не подменяют нумерацию.
+    assert.strictEqual(mod.planAutoStep(chat, { name: "runCommand" }), false);
+    assert.strictEqual(chat.plan.source, "model");
+    assert.strictEqual(chat.plan.items.length, 2, "авто-шаг влез в план модели");
+    // Новый план модели вытесняет прежний — но не теряет его.
+    assert.strictEqual(mod.planFromModel(chat, { tasks: ["Только один"] }), true);
+    assert.strictEqual(chat.plan.items.length, 1);
+    assert.strictEqual(chat.planHistory.length, 1, "прежний план не ушёл в историю");
+    assert.strictEqual(chat.planHistory[0].items.length, 2);
+    // История не растёт бесконечно.
+    for (let i = 0; i < 10; i++) mod.planFromModel(chat, { tasks: ["шаг " + i] });
+    assert.strictEqual(chat.planHistory.length, mod.PLAN_ARCHIVE_LIMIT, "история планов не ограничена");
+  });
+
+  await test("план модели: упавший шаг помечается ⚠️, успешный статус модели не трогает", () => {
+    const chat = { id: "c", messages: [], plan: { source: "model", items: [{ id: "t1", text: "Починить", status: "in_progress", note: "" }] } };
+    assert.strictEqual(mod.planAutoResult(chat, { name: "runCommand" }, false), true, "падение шага не отмечено");
+    assert.strictEqual(chat.plan.items[0].status, "failed");
+    assert.ok(/не удал/i.test(chat.plan.items[0].note), "нет пояснения к провалу");
+    chat.plan.items[0].status = "in_progress";
+    assert.strictEqual(mod.planAutoResult(chat, { name: "runCommand" }, true), false, "успех инструмента правит план модели");
+    assert.strictEqual(chat.plan.items[0].status, "in_progress", "статус модели переписан");
+  });
+
+  await test("авто-шаги: новый шаг закрывает предыдущий, результат ставит ✅ или ⚠️", () => {
+    const chat = { id: "c2", messages: [] };
+    assert.strictEqual(mod.planAutoStep(chat, { name: "readFile" }), true);
+    assert.strictEqual(chat.plan.source, "auto");
+    assert.strictEqual(chat.plan.items[0].text, "Чтение файла", "нет человеческого названия шага");
+    mod.planAutoStep(chat, { name: "runCommand" });
+    assert.strictEqual(chat.plan.items[0].status, "done", "предыдущий шаг остался «в работе»");
+    assert.strictEqual(chat.plan.items[1].status, "in_progress");
+    mod.planAutoResult(chat, { name: "runCommand" }, true);
+    assert.strictEqual(chat.plan.items[1].status, "done");
+    // Ошибка инструмента — честный ⚠️, а не «готово».
+    mod.planAutoStep(chat, { name: "writeFile" });
+    mod.planAutoResult(chat, { name: "writeFile" }, false);
+    assert.strictEqual(chat.plan.items[2].status, "failed");
+    assert.ok(/ошибк/i.test(chat.plan.items[2].note));
+    // Прогресс считает и «в работе», и провалы.
+    const pr = mod.planProgress(chat.plan.items);
+    assert.strictEqual(pr.total, 3);
+    assert.strictEqual(pr.done, 2);
+    assert.strictEqual(pr.failed, 1);
+    assert.strictEqual(pr.percent, 100);
+    assert.strictEqual(pr.finished, true);
+  });
+
+  await test("поворот плана: завершённый уходит в историю, незавершённый остаётся", () => {
+    const auto = { messages: [], plan: { source: "auto", items: [{ id: "a1", text: "x", status: "done" }] } };
+    assert.strictEqual(mod.planRotate(auto), true, "авто-шаги не сброшены на новом запросе");
+    assert.strictEqual(auto.plan, null);
+    const model = { messages: [] };
+    mod.planFromModel(model, { tasks: [{ text: "A", status: "done" }, { text: "B", status: "pending" }] });
+    assert.strictEqual(mod.planRotate(model), false, "незавершённый план сброшен");
+    assert.ok(model.plan, "незавершённый план потерян — агент не увидит, что осталось");
+    // А завершённый — уходит в историю и уступает место новой задаче.
+    model.plan.items[1].status = "done";
+    assert.strictEqual(mod.planRotate(model), true);
+    assert.strictEqual(model.plan, null);
+    assert.strictEqual(model.planHistory.length, 1);
+  });
+
+  await test("панель: рисует пункты, счётчик и прогресс; пустой план её скрывает", () => {
+    assert.strictEqual(mod.renderPlanPanel(), undefined, "панель без плана не должна падать");
+    assert.ok(hosts["plan-panel"].classList.contains("hidden"), "панель без плана не скрыта");
+    activeChat = { id: "c3", messages: [], plan: { title: "Починка ycLogs", source: "model", items: [
+      { id: "t1", text: "Разобрать логи", status: "done", note: "" },
+      { id: "t2", text: "Починить хост", status: "in_progress", note: "" },
+      { id: "t3", text: "Прогнать тесты", status: "pending", note: "" },
+    ] } };
+    mod.renderPlanPanel();
+    const host = hosts["plan-panel"];
+    assert.ok(!host.classList.contains("hidden"), "панель с планом скрыта");
+    const txt = nodeText(host);
+    for (const want of ["Починка ycLogs", "Разобрать логи", "Починить хост", "Прогнать тесты", "1/3"]) {
+      assert.ok(txt.indexOf(want) !== -1, "в панели нет «" + want + "»");
+    }
+    // Полоска прогресса: 1 готов из 3 → 33%.
+    const fill = host.children[0].children[1].children[0];
+    assert.strictEqual(fill.style.width, "33%", "неверная ширина прогресса: " + fill.style.width);
+    // Панель раскрыта по умолчанию (пользователь видит шаги сразу).
+    assert.ok(host.children[0].classList.contains("expanded"), "панель плана свёрнута по умолчанию");
+    // Клик по заголовку сворачивает.
+    host.children[0].children[0].onclick({ stopPropagation() {} });
+    assert.ok(!hosts["plan-panel"].children[0].classList.contains("expanded"), "клик не свернул панель");
+    // Авто-план честно подписан как «не план».
+    activeChat = { id: "c4", messages: [], plan: { source: "auto", items: [{ id: "a1", text: "Команда в терминале", status: "in_progress", note: "" }] } };
+    mod.renderPlanPanel();
+    assert.ok(nodeText(hosts["plan-panel"]).indexOf("план не задан") !== -1, "нет пометки, что план не задан");
+    assert.ok(nodeText(hosts["plan-panel"]).indexOf("Ход работы") !== -1, "нет заголовка «Ход работы»");
+  });
+
+  await test("панель: «▶ Выполнить» только для плана из режима плана, «✕» уводит план в историю", () => {
+    activeChat = { id: "c5", messages: [{ id: "m1", role: "assistant", content: "план", plan: true }], plan: { source: "model", title: "T", items: [{ id: "t1", text: "A", status: "pending", note: "" }] } };
+    mod.renderPlanPanel();
+    let head = hosts["plan-panel"].children[0].children[0];
+    assert.ok(nodeText(head).indexOf("▶ Выполнить") !== -1, "нет кнопки выполнения плана");
+    // План уже выполняется (ответ не помечен режимом плана) — кнопки быть не должно.
+    activeChat = { id: "c6", messages: [{ id: "m1", role: "assistant", content: "ок" }], plan: { source: "model", title: "T", items: [{ id: "t1", text: "A", status: "done", note: "" }] } };
+    mod.renderPlanPanel();
+    head = hosts["plan-panel"].children[0].children[0];
+    assert.strictEqual(nodeText(head).indexOf("▶ Выполнить"), -1, "кнопка выполнения висит на обычном ответе");
+    // «✕»: план уходит в историю и с экрана.
+    const clear = head.children.find((c) => c.className === "plan-clear");
+    assert.ok(clear, "нет кнопки очистки плана");
+    clear.onclick({ stopPropagation() {} });
+    assert.strictEqual(activeChat.plan, null, "план не убран по «✕»");
+    assert.strictEqual(activeChat.planHistory.length, 1, "убранный план не сохранён в историю");
+    assert.ok(hosts["plan-panel"].classList.contains("hidden"), "панель осталась после очистки");
+  });
+
+  await test("план: инструмент связан с интерфейсом (main → событие plan → панель)", () => {
+    assert.ok(/case "todoWrite": \{/.test(mainSrc), "в main.js нет обработчика todoWrite");
+    assert.ok(/activeEmit\(\{ type: "plan", tasks: planTasks, title: planTitle \}\)/.test(mainSrc), "main.js не отправляет событие plan");
+    assert.ok(/normalizePlanTasks\(/.test(mainSrc) && /planSummary\(/.test(mainSrc), "main.js не нормализует план");
+    assert.ok(/normalizePlanTasks,\n  planSummary,/.test(mainSrc), "нормализатор не импортирован в main.js");
+    assert.ok(/case "plan": \{/.test(appSrc), "интерфейс не обрабатывает событие plan");
+    assert.ok(/planFromModel\(chat, ev\)/.test(appSrc), "событие plan не доходит до состояния");
+    assert.ok(/if \(planAutoStep\(chat, ev\)\) renderPlanPanel\(\);/.test(appSrc), "tool_start не питает авто-шаги");
+    assert.ok(/if \(planAutoResult\(chat, ev, toolOk\)\) renderPlanPanel\(\);/.test(appSrc), "tool_result не закрывает шаги");
+    assert.ok(/if \(planRotate\(getActiveChat\(\)\)\) renderPlanPanel\(\);/.test(appSrc), "новый запрос не поворачивает план");
+    assert.ok(/renderPlanPanel\(\);\n    const chat = getActiveChat\(\);|renderPlanPanel\(\);/.test(appSrc), "панель не перерисовывается вместе с чатом");
+    // Веб-режим: todoWrite работает как структура, а не «недоступно в веб-версии».
+    const webIdx = appSrc.indexOf('c.name === "todoWrite"');
+    const webElse = appSrc.indexOf('"⚠️ Файловые операции и git недоступны в веб-версии');
+    assert.ok(webIdx > 0 && webIdx < webElse, "в веб-режиме todoWrite падает в общий отказ");
+  });
+
+  await test("план: контейнер, оформление и хранение на месте", () => {
+    assert.ok(/<div id="plan-panel" class="hidden"><\/div>/.test(htmlSrc), "нет контейнера #plan-panel в index.html");
+    assert.ok(/\$\("plan-panel"\)/.test(appSrc), "app.js не ищет #plan-panel");
+    // Панель стоит ВЫШЕ панели действий (иначе ход работ заслонял бы план).
+    assert.ok(htmlSrc.indexOf('id="plan-panel"') < htmlSrc.indexOf('id="work-panel"'), "панель плана не над панелью действий");
+    for (const rule of [".plan-group", ".plan-head", ".plan-item.st-done", ".plan-fill", ".plan-group.expanded .plan-body", "#plan-panel.hidden"]) {
+      assert.ok(cssSrc.indexOf(rule) !== -1, "нет стиля " + rule);
+    }
+    // План сохраняется вместе с чатом и чистится при загрузке.
+    assert.ok(/if \(c\.plan !== undefined\)/.test(appSrc), "sanitizeChats не проверяет план");
+    assert.ok(/Array\.isArray\(c\.plan\.items\)/.test(appSrc), "sanitizeChats не отвергает повреждённый план");
+    assert.ok(/c\.planHistory = c\.planHistory\.slice\(0, PLAN_ARCHIVE_LIMIT\)/.test(appSrc), "история планов не ограничивается при загрузке");
+  });
+
+  await test("план: битый план в chats.json не мешает запуску (sanitizeChats)", () => {
+    // sanitizeChats извлекается ровно как в соседнем тесте и исполняется отдельно,
+    // поэтому нормализатор и лимит передаём параметрами.
+    const sIdx = appSrc.indexOf("  function sanitizeChats(d) {");
+    assert.ok(sIdx > 0, "не нашёл sanitizeChats");
+    const rawLines = appSrc.slice(sIdx).split("\n");
+    let endLine = -1;
+    for (let i = 1; i < rawLines.length; i++) {
+      if (rawLines[i] === "  }") { endLine = i; break; }
+    }
+    const fn = new Function(
+      "normalizePlanTasks",
+      "PLAN_ARCHIVE_LIMIT",
+      rawLines.slice(0, endLine + 1).join("\n") + "\nreturn sanitizeChats;"
+    )(AgentCore.normalizePlanTasks, AgentCore.PLAN_MAX_ITEMS);
+    const out = fn({
+      activeId: "c1",
+      chats: [
+        { id: "c1", messages: [], plan: { source: "model", title: "T", items: [{ text: "A", status: "done" }, { text: "" }] }, planHistory: [{ items: [1, 2, 3, 4, 5, 6, 7] }, {}, {}, {}, {}, {}, {}] },
+        { id: "c2", messages: [], plan: { items: "не массив" } },
+        { id: "c3", messages: [] },
+      ],
+    });
+    assert.strictEqual(out.chats[0].plan.items.length, 1, "нормализация плана не сработала: " + JSON.stringify(out.chats[0].plan));
+    assert.strictEqual(out.chats[0].plan.source, "model");
+    assert.strictEqual(out.chats[0].planHistory.length, AgentCore.PLAN_MAX_ITEMS, "история не обрезана");
+    assert.strictEqual(out.chats[1].plan, null, "битый план не сброшен");
+    assert.strictEqual(out.chats[2].plan, undefined, "чату без плана добавили поле plan");
+  });
+}
+
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
   await testAgentCore();
   await testAppUiTools();
   await testAppUiRefs();
   await testAgentStore();
+  await testContextMemory();
   await testUnifiedPatch();
   await testCodeIndex();
   await testSecrets();
@@ -2894,9 +3822,11 @@ async function testShellAndCdp() {
   await testMail();
   await testYandexCloud();
   await testYcDiagnosis();
+  await testYcFolderPersistence();
   await testShellAndCdp();
   await testServer();
   await testSelfDev();
+  await testPlanPanel();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");
   process.exit(failed ? 1 : 0);
 })();

@@ -317,30 +317,44 @@ function buildReadRequest({ logGroupId, resourceIds, resourceTypes, sinceMs, unt
   return pbMessage(2, criteria); // ReadRequest{ criteria = 2 }
 }
 
+// ВАЖНО про адреса: у Cloud Logging это ДВА разных сервиса в каталоге эндпоинтов
+// (https://api.cloud.yandex.net/endpoints):
+//   logging      — лог-группы (REST /logging/v1/logGroups), экспорт, синки;
+//   log-reading  — чтение записей, ТОЛЬКО gRPC (REST на том хосте нет вовсе).
+// Чтение с адреса logging даёт «gRPC 12: unknown service …LogReadingService»,
+// поэтому базы для REST и для gRPC передаются отдельно (grpcBaseUrl → baseUrl).
 async function readLogs(opts) {
   const o = opts || {};
   const fetchImpl = o.fetchImpl || (typeof fetch === "function" ? fetch : null);
   const baseUrl = String(o.baseUrl || "").replace(/\/+$/, "");
-  if (!baseUrl) throw new Error("не задан адрес сервиса логирования");
+  const grpcBaseUrl = String(o.grpcBaseUrl || o.baseUrl || "").replace(/\/+$/, "");
+  if (!baseUrl || !grpcBaseUrl) throw new Error("не заданы адреса сервиса логирования");
   const folderId = String(o.folderId || "").trim();
   if (!folderId) throw new Error("не выбран каталог (folder)");
   const resourceIds = (Array.isArray(o.resourceIds) ? o.resourceIds : [o.resourceIds]).map((x) => String(x || "").trim()).filter(Boolean);
   const limit = Math.max(1, Math.min(parseInt(o.limit, 10) || 100, 1000));
   const sinceMs = o.sinceMs || Date.now() - Math.max(1, Number(o.sinceHours) || 3) * 3600 * 1000;
 
-  const groups = await listLogGroups(o.iamToken, baseUrl, folderId, fetchImpl);
-  if (!groups.length) {
-    const e = new Error(
-      "в каталоге нет ни одной лог-группы. Логи этого ресурса в Yandex Cloud не собирались: " +
-      "включи их в консоли (Cloud Logging) — или они появятся сами после первых записей."
-    );
-    e.status = 404;
-    throw e;
+  // Лог-группу берём по REST — но только когда её id неизвестен: с известным id
+  // лишний запрос не нужен (и чтение работает, даже если каталог логов недоступен).
+  let groupId = String(o.logGroupId || "").trim();
+  let groupName = "";
+  if (!groupId) {
+    const groups = await listLogGroups(o.iamToken, baseUrl, folderId, fetchImpl);
+    if (!groups.length) {
+      const e = new Error(
+        "в каталоге нет ни одной лог-группы. Логи этого ресурса в Yandex Cloud не собирались: " +
+        "включи их в консоли (Cloud Logging) — или они появятся сами после первых записей."
+      );
+      e.status = 404;
+      throw e;
+    }
+    groupId = groups[0].id;
+    groupName = groups[0].name;
   }
-  const group = o.logGroupId ? groups.find((g) => g.id === o.logGroupId) || { id: o.logGroupId, name: "" } : groups[0];
 
   const reqBuf = buildReadRequest({
-    logGroupId: group.id,
+    logGroupId: groupId,
     resourceIds,
     resourceTypes: o.resourceTypes,
     sinceMs,
@@ -350,10 +364,10 @@ async function readLogs(opts) {
   });
 
   const grpc = o.grpcCall || grpcCall;
-  const parts = await grpc(baseUrl, "/yandex.cloud.logging.v1.LogReadingService/Read", o.iamToken, reqBuf, o.timeoutMs || 25000);
+  const parts = await grpc(grpcBaseUrl, "/yandex.cloud.logging.v1.LogReadingService/Read", o.iamToken, reqBuf, o.timeoutMs || 25000);
   const frames = Array.isArray(parts) ? parts : grpcFrames(parts);
   const entries = parseReadResponse(frames[0] || Buffer.alloc(0));
-  return { logGroupId: group.id, logGroupName: group.name, entries: entries.slice(-limit) };
+  return { logGroupId: groupId, logGroupName: groupName, entries: entries.slice(-limit) };
 }
 
 // Человекочитаемая строка записи (для чата и панели логов).

@@ -39,6 +39,8 @@ const {
   parseSysInfoJson,
   createContextManager,
   estimateTokens,
+  normalizePlanTasks,
+  planSummary,
 } = require("./renderer/agent-core.js");
 
 // ─────────────────────────── Мобильный мост (LAN + PWA + PIN) ───────────────────────────
@@ -138,6 +140,14 @@ const DEFAULT_SETTINGS = {
   ycFolderName: "", // имя каталога для отображения
   ycAllowAgentCreate: false, // агенту ЗАПРЕЩЕНО создавать ресурсы, пока пользователь явно не включит
   ycAllowAgentDelete: false, // удаление ресурсов агентом — только с явного разрешения
+
+  // Память диалогов: когда контекст переполняется, агент сворачивает старые шаги
+  // в памятку — здесь такая памятка сохраняется локально по датам в
+  // <userData>/context-memory/ГГГГ-ММ-ДД/. Потом можно спросить «что мы делали 5-го числа»
+  // (инструменты memoryList / memorySearch). По умолчанию ВЫКЛЮЧЕНО — без явного
+  // согласия пользователя на диск ничего не пишется.
+  contextMemory: false,
+  contextMemoryDays: 30, // сколько дней хранить (старые дни удаляются автоматически)
 };
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -197,19 +207,84 @@ function normalizeSettings(raw) {
 let agentEnv = {}; // итоговый набор: пользовательский + автоматический (Yandex Cloud)
 let userAgentEnv = {}; // только то, что задал пользователь — это и сохраняется в настройках
 
-// Автоматические переменные Yandex Cloud. yc CLI читает их прямо из окружения
-// (YC_TOKEN / YC_CLOUD_ID / YC_FOLDER_ID), поэтому при подключённом аккаунте он
-// работает без интерактивного `yc init`. В чат значения не выводятся: envList
-// показывает только имя и длину.
+// Автоматические переменные Yandex Cloud для команд агента. yc CLI читает их прямо
+// из окружения, поэтому подключённый аккаунт работает без интерактивного `yc init`.
+// ВАЖНО: YC_TOKEN и YC_IAM_TOKEN должны содержать IAM-токен — OAuth там не
+// принимается (yc отвечает «The token is invalid»). IAM живёт ~1 час, поэтому
+// держим свежий снимок (ycIamEnv) и продлеваем его в фоне до истечения.
+// В чат значения не выводятся: envList показывает только имя и длину.
+let ycIamEnv = null; // { token, expiresAtMs, forOauth }
+let ycIamTimer = null;
+let ycIamTimerAt = 0;
+let ycIamLastTryTs = 0;
+let lastAgentEnvSettings = null;
+const YC_IAM_REFRESH_MARGIN = 5 * 60 * 1000;
+
+function ycIamEnvToken(cfg) {
+  if (!ycIamEnv || !cfg || !cfg.oauth || ycIamEnv.forOauth !== cfg.oauth) return "";
+  if (Date.now() >= ycIamEnv.expiresAtMs - 60 * 1000) return "";
+  return ycIamEnv.token;
+}
+
 function ycAutoEnv(s) {
   const out = {};
   try {
     const cfg = ycConfig(s);
-    if (cfg.oauth) out.YC_TOKEN = cfg.oauth;
     if (cfg.cloudId) out.YC_CLOUD_ID = cfg.cloudId;
     if (cfg.folderId) out.YC_FOLDER_ID = cfg.folderId;
+    const iam = ycIamEnvToken(cfg);
+    if (iam) {
+      out.YC_IAM_TOKEN = iam;
+      out.YC_TOKEN = iam;
+    }
   } catch {}
   return out;
+}
+
+// Пересобрать окружение без сети (зовётся и по таймеру продления токена).
+function rebuildAgentEnv() {
+  agentEnv = { ...userAgentEnv, ...ycAutoEnv(lastAgentEnvSettings) };
+}
+
+// Фоновая синхронизация IAM-токена: обмен OAuth→IAM и продление за 5 минут до
+// истечения. Не бросает и не ждёт: команды агента никогда не стоят из-за токена.
+// Повторы ограничены (не чаще раза в минуту), иначе каждая команда дёргала бы IAM.
+function ycIamSync(s) {
+  try {
+    const cfg = ycConfig(s);
+    if (!cfg.oauth) {
+      if (ycIamTimer) { clearTimeout(ycIamTimer); ycIamTimer = null; ycIamTimerAt = 0; }
+      if (ycIamEnv) { ycIamEnv = null; rebuildAgentEnv(); }
+      return;
+    }
+    if (ycIamEnv && ycIamEnv.forOauth === cfg.oauth && Date.now() < ycIamEnv.expiresAtMs - YC_IAM_REFRESH_MARGIN) {
+      const at = ycIamEnv.expiresAtMs - YC_IAM_REFRESH_MARGIN;
+      if (ycIamTimerAt !== at) {
+        if (ycIamTimer) clearTimeout(ycIamTimer);
+        ycIamTimerAt = at;
+        ycIamTimer = setTimeout(() => {
+          ycIamTimer = null;
+          ycIamTimerAt = 0;
+          ycIamSync(lastAgentEnvSettings);
+        }, Math.max(30 * 1000, at - Date.now()));
+        if (ycIamTimer.unref) ycIamTimer.unref();
+      }
+      return;
+    }
+    if (ycIamEnv && ycIamEnv.forOauth !== cfg.oauth) { ycIamEnv = null; rebuildAgentEnv(); }
+    if (Date.now() - ycIamLastTryTs < 60 * 1000) return;
+    ycIamLastTryTs = Date.now();
+    yandexCloud
+      .getIamTokenInfo(cfg.oauth)
+      .then((info) => {
+        ycIamEnv = { token: info.token, expiresAtMs: info.expiresAtMs || Date.now() + 3600 * 1000, forOauth: cfg.oauth };
+        rebuildAgentEnv();
+        ycIamSync(lastAgentEnvSettings);
+      })
+      .catch(() => {
+        /* нет сети или токен не принят — команды отработают без YC_*, без падения */
+      });
+  } catch {}
 }
 
 // Папка со встроенным yc CLI — в PATH всех команд агента (как node).
@@ -225,8 +300,11 @@ function ycEnsurePath() {
 // Пересобрать окружение агента: пользовательские переменные + автоматические YC.
 function applyAgentEnv(s) {
   userAgentEnv = (s && typeof s.agentEnv === "object" && s.agentEnv) || {};
-  agentEnv = { ...userAgentEnv, ...ycAutoEnv(s) };
+  lastAgentEnvSettings = s || lastAgentEnvSettings;
+  rebuildAgentEnv();
   ycEnsurePath();
+  // Фоновая подстановка свежего IAM в YC_IAM_TOKEN/YC_TOKEN (без await).
+  ycIamSync(lastAgentEnvSettings);
 }
 
 function loadSettings() {
@@ -498,22 +576,47 @@ function powershellArgs(command) {
   return ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc];
 }
 
-// bash из Git for Windows (там же, где git) — чтобы shell: "bash" работал без PATH.
-function findBash() {
-  if (process.platform !== "win32") return findProgram("bash").path || "/bin/bash";
+// bash/sh из Git for Windows (там же, где git) — чтобы shell: "bash"/"sh" работали
+// без PATH. Возвращает абсолютный путь или "" (не найдено нигде).
+function findGitShell(which) {
+  const name = which === "sh" ? "sh" : "bash";
+  if (process.platform !== "win32") {
+    const inPath = findProgram(name).path;
+    if (inPath) return inPath;
+    const direct = name === "sh" ? "/bin/sh" : "/bin/bash";
+    try { if (fs.existsSync(direct)) return direct; } catch {}
+    return "";
+  }
   const pf = process.env.ProgramFiles || "C:\\Program Files";
   const pf86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
   const home = process.env.USERPROFILE || "";
-  const cands = [
-    path.join(pf, "Git", "bin", "bash.exe"),
-    path.join(pf, "Git", "usr", "bin", "bash.exe"),
-    path.join(pf86, "Git", "bin", "bash.exe"),
-    home ? path.join(home, "AppData", "Local", "Programs", "Git", "bin", "bash.exe") : "",
-  ];
-  for (const c of cands) {
-    try { if (c && fs.existsSync(c)) return c; } catch {}
+  const roots = [
+    path.join(pf, "Git"),
+    path.join(pf86, "Git"),
+    home ? path.join(home, "AppData", "Local", "Programs", "Git") : "",
+  ].filter(Boolean);
+  // Порядок как у самого Git: сначала bin, затем usr/bin (там же лежит sh).
+  const subs = name === "sh"
+    ? [["usr", "bin", "sh.exe"], ["bin", "sh.exe"]]
+    : [["bin", "bash.exe"], ["usr", "bin", "bash.exe"]];
+  for (const root of roots) {
+    for (const sub of subs) {
+      const cand = path.join(root, ...sub);
+      try { if (fs.existsSync(cand)) return cand; } catch {}
+    }
   }
-  return findProgram("bash").path || "bash";
+  return findProgram(name).path || "";
+}
+
+// Человеческое объяснение, почему оболочки нет (попадает в ответ инструмента).
+function shellMissingHint(which) {
+  if (process.platform === "win32") {
+    return (
+      which + " не найден. Поставь Git for Windows (installSystemPackage(\"git\")) — " + which +
+      " идёт вместе с ним; либо используй shell: \"powershell\" или \"cmd\"."
+    );
+  }
+  return which + " не найден: ни в PATH, ни в /bin. Проверь установку (installSystemPackage).";
 }
 
 // Единая точка выбора оболочки → { kind, shell, args, shellHint }.
@@ -521,7 +624,7 @@ function findBash() {
 function resolveShell(command, shellName) {
   const kind = normalizeShell(shellName) || (process.platform === "win32" ? "cmd" : "sh");
   if (kind === "cmd") {
-    return { kind, shell: process.env.ComSpec || "cmd.exe", args: shellArgsFor(command), shellHint: "" };
+    return { kind, shell: process.env.ComSpec || "cmd.exe", args: shellArgsFor(command), shellHint: "", missing: false };
   }
   if (kind === "powershell" || kind === "pwsh") {
     const probe = findProgram(kind === "pwsh" ? "pwsh" : "powershell");
@@ -532,20 +635,81 @@ function resolveShell(command, shellName) {
       shellHint: probe.found
         ? ""
         : "PowerShell не найден в PATH. Варианты: installSystemPackage(\"pwsh\") для PowerShell 7 или shell: \"cmd\".",
+      // missing намеренно false: Windows ищет powershell.exe в System32 независимо
+      // от PATH, и жёсткая блокировка дала бы ложный отказ на рабочей машине.
+      missing: false,
     };
   }
-  if (kind === "bash") {
+  if (kind === "bash" || kind === "sh") {
+    // На Windows sh живёт там же, где bash (Git for Windows). Раньше sh молча
+    // уходил в /bin/sh, которого на Windows нет: агент получал ENOENT вообще
+    // без объяснения. Теперь и sh ищется как Git-оболочка и получает подсказку.
+    const found = findGitShell(kind);
     return {
       kind,
-      shell: findBash(),
-      args: ["-lc", command],
-      shellHint:
-        process.platform === "win32"
-          ? "bash не найден. Поставь Git for Windows (installSystemPackage(\"git\")) — bash идёт вместе с ним, либо используй shell: \"cmd\" или \"powershell\"."
-          : "",
+      shell: found || kind,
+      args: kind === "sh" ? ["-c", command] : ["-lc", command],
+      shellHint: found ? "" : shellMissingHint(kind),
+      missing: !found,
     };
   }
-  return { kind: "sh", shell: "/bin/sh", args: ["-c", command], shellHint: "" };
+  return { kind: "sh", shell: "/bin/sh", args: ["-c", command], shellHint: "", missing: false };
+}
+
+// Какие оболочки реально есть на этой машине: агент спрашивает один раз
+// (инструмент shellsStatus), а не выясняет методом тыка.
+function shellsStatus() {
+  const win = process.platform === "win32";
+  const defKind = win ? "cmd" : "sh";
+  const defPath = win ? process.env.ComSpec || "cmd.exe" : "/bin/sh";
+  let defOk = true;
+  if (!win) {
+    try { defOk = fs.existsSync("/bin/sh"); } catch { defOk = false; }
+  }
+  const list = [{ kind: defKind, available: defOk, path: defPath, def: true, hint: defOk ? "" : shellMissingHint("sh") }];
+  const seen = { [defKind]: true };
+  for (const k of ["powershell", "pwsh"]) {
+    const p = findProgram(k);
+    if (seen[k]) continue;
+    seen[k] = true;
+    list.push({ kind: k, available: !!p.found, path: p.path || "", def: false, hint: p.found ? "" : "Установи PowerShell 7: installSystemPackage(\"pwsh\")." });
+  }
+  for (const k of ["bash", "sh"]) {
+    if (seen[k]) continue;
+    seen[k] = true;
+    const f = findGitShell(k);
+    list.push({ kind: k, available: !!f, path: f || "", def: false, hint: f ? "" : shellMissingHint(k) });
+  }
+  return list;
+}
+
+// Строка про Yandex Cloud для САММАРИ ПРОЕКТА: агент всегда видит АКТУАЛЬНЫЙ
+// каталог и разрешения, а не полагается на устаревшие результаты инструментов
+// в истории переписки («каталог не выбран», хотя он уже выбран).
+function ycBriefLine(s) {
+  try {
+    const cfg = ycConfig(s);
+    if (!cfg.oauth) return "";
+    if (!cfg.folderId) return "Yandex Cloud: подключён, каталог НЕ выбран — попроси пользователя выбрать каталог в Настройках → «☁️ Yandex Cloud».";
+    return (
+      "Yandex Cloud: каталог «" + (cfg.folderName || cfg.folderId) + "» (" + cfg.folderId + ")" +
+      (cfg.cloudId ? ", облако " + cfg.cloudId : "") +
+      "; создание ресурсов агентом " + (cfg.allowCreate ? "разрешено" : "ЗАПРЕЩЕНО") +
+      ", удаление " + (cfg.allowDelete ? "разрешено" : "ЗАПРЕЩЕНО") + ". "
+    );
+  } catch {
+    return "";
+  }
+}
+
+// Короткая строка для САММАРИ ПРОЕКТА: что доступно, чтобы агент не гадал.
+function shellsBrief() {
+  const win = process.platform === "win32";
+  const names = [win ? "cmd" : "sh"];
+  for (const k of ["powershell", "pwsh"]) if (findProgram(k).found) names.push(k);
+  for (const k of ["bash", "sh"]) if (findGitShell(k)) names.push(k);
+  const uniq = names.filter((n, i) => names.indexOf(n) === i);
+  return "по умолчанию " + (win ? "cmd" : "sh") + "; доступно: " + uniq.join(", ") + " (параметр shell у runCommand/startBackground)";
 }
 
 // Запуск произвольной команды в терминале (без интерактива).
@@ -579,7 +743,7 @@ function runTerminalCommand(command, cwd, timeoutMs, shellName) {
         // агент видел пустой вывод и не мог понять причину.
         if (!errText && err.message) parts.push(String(err.message));
         if (!parts.length) parts.push(err.message || String(err));
-        const shHint = err.code === "ENOENT" && sh.shellHint ? "\n\n" + sh.shellHint : "";
+        const shHint = (err.code === "ENOENT" || sh.missing === true) && sh.shellHint ? "\n\n" + sh.shellHint : "";
         resolve("Команда завершилась с кодом " + code + timeNote + ":\n" + parts.join("\n").slice(0, 6000) + shHint);
       }
     });
@@ -1322,6 +1486,16 @@ function buildProjectBrief(root) {
       if (head) parts.push("README (начало): " + head);
     } catch {}
   }
+  // Оболочки: агент сразу видит, что доступно (bash/sh появляются с Git for Windows),
+  // и не тратит попытки на «а вдруг bash есть».
+  try {
+    parts.push("Оболочки: " + shellsBrief());
+  } catch {}
+  // Yandex Cloud: актуальный каталог и разрешения прямо в системном промпте.
+  try {
+    const ycLine = ycBriefLine(loadSettings());
+    if (ycLine) parts.push(ycLine);
+  } catch {}
   return parts.join("\n\n");
 }
 
@@ -1875,6 +2049,18 @@ async function executeTool(name, args, settings) {
         fs.writeFileSync(p, updated, "utf8");
         return "OK — заменено (" + where + ") в " + p;
       }
+      case "shellsStatus": {
+        const rows = shellsStatus().map((s) => {
+          if (s.available) return "✅ " + s.kind + (s.def ? " (по умолчанию)" : "") + " — " + (s.path || "найден в PATH");
+          return "❌ " + s.kind + " — " + (s.hint || "не найден");
+        });
+        const defLine = process.platform === "win32" ? "По умолчанию команды идут в cmd." : "По умолчанию команды идут в sh.";
+        const tip =
+          process.platform === "win32"
+            ? '\n\nПодсказка: PowerShell есть всегда — shell: "powershell" (кавычки, $ и 2>$null работают как в консоли). bash и sh появляются вместе с Git for Windows: installSystemPackage("git").'
+            : "";
+        return "Оболочки на этой машине:\n" + rows.join("\n") + "\n\n" + defLine + ' Выбор — параметр shell у runCommand и startBackground.' + tip;
+      }
       case "runCommand": {
         const cmd = String(args.command || "").trim();
         if (!cmd) return "Ошибка: укажи команду";
@@ -1907,6 +2093,15 @@ async function executeTool(name, args, settings) {
         }
         const cwd = args.cwd ? resolvePath(args.cwd, settings) : agentWorkDir(settings);
         const bgShell = resolveShell(cmd, shellName);
+        // Нет оболочки — spawn упадёт асинхронно, а инструмент успел бы отрапортовать
+        // «OK … PID: undefined». Отвечаем честно и сразу.
+        if (bgShell.missing) {
+          return (
+            "Ошибка: оболочка «" + (shellName || "?") + "» не найдена — фоновый процесс НЕ запущен.\n" +
+            bgShell.shellHint +
+            '\n\nПроверь доступные оболочки через shellsStatus, затем используй shell: "powershell" или "cmd".'
+          );
+        }
         const rec = bgSpawn(cmd, { name: args.name, cwd, shell: bgShell.shell, shellArgs: bgShell.args });
         termAgentEcho("$ " + cmd + "   (фоновый процесс " + rec.id + ", каталог: " + cwd + (shellName ? ", оболочка: " + shellName : "") + ")");
         return "OK — фоновый процесс запущен:\nid: " + rec.id + "\nкоманда: " + cmd + "\nPID: " + rec.child.pid + "\n\nДальше: backgroundOutput(id) — логи, sendInput(id, текст) — ввод в процесс, stopBackground(id) — остановить, checkUrl/checkPort — проверить готовность сервера.";
@@ -3411,6 +3606,80 @@ async function executeTool(name, args, settings) {
         const ndR = agentStore.noteDelete(app.getPath("userData"), agentWorkDir(settings), ndKey);
         return ndR.ok ? "OK — " + ndR.message : "Ошибка: " + ndR.error;
       }
+      case "todoWrite": {
+        // План работ: приложение только нормализует и показывает его панелью-
+        // чеклистом — состояние (статусы, переживание перезапуска) хранит интерфейс.
+        const planTasks = normalizePlanTasks(args.tasks != null ? args.tasks : args.items != null ? args.items : args);
+        if (!planTasks.length) {
+          return "Ошибка: план пуст. Пришли непустой tasks — массив до 7 пунктов (строка или { text, status }).";
+        }
+        const planTitle = String(args.title || "").trim().slice(0, 80);
+        if (activeEmit) activeEmit({ type: "plan", tasks: planTasks, title: planTitle });
+        const ps = planSummary(planTasks);
+        const planRows = planTasks.map((t) =>
+          (t.status === "done" ? "✅ " : t.status === "failed" ? "⚠️ " : t.status === "in_progress" ? "🔄 " : "⬜ ") +
+          t.text + (t.note ? " — " + t.note : "")
+        );
+        return (
+          "OK — план показан пользователю: " + ps.done + " из " + ps.total + " готово" +
+          (ps.failed ? ", сбоев: " + ps.failed : "") + ".\n" +
+          planRows.join("\n") + "\n" +
+          (ps.done === ps.total
+            ? "Все пункты готовы — подведи короткий итог без пересказа плана."
+            : "Продолжай со следующего пункта; после каждого шага вызывай todoWrite заново с ПОЛНЫМ списком.")
+        );
+      }
+      case "memoryList": {
+        // Настройки читаем в момент вызова: галочку могли включить только что.
+        const ms = loadSettings();
+        const memDir = agentStore.contextMemoryDir(app.getPath("userData"));
+        if (!ms.contextMemory) {
+          return (
+            "Память диалогов выключена. Включи галочку «Память диалогов» в Настройках → 🧠 Память диалогов: тогда сжатые памятки будут сохраняться локально по датам, и я смогу вспоминать прошлые сессии.\n" +
+            "Папка дневника: " + memDir
+          );
+        }
+        const mmDate = String(args.date || "").trim();
+        if (mmDate) {
+          const mr = agentStore.contextMemoryRead(app.getPath("userData"), mmDate);
+          if (!mr.ok) return "Ошибка: " + mr.error;
+          const rows = mr.memos.map((m) =>
+            "• " + m.time + " — " + (m.provider || "?") + (m.model ? "/" + m.model : "") +
+            (m.workDir ? "\n  папка: " + m.workDir : "") + "\n" + String(m.memo || "").replace(/^/gm, "  ")
+          );
+          return "Памятки контекста за " + mmDate + " (" + mr.count + "):\n\n" + rows.join("\n\n");
+        }
+        const md = agentStore.contextMemoryDays(app.getPath("userData"));
+        if (!md.length) {
+          return "Память диалогов включена, но памяток пока нет: они появляются, когда контекст переполняется и старые шаги сворачиваются в памятку.";
+        }
+        const mrows = md.map((d) =>
+          "• " + d.date + " — " + d.count + " памяток" + (d.last ? ", последняя в " + new Date(d.last).toLocaleTimeString() : "")
+        );
+        return (
+          "Дни в памяти диалогов (" + md.length + "):\n" + mrows.join("\n") +
+          '\n\nПамятки за конкретный день — memoryList(date: "ГГГГ-ММ-ДД"); поиск — memorySearch(query: "...").'
+        );
+      }
+      case "memorySearch": {
+        const ms2 = loadSettings();
+        if (!ms2.contextMemory) {
+          return "Память диалогов выключена — включи галочку «Память диалогов» в настройках (Настройки → 🧠).";
+        }
+        const mq = String(args.query || "").trim();
+        if (!mq) return "Ошибка: укажи query — что искать в памятках.";
+        const msr = agentStore.contextMemorySearch(app.getPath("userData"), {
+          query: mq,
+          date: String(args.date || "").trim(),
+          limit: Number(args.limit) || 20,
+        });
+        if (!msr.ok) return "Ошибка: " + msr.error;
+        if (!msr.matches.length) {
+          return "По запросу «" + mq + "» в памяти диалогов ничего не найдено. Список дней — memoryList.";
+        }
+        const srows = msr.matches.map((m) => "• " + m.date + " " + m.time + " (совпадений: " + m.hits + "): " + m.snippet);
+        return "Найдено в памяти диалогов (" + msr.count + "):\n" + srows.join("\n");
+      }
       case "checkpointSave": {
         const csR = agentStore.checkpointSave(app.getPath("userData"), agentWorkDir(settings), args.label);
         return csR.ok ? "OK — " + csR.message : "Ошибка: " + csR.error;
@@ -3576,7 +3845,12 @@ async function executeTool(name, args, settings) {
         try {
           if (svcDef) {
             const r = await yandexCloud.listService(cfg.oauth, cfg.folderId, svcDef);
-            const items = r.items.slice(0, 30).map((it) => "• " + (it.name || it.id || "") + (it.id ? "  (" + it.id + ")" : ""));
+            // Каталог отдаёт объекты { id, name }, а Postbox (SES) — просто строки.
+            const items = r.items.slice(0, 30).map((it) => {
+              if (it == null) return "• —";
+              if (typeof it !== "object") return "• " + String(it);
+              return "• " + (it.name || it.id || "—") + (it.id ? "  (" + it.id + ")" : "");
+            });
             return "«" + svcDef.title + "» в каталоге «" + cfg.folderName + "»: всего " + r.count + (r.count ? ":\n" + items.join("\n") : " — пусто.");
           }
           const all = await yandexCloud.resourcesStatus(cfg.oauth, cfg.folderId);
@@ -3711,13 +3985,18 @@ async function executeTool(name, args, settings) {
         if (!cfg.oauth) return "Yandex Cloud не подключён — Настройки → Yandex Cloud.";
         const st = ycCliStatus();
         if (st.installed && !args.force) {
-          return "yc CLI уже встроен: " + st.path + " — доступен всем командам как «yc». Токен и каталог подставляются автоматически (yc init не нужен). Переустановить: ycInstall(force: true).";
+          // Пересобираем окружение: PATH и свежий YC_IAM_TOKEN — без перезапуска.
+          applyAgentEnv(loadSettings());
+          return "yc CLI уже встроен: " + st.path + " — доступен всем командам как «yc». YC_IAM_TOKEN (свежий IAM), YC_CLOUD_ID и YC_FOLDER_ID подставляются автоматически, yc init не нужен. Переустановить: ycInstall(force: true).";
         }
         try {
           const r = await ycCliInstall();
           if (!r.ok) return "Не удалось установить yc CLI: " + r.error;
+          applyAgentEnv(loadSettings());
+          const iamReady = !!ycIamEnvToken(ycConfig(loadSettings()));
           return "yc CLI установлен: " + r.path + " (версия " + r.version + ", " + r.os + "/" + r.arch + ", " + r.sizeMb + " МБ).\n" +
-            "Папка добавлена в PATH всех команд агента — вызывай просто «yc ...». YC_TOKEN и YC_FOLDER_ID подставляются из настроек, yc init не нужен. Проверка: yc config list";
+            "Папка добавлена в PATH всех команд агента — вызывай просто «yc ...». YC_IAM_TOKEN (свежий IAM), YC_CLOUD_ID и YC_FOLDER_ID подставляются автоматически, yc init не нужен. Проверка: yc config list" +
+            (iamReady ? "" : "\n⚠ Свежий IAM-токен ещё не получен (нет сети или токен не принят) — если первая команда yc скажет «The token is invalid», повтори её через минуту.");
         } catch (e) {
           return "Не удалось установить yc CLI: " + ((e && e.message) || String(e));
         }
@@ -3777,6 +4056,33 @@ async function autoCheckpointCommit(settings, messages) {
   }
 }
 
+// Память диалогов: сохраняем сжатую памятку в локальный дневник по датам, но
+// ТОЛЬКО если пользователь включил галочку «Память диалогов» (иначе — тишина).
+function saveContextMemo(settings, entry, emit) {
+  if (!settings || !settings.contextMemory) return null;
+  if (!entry || !String(entry.text || "").trim()) return null;
+  try {
+    const r = agentStore.contextMemorySave(app.getPath("userData"), {
+      ts: entry.ts,
+      memo: entry.text,
+      messages: entry.messages,
+      provider: entry.provider,
+      model: entry.model,
+      workDir: agentWorkDir(settings),
+      keepDays: Number(settings.contextMemoryDays) || agentStore.CTX_MEMO_DAY_KEEP,
+    });
+    if (r && r.ok && emit) {
+      emit({
+        type: "memory",
+        text: "🧠 Память диалогов: сохранена памятка за " + r.day + " (памяток за день: " + r.count + "). Спросить прошлые сессии — memoryList / memorySearch.",
+      });
+    }
+    return r;
+  } catch {
+    return null;
+  }
+}
+
 async function runAi(settings, messages, win, opts) {
   opts = opts || {};
   const planMode = !!(opts.plan || opts.planMode); // режим «сначала план»: инструменты не выполняются
@@ -3810,7 +4116,13 @@ async function runAi(settings, messages, win, opts) {
   const activeTools = planMode ? [] : selectTools(budget);
   const toolsWeight = activeTools.length ? estimateTokens(JSON.stringify(activeTools)) : 0;
   let histBudget = Math.max(1500, budget - toolsWeight); // бюджет истории без учёта схемы инструментов
-  const ctxManager = createContextManager({ settings, emit, planMode });
+  const ctxManager = createContextManager({
+    settings,
+    emit,
+    planMode,
+    // Память диалогов: при сжатии контекста пишем памятку в локальный дневник (по датам).
+    onMemo: (m) => saveContextMemo(settings, m, emit),
+  });
   // Индикатор контекста: сколько токенов занимают история + схема инструментов.
   // Отправляется в интерфейс полоской под полем ввода (видно, когда контекст подходит к концу).
   const emitContext = (hist) => {
@@ -4394,6 +4706,16 @@ ipcMain.handle("settings:set", (_e, s) => {
   // Защита пароля почты: сохранение без ключа mailPassword (мобильный клиент,
   // старый интерфейс) не должно стирать уже сохранённый пароль приложения.
   if (!s || s.mailPassword === undefined) merged.mailPassword = prev.mailPassword || "";
+  // Защита выбора Yandex Cloud: каталог/облако меняются ТОЛЬКО своими IPC
+  // (yc:setToken, yc:setFolder, автовыбор внутри yc:status, сброс в yc:logout) —
+  // в форме настроек такого поля нет. Объект интерфейса, загруженный ДО автовыбора
+  // каталога, приносил пустой (или устаревший) ycFolderId и стирал выбор: агент
+  // снова видел «каталог не выбран», и каталог приходилось выбирать заново.
+  // Та же болезнь, что у sitePasswords и mailPassword. Поэтому поля Yandex Cloud
+  // берём из текущих настроек, а не из присланного объекта.
+  merged.ycFolderId = prev.ycFolderId || "";
+  merged.ycFolderName = prev.ycFolderName || "";
+  merged.ycCloudId = prev.ycCloudId || "";
   // При смене рабочей папки — сбрасываем локальную папку выбранного GitHub-репозитория,
   // чтобы не подхватывать старый путь от прошлой локации.
   if (s && s.workingDir && prev.workingDir !== s.workingDir) {
@@ -5599,13 +5921,18 @@ async function readYcLogsText(cfg, serviceKey, resourceId, args) {
   const a = args || {};
   if (!cfg.folderId) throw new Error("не выбран каталог (Настройки → Yandex Cloud).");
   const iam = await yandexCloud.getIamToken(cfg.oauth);
+  // REST-список групп и gRPC-чтение живут на РАЗНЫХ хостах: logGroups — на
+  // logging.api.cloud.yandex.net, а LogReadingService.Read — только на
+  // reader.logging.yandexcloud.net (см. yc-logs.js и KNOWN_ENDPOINTS).
   const base = (await yandexCloud.endpoint("logging")) || "https://logging.api.cloud.yandex.net";
+  const grpcBase = (await yandexCloud.endpoint("log-reading")) || "https://reader.logging.yandexcloud.net";
   const limit = Math.max(1, Math.min(parseInt(a.limit, 10) || 100, 500));
   const sinceHours = Math.max(1, Math.min(parseInt(a.sinceHours, 10) || 3, 168));
   const type = YC_RESOURCE_TYPES[serviceKey] || (a.type ? String(a.type) : "");
   const res = await ycLogs.readLogs({
     iamToken: iam,
     baseUrl: base,
+    grpcBaseUrl: grpcBase,
     folderId: cfg.folderId,
     resourceIds: resourceId ? [resourceId] : [],
     resourceTypes: type ? [type] : [],
@@ -5668,6 +5995,44 @@ function ycRequireAuth(cfg) {
   }
 }
 
+// ── 🧠 Память диалогов: локальный дневник сжатых памяток (папка по датам) ──────
+ipcMain.handle("memory:stats", () => {
+  const s = loadSettings();
+  const st = agentStore.contextMemoryStats(app.getPath("userData"));
+  return {
+    ...st,
+    enabled: !!s.contextMemory,
+    keepDays: Number(s.contextMemoryDays) || agentStore.CTX_MEMO_DAY_KEEP,
+  };
+});
+
+ipcMain.handle("memory:days", () => {
+  const s = loadSettings();
+  if (!s.contextMemory) return { ok: false, error: "Память диалогов выключена." };
+  const days = agentStore.contextMemoryDays(app.getPath("userData"));
+  return { ok: true, days, dir: agentStore.contextMemoryDir(app.getPath("userData")) };
+});
+
+ipcMain.handle("memory:openDir", async () => {
+  const dir = agentStore.contextMemoryDir(app.getPath("userData"));
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {}
+  const err = await shell.openPath(dir);
+  return { ok: !err, dir, error: err || "" };
+});
+
+ipcMain.handle("memory:clear", (_e, date) => {
+  const d = String(date || "").trim();
+  const r = agentStore.contextMemoryClear(app.getPath("userData"), d);
+  return {
+    ...r,
+    message: r.ok
+      ? "Удалено дней: " + r.removedDays + ", памяток: " + r.removedMemos + "."
+      : "Ошибка: " + r.error,
+  };
+});
+
 ipcMain.handle("yc:status", async () => {
   const s = loadSettings();
   const cfg = ycConfig(s);
@@ -5687,11 +6052,17 @@ ipcMain.handle("yc:status", async () => {
   };
   if (!cfg.oauth) return out;
   try {
-    const clouds = await yandexCloud.listClouds(cfg.oauth);
+    // Обмен токена — один раз, затем облака и каталоги идут ПАРАЛЛЕЛЬНО, когда
+    // каталог уже известен: последовательный путь складывал таймауты (20 с + 20 с)
+    // и автовыбор каталога занимал десятки секунд.
+    await yandexCloud.getIamToken(cfg.oauth);
+    const cloudsP = yandexCloud.listClouds(cfg.oauth);
+    const foldersP = cfg.cloudId ? yandexCloud.listFolders(cfg.oauth, cfg.cloudId) : null;
+    const clouds = await cloudsP;
     out.clouds = clouds;
     out.iamOk = true;
     const cloudId = cfg.cloudId || (clouds[0] && clouds[0].id) || "";
-    const folders = await yandexCloud.listFolders(cfg.oauth, cloudId);
+    const folders = foldersP ? await foldersP : await yandexCloud.listFolders(cfg.oauth, cloudId);
     out.folders = folders;
     if (!cfg.folderId && folders[0]) {
       // Первый запуск: автоматически выбираем первый каталог первого облака.

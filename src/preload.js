@@ -128,6 +128,12 @@ contextBridge.exposeInMainWorld("api", {
   ycCliStatus: () => ipcRenderer.invoke("yc:cliStatus"),
   ycInstallCli: () => ipcRenderer.invoke("yc:installCli"),
 
+  // 🧠 Память диалогов: дневник сжатых памяток контекста (папка по датам)
+  memoryStats: () => ipcRenderer.invoke("memory:stats"),
+  memoryDays: () => ipcRenderer.invoke("memory:days"),
+  memoryOpenDir: () => ipcRenderer.invoke("memory:openDir"),
+  memoryClear: (date) => ipcRenderer.invoke("memory:clear", date),
+
   // Локальный self-update (OTA): статус, проверка, откат, открыть папку
   otaStatus: () => ipcRenderer.invoke("ota:status"),
   otaCheck: () => ipcRenderer.invoke("ota:check"),

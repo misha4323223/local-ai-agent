@@ -142,6 +142,9 @@
         <span>Думаю...</span>
       </div>
 
+      <!-- План работ агента (todoWrite) / ход работы: чеклист с прогрессом -->
+      <div id="plan-panel" class="hidden"></div>
+
       <!-- Живая панель действий агента: инструменты, правки кода — над полем ввода -->
       <div id="work-panel"></div>
 
@@ -487,6 +490,7 @@
           <button class="stab" data-tab="secrets" title="Переменные окружения и секреты для команд">🔒 Секреты</button>
           <button class="stab" data-tab="yandex" title="Yandex Cloud: авторизация, каталог, разрешения агента">☁️ Yandex Cloud</button>
           <button class="stab" data-tab="mail" title="Почта: отправка писем и коды подтверждения (SMTP/IMAP)">✉️ Почта</button>
+          <button class="stab" data-tab="memory" title="Память диалогов: сжатые памятки контекста сохраняются локально по датам">🧠 Память</button>
           <button class="stab" data-tab="ota" title="Локальные обновления кода на ходу">🔄 Self-update</button>
         </div>
 
@@ -926,7 +930,7 @@
                 <button id="btn-yc-install-cli" class="btn btn-ghost btn-small" title="Скачать официальный yc CLI прямо в папку приложения (системных прав не требует) и добавить в PATH всех команд агента">⬇️ Установить yc CLI</button>
                 <span id="yc-cli-status" class="hint">не проверено</span>
               </div>
-              <div class="hint-block" style="margin-top:6px">Токен и каталог подставляются в команды агента автоматически (YC_TOKEN, YC_CLOUD_ID, YC_FOLDER_ID) — <b>yc init не нужен</b>. Логи (<b>ycLogs</b>) читаются внутренним API, yc CLI для них не требуется.</div>
+              <div class="hint-block" style="margin-top:6px">Токен и каталог подставляются в команды агента автоматически (YC_IAM_TOKEN — свежий IAM, YC_CLOUD_ID, YC_FOLDER_ID) — <b>yc init не нужен</b>. Логи (<b>ycLogs</b>) читаются внутренним API, yc CLI для них не требуется.</div>
             </div>
             <div id="yc-settings-msg" class="hint-block"></div>
           </div>
@@ -989,6 +993,32 @@
             <div id="mail-msg" class="hint-block"></div>
             <div id="mail-list" class="env-list"></div>
             <div class="hint-block">Агент читает почту инструментами mailList и mailCode (код подтверждения), отправляет письма через mailSend. Пароль нигде не выводится в чат. Для Gmail включи двухфакторную аутентификацию и создай «пароль приложения» — обычный пароль Google не подойдёт.</div>
+          </div>
+        </div>
+
+        <!-- ── Вкладка: 🧠 Память диалогов ── -->
+        <div class="settings-tab-body hidden" data-tab-body="memory">
+          <div class="settings-section">
+            <div class="settings-section-title">🧠 Память диалогов</div>
+            <div class="field">
+              <label class="check-row" title="Когда контекст переполняется, агент сворачивает старые шаги в «памятку». При включённой галочке такие памятки сохраняются локально по датам, и агент может вспомнить прошлые сессии (memoryList / memorySearch). Пока галочка выключена, на диск ничего не пишется.">
+                <input id="s-context-memory" type="checkbox" />
+                <span class="check-row-text">
+                  <b>Сохранять сжатые памятки контекста</b>
+                  <small>Памятки складываются в отдельную папку приложения по датам (вне проекта и вне git). На вопрос «что мы делали 5-го числа» агент ответит по ним. Выключено по умолчанию.</small>
+                </span>
+              </label>
+            </div>
+            <div class="field" id="context-memory-fields">
+              <label>Хранить <span class="hint">(дней; старые дни удаляются автоматически)</span></label>
+              <div class="input-row">
+                <input id="s-context-memory-days" type="number" min="1" max="3650" step="1" placeholder="30" />
+                <button id="btn-memory-open" class="btn btn-ghost" title="Открыть папку с памятками в проводнике">📁 Открыть папку</button>
+                <button id="btn-memory-clear" class="btn btn-ghost" title="Удалить все сохранённые памятки (переписку и заметки не затрагивает)">🗑 Очистить</button>
+              </div>
+              <div id="memory-status" class="ota-status">—</div>
+              <div class="hint-block">Куда сохраняется: <code id="memory-dir">—</code>. Внутри — папка на каждый день: <code>day.md</code> для чтения и <code>.json</code> с точными данными. Длинные ключи и приватные ключи из переписки маскируются. Спросить у агента: «посмотри, что мы делали 5-го числа» или «найди в памяти, где мы правили деплой».</div>
+            </div>
           </div>
         </div>
 

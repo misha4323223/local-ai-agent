@@ -3202,3 +3202,107 @@ body { display: flex; flex-direction: column; }
   gap: 8px;
   flex-wrap: wrap;
 }
+
+/* ─── Ход работ: заголовок панели всегда наверху ─────────────────────────────
+   Когда список действий развёрнут, строки прокручиваются внутри панели. Раньше
+   заголовок уезжал вместе с ними, и чтобы свернуть действия, приходилось
+   пролистывать от последней строки до первой. Теперь он «липкий»: кнопка
+   свернуть/развернуть остаётся на месте при любой прокрутке. Плотный фон
+   обязателен — иначе строки просвечивали бы сквозь заголовок. */
+.work-group.expanded .work-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  border-bottom: 1px solid rgba(130, 170, 255, 0.18);
+  box-shadow: 0 6px 12px -8px rgba(0, 0, 0, 0.65);
+  background:
+    linear-gradient(180deg, rgba(0, 229, 255, 0.06), rgba(0, 229, 255, 0.02)),
+    linear-gradient(180deg, #141b2e, #0e1424);
+}
+.work-head:hover {
+  background:
+    linear-gradient(180deg, rgba(0, 229, 255, 0.12), rgba(0, 229, 255, 0.05)),
+    linear-gradient(180deg, #182036, #11182b);
+}
+/* Кнопка-подсказка в заголовке: явнее показываем, что строка кликабельна. */
+.work-head .work-chev { transition: transform 0.15s ease; }
+
+/* ─── План работ агента (todoWrite) ──────────────────────────────────────────
+   Чеклист с прогрессом над панелью действий. Живёт в отдельном контейнере
+   #plan-panel, поэтому не сбрасывается вместе с ходом работ и не уезжает при
+   прокрутке списка действий. */
+#plan-panel { padding: 0 16px 6px; flex-shrink: 0; }
+#plan-panel.hidden { display: none; }
+
+.plan-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  border-radius: 10px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(139, 92, 246, 0.07), rgba(0, 229, 255, 0.03)),
+    rgba(12, 16, 32, 0.72);
+}
+.plan-group.finished { border-color: rgba(46, 230, 168, 0.32); }
+
+.plan-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 11px;
+  font-size: 11.5px; color: var(--text-dim);
+  cursor: pointer; user-select: none;
+}
+.plan-head:hover { background: rgba(139, 92, 246, 0.09); }
+.plan-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--accent-violet);
+  animation: cursorBlink 1.2s steps(2, start) infinite;
+  flex-shrink: 0;
+}
+.plan-group.finished .plan-dot { background: var(--ok); animation: none; }
+.plan-title { flex: 1; font-weight: 600; letter-spacing: 0.01em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-group.finished .plan-title { color: var(--text-dim); }
+.plan-count {
+  font-size: 10px; font-weight: 700;
+  background: rgba(139, 92, 246, 0.16); color: #c8b6ff;
+  padding: 1px 7px; border-radius: 20px; flex-shrink: 0;
+}
+.plan-group.finished .plan-count { background: rgba(46, 230, 168, 0.14); color: #7cf0c9; }
+.plan-chev { font-size: 8px; color: var(--text-faint); flex-shrink: 0; }
+.plan-clear {
+  border: none; background: transparent; cursor: pointer;
+  color: var(--text-faint); font-size: 12px; line-height: 1;
+  padding: 2px 4px; border-radius: 6px; flex-shrink: 0;
+}
+.plan-clear:hover { background: rgba(255, 92, 122, 0.14); color: var(--danger); }
+.plan-run { flex-shrink: 0; }
+
+.plan-bar { height: 3px; background: rgba(140, 166, 255, 0.12); }
+.plan-fill {
+  height: 100%;
+  background: var(--gradient);
+  transition: width 0.25s ease;
+}
+.plan-group.finished .plan-fill { background: linear-gradient(90deg, #2ee6a8, #4fd662); }
+
+.plan-body { display: none; padding: 6px 11px 9px; }
+.plan-group.expanded .plan-body { display: block; }
+.plan-hint { font-size: 10.5px; color: var(--text-faint); margin-bottom: 5px; font-style: italic; }
+
+.plan-item {
+  display: flex; align-items: flex-start; gap: 7px;
+  font-size: 12px; line-height: 1.45;
+  padding: 2px 0;
+}
+.plan-ic { flex-shrink: 0; width: 14px; text-align: center; }
+.plan-txt { flex: 1; min-width: 0; word-break: break-word; }
+.plan-note { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
+.plan-item.st-done .plan-txt { color: var(--text-dim); }
+.plan-item.st-in_progress .plan-txt { color: var(--text); font-weight: 600; }
+.plan-item.st-failed .plan-txt { color: var(--danger); }
+.plan-item.st-pending .plan-txt { color: var(--text-faint); }
+
+@media (max-width: 720px) {
+  #plan-panel { padding: 0 10px 6px; }
+}
