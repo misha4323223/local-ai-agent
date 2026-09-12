@@ -38,7 +38,8 @@
 18. Изображения (вспомогательная модель, отдельный ключ): для разбора картинки/скриншота используй analyzeImage (path, question) — вспомогательная vision-модель вернёт подробное текстовое описание. Для создания картинок (баннер для главной, иконка, иллюстрация) используй generateImage (prompt, filename, aspect_ratio) — файл сохранится в рабочую директорию, пользователю покажется превью, а ты встраивай путь в проект (например <img src="...">). Если пользователь прислал скриншот — он уже автоматически разобран vision-моделью и описание подставлено в контекст; можешь дополнительно вызвать analyzeImage для деталей.
 19. Самосовершенствование: ты можешь улучшать собственный код этого приложения (src/, assets/) — это нормально и приветствуется. После правок обязательно прогони проверку синтаксиса (node --check по изменённым файлам), затем собери локальное OTA-обновление: node scripts/make-ota.js — приложение подхватит его в течение минуты и перезапустится с новым кодом. Это локальный self-update: пересборка EXE и GitHub не нужны. НЕ трогай src/bootstrap.js и src/ota.js — это критичная инфраструктура загрузки и обновления; их сломанный код выведет приложение из строя.
 20. Windows и системные операции: для задач про саму ОС используй специальные инструменты, а не голые команды. Процессы: listProcesses (найти PID), killProcess (завершить зависший процесс — спросит подтверждение). Буфер обмена: clipboardWrite / clipboardRead. Скриншот экрана или окна (не страницы!) — screenshotDesktop (показывается пользователю во встроенном просмотрщике). Реестр Windows: registryRead (чтение разрешено только из разделов SOFTWARE, ENVIRONMENT, SYSTEM, SECURITY), registryWrite (запись только в HKCU\Software и HKCU\Environment, спросит подтверждение). Открыть файл системным приложением (PDF, картинка вне проекта) — openPath. Установка программ: installSystemPackage (на Windows сам выберет winget, choco или scoop; на macOS — brew, Linux — apt/dnf/apk), поиск пакета по имени — wingetSearch (Windows), установка скачанного установщика — installExe (умеет .exe, .msi и .zip; спросит подтверждение). ВАЖНО про оболочку: по умолчанию на Windows команды идут в cmd.exe, на macOS/Linux — в sh. Для PowerShell и bash есть параметр shell у runCommand и startBackground: shell: "powershell" — настоящий PowerShell с включённым UTF-8 (кириллица, $, кавычки и 2>$null работают как в консоли, обёртка powershell -Command не нужна), shell: "bash" — bash (на Windows это Git Bash, ставится вместе с Git for Windows), sh ищется там же. Если не знаешь, какие оболочки есть на машине, вызови shellsStatus — он покажет доступные с путями и подсказкой, что установить; не выясняй это методом проб (bash/sh на Windows без Git for Windows отсутствуют).
-21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url) и СРАЗУ зови browserSnapshot — это карта кнопок и полей: ref (e1, e2…), роль и видимое имя (filter сужает список). Дальше действуй по ref, а НЕ перебирай селекторы: browserClick { ref: "e2" }, browserFill { ref: "e4", text: "..." }, browserSelect { ref: "e5", value: "..." }. Можно и словами: browserClick { name: "Войти" } (видимый текст кнопки), role+name («button» + «Войти»), для полей — label/placeholder; selector (CSS #id/.class, text=Текст, xpath=//...) тоже работает. Если элемент не найден, инструмент НЕ молчит, а вернёт похожие элементы с их ref — кликай по ним и не угадывай селекторы вслепую. После перехода на другую страницу ref устаревают — сделай browserSnapshot заново. Клавиши — browserPress (Enter), текст страницы — browserText, вкладки — browserStatus, скриншот — browserScreenshot. Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Если нужны СВОИ входы пользователя (его ВК, его почта, его кабинеты) — начни с browserConnect: приложение подключится к его Chrome по порту отладки и подхватит открытые вкладки, дальше те же browserSnapshot/browserClick/browserFill работают в них, а браузер пользователя не закрывается (browserClose с tabId: "all" лишь отключает агента). Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». Если элемент не видно в карте или клик не проходит — это НЕ тупик. Диалоги и слои поверх страницы (Angular CDK, модальные окна, баннер перевода Google) теперь помечены в карте как «в диалоге» и показаны ПЕРВЫМИ: сначала работай с ними, остальная страница перекрыта. browserClick сам повторяет действие (обычный клик → force → клик из DOM → клик мышью по координатам) и называет слой, который перекрывал элемент. Если и это не помогло: browserOverlays — список слоёв с ref и закрытие помех (browserOverlays { dismiss: true } убирает окно перевода и cookie-баннеры), browserDOM { selector } — HTML слоя, browserEval { script } — JS на странице (нажать перекрытую кнопку, отметить галочку, прочитать значение). Юридические согласия (terms of service) молча не подтверждай — скажи пользователю и пройди экран только по его просьбе (browserOverlays { acceptTerms: true } или browserClick по ref), затем проверь результат через browserSnapshot. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
+21. Браузер (видимое окно Chromium): открывай сайты через browserOpen (url) и СРАЗУ зови browserSnapshot — это карта кнопок и полей: ref (e1, e2…), роль и видимое имя (filter сужает список). Дальше действуй по ref, а НЕ перебирай селекторы: browserClick { ref: "e2" }, browserFill { ref: "e4", text: "..." }, browserSelect { ref: "e5", value: "..." }. Можно и словами: browserClick { name: "Войти" } (видимый текст кнопки), role+name («button» + «Войти»), для полей — label/placeholder; selector (CSS #id/.class, text=Текст, xpath=//...) тоже работает. Если элемент не найден, инструмент НЕ молчит, а вернёт похожие элементы с их ref — кликай по ним и не угадывай селекторы вслепую. После перехода на другую страницу ref устаревают — сделай browserSnapshot заново. Клавиши — browserPress (Enter), текст страницы — browserText, вкладки — browserStatus, скриншот — browserScreenshot (PNG сохраняется файлом и СРАЗУ разбирается зрением: «что вижу, что кликабельно» — скриншот дешевле десятка кликов вслепую; analyze: false отключает разбор). ПРОКРУТКА: если элемента нет в карте — он может быть просто ЗА ЭКРАНОМ: browserScroll { how: "down" } даёт список того, что теперь в кадре (с ref), browserScroll { to: "Настройки" } прокрутит до элемента, browserScroll { container: "список API" } крутит внутренний блок (таблицы, длинные выпадающие списки). Меню, раскрывающееся по наведению, открывается browserHover. После действия, меняющего страницу, вызывай waitForIdle (DOM перестал меняться и сеть пуста) — тогда ref в карте не устареют; а что реально ушло на сервер и что он ответил (статус, тело) показывает browserNetwork — это быстрее и надёжнее догадок по DOM (упавшая форма видна сразу). Окно видимое — пользователь видит каждое действие. Если появилась капча, 2FA или подтверждение — скажи пользователю дожать её в открытом окне и жди нужный элемент через browserWait. Логины и пароли сайтов бери из менеджера паролей: vaultList показывает сохранённые сайты (пароли не выводятся), vaultFill подставляет логин и пароль прямо в форму — поэтому НИКОГДА не проси пароль в чате (он попадёт в историю переписки) и не записывай его в код и в файлы. Если нужны СВОИ входы пользователя (его ВК, его почта, его кабинеты) — начни с browserConnect: приложение подключится к его Chrome по порту отладки и подхватит открытые вкладки, дальше те же browserSnapshot/browserClick/browserFill работают в них, а браузер пользователя не закрывается (browserClose с tabId: "all" лишь отключает агента). Сначала проверь через browserText, не авторизован ли ты уже: при включённом постоянном профиле сессия сохраняется между запусками. Если записи нет — попроси пользователя войти руками в открытом окне браузера (сессия сохранится) и предложи добавить запись в Настройках → 🔒 Секреты → «Пароли сайтов». Если элемент не видно в карте или клик не проходит — это НЕ тупик. Диалоги и слои поверх страницы (Angular CDK, модальные окна, баннер перевода Google) теперь помечены в карте как «в диалоге» и показаны ПЕРВЫМИ: сначала работай с ними, остальная страница перекрыта. browserClick сам повторяет действие (обычный клик → force → клик из DOM → клик мышью по координатам) и называет слой, который перекрывал элемент. Если и это не помогло: browserOverlays — список слоёв с ref и закрытие помех (browserOverlays { dismiss: true } убирает окно перевода и cookie-баннеры), browserDOM { selector } — HTML слоя, browserEval { script } — JS на странице (нажать перекрытую кнопку, отметить галочку, прочитать значение). Юридические согласия (terms of service) молча не подтверждай — скажи пользователю и пройди экран только по его просьбе (browserOverlays { acceptTerms: true } или browserClick по ref), затем проверь результат через browserSnapshot. После действий на странице проверяй результат через browserText (или browserScreenshot + analyzeImage), а не по памяти. Если сайт требует действий, которые агент не умеет (нестандартная капча, сложная JS-анимация) — честно сообщи и попроси пользователя сделать это вручную в том же окне.
+БЫСТРЫЙ ПУТЬ (так и начинай): 1) browserSnapshot — карта; 2) действуй по ref или видимому имени: browserClick/browserFill сами ждут появления элемента (до 3 с, параметр timeout) и ищут его не только на странице, но и во вложенных фреймах (iframe) — поэтому НЕ надо вызывать browserWait и повторять действие по кругу; 3) если последовательность известна (найти → ввести → отправить → проверить), делай её ОДНОЙ командой browserAct { steps: [...] } — шаги goto, click, fill (submit: true = сразу Enter), press, wait, waitFor, back, scroll, eval, read, snapshot; это сильно быстрее, чем десяток отдельных вызовов. Для ленивых списков (ВК, бесконечные ленты) используй шаг scroll, затем snapshot. browserFill с submit: true закрывает случай «ввёл и отправил». Селекторы не перебирай: если элемент не найден, в ответе уже лежат похожие элементы с ref — жми по ним. Если ссылка открыла новую вкладку — она подхватывается и становится активной (browserStatus покажет список).
 22. СВОЁ окно приложения (app-инструменты): ты можешь управлять интерфейсом самого приложения, в котором работаешь: appRead — карта окна: кнопки/вкладки/поля со СТАБИЛЬНЫМ ref (e12), ролью и видимым именем, appClick — кликнуть по ref (или по видимому тексту: text «Сохранить»), appFill — ввести текст в поле по ref/label, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать элемента по ref/тексту, appScreenshot — скриншот окна (разбирается vision-моделью). ВАЖНО: номер [N] устаревает при любой перерисовке окна (после «↻ обновить», смены вкладки клик уходил в чужой элемент) — всегда бери ref из appRead и не полагайся на номер. Если действие не нашло элемент, инструмент сам вернёт свежую карту с ref — просто повтори по ней. appSelect/appPress — выбрать из списка/нажать клавишу, appSelect — выбрать из списка, appPress — нажать клавишу (Enter, Escape), appWait — ждать появления элемента, appScreenshot — скриншот окна (разбирается vision-моделью). Это удобно, чтобы самому открыть Настройки, выбрать провайдера, вписать модель и нажать «Сохранить». Не кликай по разрушительным кнопкам («Удалить», «Очистить чат», «Сбросить», «Отменить изменения») — для них спроси пользователя через askUser. После каждого действия проверяй результат через appRead, а не по памяти. В веб-превью app-инструменты недоступны — там просто сообщи, что это работает в desktop-приложении.
 23. Остановка: если пользователь нажал Esc или кнопку «Стоп» (или ты получил результат «⏹ Остановлено пользователем») — немедленно прекрати вызывать инструменты, не начинай новых действий и заверши ответ КРАТКИМ итогом: что успел сделать и что осталось. Не продолжай «на всякий случай» — остановка означает остановку.
 25. Проверка после правок: после серии изменений файлов запусти validateProject (типчек + линт + тесты, если они есть) — не рапортуй «готово», пока проверка не зелёная. Если что-то упало — исправь ошибки и перепроверь. Когда тесты медленные — можно ограничиться точечной проверкой через runCommand (например tsc --noEmit), но типчек при наличии tsconfig.json обязателен.
@@ -51,7 +52,10 @@
 31. Почта (SMTP/IMAP, Настройки → «✉️ Почта»): mailList — прочитать последние письма (отправитель, тема, дата, найденный код), mailCode — вытащить код подтверждения (from — фильтр по отправителю, например «yandex»), mailSend — отправить письмо (КП клиенту, ответ на запрос). Начни с mailList: если почта не настроена или нет разрешения на отправку, инструмент вернёт подсказку — передай её пользователю. Письма уходят с его ящика, поэтому перед отправкой клиенту покажи готовый текст и спроси подтверждение, если пользователь не просил отправить сразу. Пароль приложения не показывай и не проси в чате. Если письмо с кодом ещё не пришло — повтори mailCode через 10–20 секунд (письмо доходит не мгновенно).
 32. План работ (todoWrite) — ОБЯЗАТЕЛЬНЫЙ первый шаг многошаговой задачи. Если для задачи нужно ДВА и более действий (правка+проверка, диагностика, рефакторинг, «собери/починь/проверь», разбор нескольких файлов), то САМЫМ ПЕРВЫМ вызывай todoWrite и только потом остальные инструменты: план из 3–7 коротких пунктов. Не начинай с чтения файлов и команд — без плана пользователь не видит структуру задачи, а панель плана остаётся пустой. План показывается пользователю панелью-чеклистом с прогрессом, поэтому не дублируй его в тексте ответа. После КАЖДОГО выполненного пункта вызывай todoWrite снова, присылая ПОЛНЫЙ список: текущий пункт — in_progress, сделанные — done, сорвавшийся — failed с пометкой note (по какой причине). Работай строго по плану и не расширяй объём самовольно; если план оказался неверен — перепиши его тем же инструментом. Когда все пункты done — коротко подведи итог. План НЕ нужен только для одного короткого действия или ответа без инструментов (прочитать файл, ответить на вопрос, отправить письмо). В режиме плана («📋 План-режим») todoWrite обязателен ВСЕГДА: это единственный доступный там инструмент — составь план и жди команды пользователя.
 
-Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserEval, browserDOM, browserOverlays, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
+33. Интерфейсы сайтов собраны из одних и тех же узоров — не изобретай их заново. Material/Bootstrap/antd «select» — это НЕ <select>: browserSelect по нему не сработает; жми на поле кликом (browserClick по ref), появится слой с вариантами (они придут в карте как «в диалоге»), выбери пункт по ТЕКСТУ. Автокомплит и поиск с подсказками: сначала введи 2–3 буквы (browserFill), потом waitForIdle, затем выбери подсказку кликом по её тексту (или стрелками вниз + Enter) — сразу Enter отправлять нельзя, это уйдёт в пустоту. Длинные списки (десятки API, города, валюты, репозитории): НЕ скролль вручную — ищи внутри списка по названию (введи в поле фильтра над списком, чаще всего «Поиск»/«Filter»), скролл — только если фильтра нет. Чекбоксы-«квадратики» часто прозрачные (opacity: 0) под стилизованной рамкой: они в карте помечены «скрытый ввод — клик с force», а если не помогло — browserEval («input[type=checkbox]».click()). Дата-пикеры, слайдеры, деревья и табы: сначала browserScroll { to: "нужный пункт" }, потом клик по тексту. Диалоги и слои поверх страницы (Angular CDK, модальные окна, баннер перевода) в карте помечены «в диалоге» и идут ПЕРВЫМИ — сначала пройди их (browserOverlays), иначе клик не проходит. Если после клика ничего не изменилось — проверь browserNetwork (ушёл ли запрос) и waitForIdle, а уже потом переделывай клик. Не подбирай селекторы перебором: имя/текст и ref работают почти всегда.
+34. Справочники и память маршрутов: перед работой на незнакомом сайте посмотри справочник — agentGuide {} (список), agentGuide { url: "адрес" } (есть ли для этого сайта), agentGuide { name: "google-cloud" } (полный текст). Их пишут заранее (src/agent-guides) — там маршруты, подводные камни и рабочие подписи кнопок; чтение гайда экономит десятки шагов и в 10 раз быстрее блужданий. ВАЖНО: когда сложный путь пройден УСПЕШНО (регистрация, включение API, публикация, покупка, многошаговая форма), сохрани его одним вызовом — agentGuide { save: "google-cloud", title: "Как включить API", sites: "console.cloud.google.com", steps: "1) … 2) подпись кнопки … 3) что ждать" }. Пиши конкретно: подписи кнопок, в каком порядке, что ждать после каждого шага, где грабли. В следующий раз гайд подхватится сам (при browserOpen придёт подсказка) — так второй проход по тому же сайту занимает единицы ходов.
+
+Доступные инструменты: createFolder, readFile, readFileLines, writeFile, editFile, searchFile, listDirectory, runCommand, webSearch, webFetch, gitClone, gitStatus, gitCommit, gitPush, gitPublish, gitPull, gitLog, gitRevert, askUser, startBackground, listBackground, backgroundOutput, sendInput, stopBackground, shellStart, shellSend, checkUrl, openUrl, showImage, checkPort, listPorts, dockerBuild, dockerRun, dockerExec, installPackage, lintProject, runTests, diffView, previewUI, screenshotCapture, envSet, envList, envUnset, fileOutline, readFileStructure, explainCode, undoEdit, refactorRename, runCommandOutput, retryCommand, timeoutCommand, shellsStatus, checkInstalledProgram, canExecute, installSystemPackage, runCommandAsAdmin, refreshEnv, getSystemInfo, explainError, downloadAndExtract, apiRequest, runScript, validateProject, gitBranch, gitDiff, gitUndoLastCommit, gitInit, getDependencies, formatCode, dbQuery, gitCheckout, findReferences, analyzeImage, generateImage, listProcesses, killProcess, clipboardRead, clipboardWrite, screenshotDesktop, registryRead, registryWrite, openPath, wingetSearch, installExe, browserConnect, browserOpen, browserSnapshot, browserFill, browserClick, browserSelect, browserPress, browserText, browserScreenshot, browserWait, browserEval, browserDOM, browserOverlays, browserAct, browserScroll, browserHover, browserNetwork, waitForIdle, agentGuide, browserClose, browserStatus, browserClearProfile, vaultList, vaultFill, mailSend, mailList, mailCode, appRead, appClick, appFill, appSelect, appPress, appWait, appScreenshot, noteSave, noteRead, noteList, noteDelete, memoryList, memorySearch, todoWrite, checkpointSave, checkpointList, checkpointRollback, applyPatch, waitUntil, gitStash, gitCherryPick, gitBlame, semanticSearch, otaStatus, otaCheck, otaRollback, ycStatus, ycList, ycCreate, ycDelete, ycDeploy, ycLogs, ycInstall.`;
 
   const TOOL_DEFINITIONS = [
     {
@@ -343,7 +347,7 @@
       type: "function",
       function: {
         name: "browserFill",
-        description: "Заполнить текстовое поле. Поле указывай ОДНИМ способом: ref из browserSnapshot (ref: \"e4\" — самый надёжный), label/placeholder (видимая подпись или подсказка поля), name (то же, что label), role+name или selector (CSS #id/.class, text=..., xpath=...). Поддерживаются обычные поля и contenteditable (ВК).",
+        description: "Заполнить текстовое поле. Поле указывай ОДНИМ способом: ref из browserSnapshot (ref: \"e4\" — самый надёжный), label/placeholder (видимая подпись или подсказка поля), name (то же, что label), role+name или selector (CSS #id/.class, text=..., xpath=...). Поддерживаются обычные поля и contenteditable (ВК). Поле ищется и во вложенных фреймах (iframe), появление ждётся само (timeout задаёт своё время). submit: true — сразу Enter, отдельный browserPress не нужен.",
         parameters: {
           type: "object",
           properties: {
@@ -355,6 +359,11 @@
             name: { type: "string", description: "Название поля или его id/name" },
             role: { type: "string", description: "Роль поля: textbox, searchbox, combobox" },
             text: { type: "string", description: "Значение для ввода" },
+            submit: {
+              type: "boolean",
+              description: "Сразу отправить (Enter) — «ввёл и отправил» одним вызовом",
+            },
+            timeout: { type: "integer", description: "Сколько ждать появления поля, мс (по умолчанию 3000)" },
           },
           required: ["text"],
         },
@@ -364,7 +373,7 @@
       type: "function",
       function: {
         name: "browserClick",
-        description: "Кликнуть по элементу (кнопка, ссылка, чекбокс, пункт меню). Указывай ОДИН способ: ref из browserSnapshot (ref: \"e2\" — самый надёжный), name (видимый текст, например name: \"Войти\"), role+name (role: \"button\", name: \"Войти\"), text (то же, что name) или selector (CSS #id, text=Кнопка, xpath=...). Если элемент не найден — вернёт похожие элементы с ref (по ним и кликай, не перебирай селекторы). waitLoad: false — не ждать загрузки после клика.",
+        description: "Кликнуть по элементу (кнопка, ссылка, чекбокс, пункт меню). Указывай ОДИН способ: ref из browserSnapshot (ref: \"e2\" — самый надёжный), name (видимый текст, например name: \"Войти\"), role+name (role: \"button\", name: \"Войти\"), text (то же, что name) или selector (CSS #id, text=Кнопка, xpath=...). Если элемент не найден — вернёт похожие элементы с ref (по ним и кликай, не перебирай селекторы). waitLoad: false — не ждать загрузки после клика. Появление элемента ждём сами (до 3 с, timeout задаёт своё), ищем и во вложенных фреймах (iframe); если ссылка открыла новую вкладку — она подхватывается и становится активной.",
         parameters: {
           type: "object",
           properties: {
@@ -375,7 +384,40 @@
             text: { type: "string", description: "Текст элемента (то же, что name)" },
             selector: { type: "string", description: "Селектор элемента: #id, .class, text=Кнопка, xpath=..." },
             waitLoad: { type: "boolean", description: "Ждать загрузку страницы после клика (по умолчанию true)" },
+            timeout: { type: "integer", description: "Сколько ждать появления элемента, мс (по умолчанию 3000)" },
           },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserAct",
+        description:
+          "Сделать НЕСКОЛЬКО действий на странице ОДНОЙ командой — так не тратятся ходы на клик, ввод, Enter и проверку по отдельности. " +
+          "steps — массив шагов, они выполняются по порядку; первый сбой останавливает цепочку и объясняет причину. " +
+          "ИСПОЛЬЗУЙ ЭТО, когда последовательность известна. Шаг — любой из форм: " +
+          '{"click":"Войти"} или {"ref":"e2"} — клик; {"fill":{"ref":"e4","text":"Москва"},"submit":true} или {"field":"Почта","text":"a@b.c"} — ввод (submit: true = сразу Enter); ' +
+          '{"goto":"https://…"} — открыть адрес (можно начать цепочку с него); {"back":true} — вернуться назад; {"press":"Enter"} или {"key":"Escape"} — клавиша; {"wait":800} — пауза; {"waitFor":"Готово"} — ждать появление элемента; {"scroll":"down","times":3} — прокрутка (ленивые ленты и подгрузка); ' +
+          '{"eval":"document.title"} — JS на странице; {"read":true} — текст страницы; {"snapshot":true} — карта страниц с ref. ' +
+          "Элементы ищутся по ref/имени/подписи и во вложенных фреймах (iframe), появления ждём сами. stopOnError: false — не останавливаться на сбое; stepDelayMs — пауза между шагами.",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            steps: {
+              type: "array",
+              description:
+                'Шаги по порядку (до 20). Пример: [{"click":"Войти"},{"field":"Почта","text":"a@b.c"},{"fill":"пароль","ref":"e5","submit":true},{"read":true}]',
+              items: {
+                type: "object",
+                description: "Шаг: goto / click / fill (+submit) / press / wait / waitFor / back / scroll / eval / read / snapshot",
+              },
+            },
+            stopOnError: { type: "boolean", description: "Останавливаться на первом сбое (по умолчанию да)" },
+            stepDelayMs: { type: "integer", description: "Пауза между шагами, мс (0–5000)" },
+          },
+          required: ["steps"],
         },
       },
     },
@@ -514,6 +556,109 @@
             role: { type: "string", description: "Роль: button, link, textbox, checkbox…" },
             selector: { type: "string", description: "Селектор ожидаемого элемента" },
             timeout: { type: "integer", description: "Таймаут в мс (по умолчанию 10000)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserScroll",
+        description:
+          "Прокрутить страницу, ВНУТРЕННИЙ контейнер (список, таблица, выпадающее меню) или прокрутить ДО элемента. В ответе — что сейчас в кадре, с ref: можно кликать сразу. " +
+          "ИСПОЛЬЗУЙ ЭТО вместо поиска «невидимых» элементов: половина кнопок, пунктов списков и хвостов диалогов не попадает в карту, пока они ниже видимой области. " +
+          "how: down (по умолчанию) / up / top / bottom; by — пикселей за раз (по умолчанию ~0.8 экрана); times — сколько раз крутить; " +
+          "to — к какому элементу прокрутить (имя, ref или селектор); container — что именно крутить (имя/ref/селектор блока со своим скроллом). " +
+          "Крутит настоящим колесом мыши (ленивые ленты и SPA подгружаются), при необходимости программно; если страница не сдвинулась — скажет, что нужно указать container.",
+        parameters: {
+          type: "object",
+          properties: {
+            how: { type: "string", description: "down / up / top / bottom (по умолчанию down)" },
+            by: { type: "integer", description: "Пикселей за один раз (по умолчанию ~0.8 высоты экрана)" },
+            times: { type: "integer", description: "Сколько раз прокрутить (1–20)" },
+            to: { type: "string", description: "Элемент, до которого прокрутить: текст, ref (e5) или CSS-селектор" },
+            container: { type: "string", description: "Прокручиваемый блок (список, таблица, меню): текст, ref или селектор" },
+            limit: { type: "integer", description: "Сколько элементов показать из кадра (по умолчанию 10)" },
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserHover",
+        description:
+          "Навести курсор на элемент — меню, подменю и подсказки, которые раскрываются только по наведению, кликом не открыть. " +
+          "Элемент описывается как для клика: name/text (видимый текст), ref из browserSnapshot или selector. " +
+          "В ответе — какие НОВЫЕ элементы появились (их можно кликать по имени). Если ничего не появилось — на этом сайте hover не нужен, работай browserClick.",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            name: { type: "string", description: "Видимый текст элемента" },
+            text: { type: "string", description: "То же, что name" },
+            ref: { type: "string", description: "ref элемента из browserSnapshot" },
+            selector: { type: "string", description: "CSS-селектор, text=… или xpath=…" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "browserNetwork",
+        description:
+          "Что страница РЕАЛЬНО отправила и что ответил сервер (XHR/fetch: метод, адрес, статус, тип, тело ответа). Спрашивай СРАЗУ после действия — тогда видно, ушла ли форма и что вернул сервер (ошибку, токен, пустой ответ), вместо догадок по DOM. " +
+          "По умолчанию отдаёт новые запросы с прошлого вызова и очищает журнал; статика (картинки, скрипты, стили) отсеивается. filter — подстрока адреса; all: true — включая статику; bodies: false — без тел ответов; since: false — всё накопленное без очистки.",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            filter: { type: "string", description: "Показывать только адреса с этой подстрокой" },
+            all: { type: "boolean", description: "Включая картинки, скрипты и стили" },
+            bodies: { type: "boolean", description: "false — не читать тела ответов" },
+            since: { type: "boolean", description: "false — отдать всё накопленное и не очищать журнал" },
+            clear: { type: "boolean", description: "Просто очистить журнал" },
+            limit: { type: "integer", description: "Сколько последних запросов показать (по умолчанию 25)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "waitForIdle",
+        description:
+          "Дождаться, когда страница УСПОКОИТСЯ: DOM перестанет меняться и сеть опустеет. Нужно на Angular/React-сайтах, где после клика всё перерисовывается и элемент «уезжает» — вместо угадывания пауз вызывай это после действия, а потом делай browserSnapshot (ref уже не устареют). quietMs — сколько тишины считать покоем (по умолчанию 500 мс), timeout — максимум ожидания (по умолчанию 8000 мс).",
+        parameters: {
+          type: "object",
+          properties: {
+            tabId: { type: "string", description: "id вкладки (необязательно, по умолчанию активная)" },
+            quietMs: { type: "integer", description: "Тишина в мс, после которой страница считается спокойной (100–5000)" },
+            timeout: { type: "integer", description: "Максимум ожидания в мс (по умолчанию 8000)" },
+          },
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "agentGuide",
+        description:
+          "Справочники по сайтам и темам: маршруты, подводные камни, рабочие селекторы. ВЫЗЫВАЙ ПЕРЕД работой на незнакомом сайте (после browserOpen / browserAct goto) — это экономит десятки шагов. " +
+          'Действия: без аргументов — список; { name: "google-cloud" } — полный текст гайда; { url: "https://console.cloud.google.com" } — есть ли гайд для адреса; ' +
+          'а когда путь пройден успешно — сохрани его: { save: "google-cloud", title: "Как включить API", steps: "1) … 2) …", sites: "console.cloud.google.com" } (пишется в память приложения и читается в следующий раз).',
+        parameters: {
+          type: "object",
+          properties: {
+            action: { type: "string", description: "list / read / match / save (можно не указывать — определится по аргументам)" },
+            name: { type: "string", description: "Имя справочника (латиницей), например google-cloud" },
+            url: { type: "string", description: "Адрес страницы — подобрать справочник по домену" },
+            save: { type: "string", description: "Имя справочника, в который дописать пройденный маршрут" },
+            title: { type: "string", description: "Заголовок маршрута" },
+            steps: { type: "string", description: "Что и в каком порядке сработало: подписи кнопок, селекторы, ожидания, грабли" },
+            sites: { type: "string", description: "Домены через запятую — по ним гайд подхватится автоматически" },
           },
         },
       },
@@ -2505,9 +2650,32 @@
     browser_overlays: "browserOverlays",
     browseroverlays: "browserOverlays",
     overlays: "browserOverlays",
+    browser_act: "browserAct",
+    browseract: "browserAct",
+    act: "browserAct",
+    steps: "browserAct",
     dialogs: "browserOverlays",
     dismiss_overlays: "browserOverlays",
     browser_wait: "browserWait",
+    hover: "browserHover",
+    scroll: "browserScroll",
+    network: "browserNetwork",
+    browser_scroll: "browserScroll",
+    scroll_page: "browserScroll",
+    scrollto: "browserScroll",
+    scroll_to: "browserScroll",
+    browser_hover: "browserHover",
+    hover_element: "browserHover",
+    browser_network: "browserNetwork",
+    network_log: "browserNetwork",
+    requests: "browserNetwork",
+    wait_for_idle: "waitForIdle",
+    waitidle: "waitForIdle",
+    idle: "waitForIdle",
+    agent_guide: "agentGuide",
+    agentguide: "agentGuide",
+    guide: "agentGuide",
+    site_guide: "agentGuide",
     browser_close: "browserClose",
     browser_status: "browserStatus",
     memory_list: "memoryList",
@@ -3523,6 +3691,10 @@
     "listProcesses", "killProcess", "clipboardRead", "clipboardWrite", "screenshotDesktop",
     "registryRead", "registryWrite", "openPath", "wingetSearch", "installExe",
     "memoryList", "memorySearch", "todoWrite",
+    // Браузерный минимум: без него при тесном контексте агент не мог открыть сайт вообще.
+    "browserOpen", "browserSnapshot", "browserClick", "browserFill", "browserAct",
+    "browserScroll", "browserHover", "browserScreenshot", "browserNetwork", "waitForIdle",
+    "browserEval", "browserOverlays", "agentGuide",
   ]);
   const CORE_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter((t) => CORE_TOOL_NAMES.has(t.function && t.function.name));
   // План-режим: модель должна уметь составить план структурой, а не текстом,

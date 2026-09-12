@@ -60,6 +60,13 @@ let cdpContext = null; // контекст браузера пользовате
 let runningModeKey = null; // режим+профиль текущей сессии (см. modeKey)
 
 const ACTION_TIMEOUT = 12000;
+// Сколько ждём появления элемента, прежде чем сказать «не нашёл». Раньше провал был
+// мгновенным: если SPA ещё не дорисовала кнопку, модель получала ошибку и тратила
+// ходы на browserWait и повторный browserSnapshot. Теперь ждём сами.
+const FIND_TIMEOUT = 3000;
+const FIND_POLL_MS = 200;
+// По ref ждать почти нечего: либо элемент на месте, либо ref устарел после перехода.
+const FIND_TIMEOUT_REF = 800;
 
 // Только для тестов: подставляет заглушку playwright (реальный браузер не запускается)
 // или сбрасывает кэш (null), чтобы следующий вызов взял свежий модуль.
@@ -281,7 +288,25 @@ function cdpHowTo(port) {
 function listPages() {
   try {
     if (cdpActive && cdpContext) return cdpContext.pages();
-    if (browser && typeof browser.pages === "function") return browser.pages();
+    if (browser && typeof browser.pages === "function") {
+      const r = browser.pages();
+      // ВАЖНО: у BrowserContext pages() синхронный (массив), у Browser — Promise.
+      // Раньше промис возвращался как «список» (length === undefined), и всё,
+      // что по нему итерируется, падало с «pages is not iterable».
+      return Array.isArray(r) ? r : [];
+    }
+  } catch {}
+  return [];
+}
+
+// Тот же список, но с ожиданием (для подхвата вкладок, открытых кликом).
+async function allPages() {
+  try {
+    if (cdpActive && cdpContext) return cdpContext.pages() || [];
+    if (browser && typeof browser.pages === "function") {
+      const r = browser.pages();
+      return Array.isArray(r) ? r : (await r) || [];
+    }
   } catch {}
   return [];
 }
@@ -319,6 +344,41 @@ function adoptExistingPages() {
     names.push(tabId + "  " + url.slice(0, 90));
   }
   return names;
+}
+
+// Сколько вкладок сейчас открыто (без создания).
+async function pageCount() {
+  return (await allPages()).length;
+}
+
+// Подхватить вкладки, появившиеся ПОСЛЕ действия (ссылка с target=_blank,
+// window.open, платёжный виджет). Без этого агент остаётся в старой вкладке и
+// решает, что «клик ничего не сделал».
+async function adoptNewPages(before) {
+  const opened = [];
+  const pages = await allPages();
+  if (pages.length <= before) return opened;
+  for (const p of pages) {
+    let url = "";
+    try { url = p.url() || ""; } catch { continue; }
+    let known = false;
+    for (const tb of tabs.values()) if (tb.page === p) { known = true; break; }
+    if (known || !/^https?:/i.test(url)) continue;
+    if (tabs.size >= 25) break;
+    const tabId = "tab" + (++tabSeq);
+    tabs.set(tabId, { id: tabId, page: p, openedAt: Date.now(), adopted: !!cdpActive });
+    activeTabId = tabId;
+    try {
+      p.on("close", () => {
+        if (tabs.has(tabId)) {
+          tabs.delete(tabId);
+          if (activeTabId === tabId) activeTabId = tabs.size ? Array.from(tabs.keys()).pop() : null;
+        }
+      });
+    } catch {}
+    opened.push(tabId + "  " + url.slice(0, 90));
+  }
+  return opened;
 }
 
 // Подключение к своему Chrome: сначала пробуем уже запущенный с отладкой, иначе
@@ -534,6 +594,8 @@ function resolveTab(tabId) {
 }
 
 function needTab(tabId) {
+  // Сеть вкладки копим с первого инструмента: агент спрашивает её ПОСЛЕ действия.
+  try { const t0 = activeTabId ? tabs.get(tabId || activeTabId) : null; if (t0 && t0.page && t0.page.on) netRecorder(t0.page); } catch (e) {}
   if (!sessionAlive()) {
     return { error: "Браузер не запущен. Сначала вызови browserOpen (url)." };
   }
@@ -907,14 +969,70 @@ function fieldCandidates(page, q) {
   return out;
 }
 
-async function resolveTarget(page, q, kind) {
-  let cands = [];
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Все «окна» страницы: сама страница + вложенные фреймы (вход через iframe,
+// платёжные и капча-виджеты, ленивые консоли). Поиск по фреймам снимает
+// половину «не нашёл» — раньше такой элемент был для агента невидимым.
+function frameList(page) {
+  const out = [page];
   try {
-    cands = kind === "field" ? fieldCandidates(page, q) : clickCandidates(page, q);
-  } catch (e) {
-    cands = [];
+    if (page && typeof page.frames === "function") {
+      for (const f of page.frames()) if (f && out.indexOf(f) < 0) out.push(f);
+    }
+  } catch {}
+  return out;
+}
+
+function frameLabel(page, fr) {
+  if (!fr || fr === page) return "";
+  let u = "";
+  try { u = fr.url() || ""; } catch {}
+  if (!u) {
+    try { if (typeof fr.name === "function") u = fr.name() || ""; } catch {}
   }
-  return await firstUsable(cands);
+  return u ? " (фрейм " + String(u).slice(0, 70) + ")" : " (фрейм)";
+}
+
+async function visibleNow(loc) {
+  try { return await loc.isVisible(); } catch { return false; }
+}
+
+// Поиск цели по ВСЕМ фреймам и с ожиданием появления. Если ничего не нашли сразу —
+// опрашиваем страницу до timeout (по умолчанию 3 с), вместо мгновенного провала.
+// Возвращает { loc, desc, frame } или невидимый запасной вариант (клик попробует
+// прокрутить его и нажать силой).
+async function resolveTarget(page, q, kind, opts) {
+  const o = opts || {};
+  const asked = parseInt(o.timeout, 10);
+  const waitMs = q.ref
+    ? (isNaN(asked) ? FIND_TIMEOUT_REF : Math.min(asked, 10000))
+    : (isNaN(asked) ? FIND_TIMEOUT : Math.max(0, Math.min(asked, 30000)));
+  const deadline = Date.now() + waitMs;
+  let fallback = null;
+  for (;;) {
+    fallback = null;
+    for (const fr of frameList(page)) {
+      let cands = [];
+      try {
+        cands = kind === "field" ? fieldCandidates(fr, q) : clickCandidates(fr, q);
+      } catch (e) {
+        cands = [];
+      }
+      const t = await firstUsable(cands);
+      if (!t) continue;
+      const rc = { loc: t.loc, desc: t.desc + frameLabel(page, fr), frame: fr };
+      if (await visibleNow(t.loc)) return rc;
+      if (!fallback) fallback = rc;
+    }
+    // Что-то нашли (пусть и невидимое) — не ждём: дальше решает клик (force/прокрутка).
+    if (fallback) return fallback;
+    if (Date.now() >= deadline) break;
+    await sleep(FIND_POLL_MS);
+  }
+  return null;
 }
 
 // Что искать в подсказках: человеческое имя, а не CSS-селектор.
@@ -938,6 +1056,203 @@ async function missText(page, what, q, reason) {
     "Ошибка " + what + ":\n" +
     dom.suggestText({ items: map.items || [], query: suggestQuery(q), reason: why })
   );
+}
+
+// ── Составное действие: несколько шагов одной командой ────────────────────
+// Зачем: слабая или быстрая модель тратит ходы на каждый шаг (клик → карта →
+// ввод → Enter → проверка) и на этом «застревает». Здесь вся цепочка идёт одним
+// вызовом: мы сами ждём появления элементов и останавливаемся на первом сбое.
+// Шаги (любая форма, см. normalizeStep):
+//   { "click": "Войти" } · { "ref": "e2" } · { "click": { "ref": "e2" } }
+//   { "fill": { "ref": "e4", "text": "…" }, "submit": true }
+//   { "fill": "привет", "ref": "e9" } · { "field": "Почта", "text": "a@b.c" }
+//   { "press": "Enter" } · { "key": "Escape" }
+//   { "wait": 800 } · { "waitFor": "Готово" }
+//   { "scroll": "down", "times": 3 } · { "eval": "document.title" }
+//   { "read": true } · { "snapshot": true }
+function stepQuery(s) {
+  const q = {};
+  for (const k of ["ref", "selector", "css", "role", "name", "label", "placeholder", "field", "text"]) {
+    if (s[k] != null) q[k] = s[k];
+  }
+  return q;
+}
+
+function normalizeStep(raw) {
+  if (typeof raw === "string") {
+    return { kind: "click", args: { name: raw }, label: "клик по «" + raw.slice(0, 40) + "»" };
+  }
+  const s = raw && typeof raw === "object" ? raw : null;
+  if (!s) return null;
+  const q = stepQuery(s);
+  const code = s.eval != null ? s.eval : s.js != null ? s.js : s.script != null ? s.script : null;
+  if (code != null) return { kind: "eval", args: { script: code }, label: "JS на странице" };
+  const link = s.goto != null ? s.goto : s.open != null ? s.open : s.navigate != null ? s.navigate : null;
+  if (typeof link === "string" && link) {
+    return { kind: "open", args: { url: link, newTab: s.newTab }, label: "открыть " + link.slice(0, 60) };
+  }
+  if (s.back === true || s.goBack === true || s.previous === true) {
+    return { kind: "back", args: {}, label: "назад по истории" };
+  }
+  if (typeof s.press === "string" && s.press) return { kind: "press", args: { key: s.press, waitLoad: s.waitLoad }, label: "клавиша " + s.press };
+  if (typeof s.key === "string" && s.key) return { kind: "press", args: { key: s.key, waitLoad: s.waitLoad }, label: "клавиша " + s.key };
+  if (s.enter === true) return { kind: "press", args: { key: "Enter", waitLoad: s.waitLoad }, label: "клавиша Enter" };
+  if (s.waitFor != null || s.forText != null) {
+    const w = s.waitFor != null ? s.waitFor : s.forText;
+    const wargs = typeof w === "string" ? Object.assign({}, q, { name: w }) : Object.assign({}, q, w || {});
+    return { kind: "wait", args: wargs, label: "ждать появление «" + String(w && typeof w === "string" ? w : wargs.name || "").slice(0, 40) + "»" };
+  }
+  const pause = s.wait != null ? s.wait : s.ms != null ? s.ms : s.sleep;
+  if (pause != null && !isNaN(parseInt(pause, 10))) {
+    const n = Math.min(Math.max(parseInt(pause, 10), 0), 60000);
+    return { kind: "pause", args: { ms: n }, label: "пауза " + n + " мс" };
+  }
+  if (s.scroll != null) {
+    return { kind: "scroll", args: { how: s.scroll, times: s.times }, label: "прокрутка (" + String(s.scroll) + ")" };
+  }
+  if (s.read === true || (s.text === true && !q.ref)) {
+    return { kind: "text", args: { max: s.max }, label: "текст страницы" };
+  }
+  if (s.snapshot != null) {
+    const sn = s.snapshot && typeof s.snapshot === "object" ? s.snapshot : {};
+    return { kind: "snapshot", args: sn, label: "карта страницы" };
+  }
+  // Значение для ввода: {"fill":"текст"} · {"fill":{...}} · {"type":"текст"} ·
+  // {"field":"Почта","text":"…"} — последний вариант слабые модели пишут чаще всего.
+  const val =
+    s.fill != null
+      ? s.fill
+      : s.type != null
+      ? s.type
+      : s.field != null && s.text != null
+      ? s.text
+      : s.field != null && s.value != null
+      ? s.value
+      : null;
+  if (val != null || s.field != null) {
+    const fargs = Object.assign({}, q);
+    if (typeof val === "string" || typeof val === "number") fargs.text = String(val);
+    else if (val && typeof val === "object") Object.assign(fargs, val);
+    if (s.submit != null) fargs.submit = s.submit;
+    return {
+      kind: "fill",
+      args: fargs,
+      label: "ввод" + (fargs.text != null ? " «" + String(fargs.text).slice(0, 30) + "»" : "") + (fargs.submit ? " + Enter" : ""),
+    };
+  }
+  if (s.click != null || dom.hasQuery(dom.parseQuery(q))) {
+    const cargs = Object.assign({}, q);
+    if (typeof s.click === "string") cargs.name = s.click;
+    else if (s.click && typeof s.click === "object") Object.assign(cargs, s.click);
+    if (s.waitLoad != null) cargs.waitLoad = s.waitLoad;
+    return {
+      kind: "click",
+      args: cargs,
+      label: "клик по " + (cargs.name || cargs.ref || cargs.selector || "элементу"),
+    };
+  }
+  return null;
+}
+
+// Прокрутка страницы: ленивые списки (ВК, бесконечные ленты) не отдают элементы,
+// пока их не подгрузят скроллом.
+async function scrollPage(page, a) {
+  const how = String(a.how == null ? "down" : a.how).toLowerCase();
+  const times = Math.max(1, Math.min(parseInt(a.times, 10) || 1, 10));
+  for (let i = 0; i < times; i++) {
+    let key = "PageDown";
+    if (how === "up" || how === "вверх") key = "PageUp";
+    else if (how === "top" || how === "начало") key = "Home";
+    else if (how === "bottom" || how === "низ") key = "End";
+    try {
+      await page.keyboard.press(key, { timeout: ACTION_TIMEOUT });
+    } catch (e) {
+      return "Ошибка browserAct (прокрутка): " + String((e && e.message) || e).slice(0, 150);
+    }
+    await sleep(250);
+  }
+  await afterNavigation(page);
+  return "OK — прокрутка " + how + (times > 1 ? " ×" + times : "");
+}
+
+async function goBackStep(page) {
+  try {
+    const r = await page.goBack({ timeout: ACTION_TIMEOUT, waitUntil: "domcontentloaded" });
+    if (!r) return "Ошибка browserAct (назад): история переходов пуста";
+  } catch (e) {
+    return "Ошибка browserAct (назад): " + String((e && e.message) || e).slice(0, 150);
+  }
+  const pi = await pageInfo(page);
+  return "OK — вернулся назад. URL: " + (pi.url || "—");
+}
+
+function stepFailed(res) {
+  return /^(Ошибка|Не нашёл|Браузер не запущен|Вкладка не найдена|browserDOM:)/.test(String(res || ""));
+}
+
+// Несколько шагов одной командой. Первый сбой останавливает цепочку
+// (stopOnError: false — продолжать), в ответе видно, что сработало, а что нет.
+async function act(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return t.error;
+  let steps = args.steps || args.actions || args.script;
+  if (typeof steps === "string") {
+    try { steps = JSON.parse(steps); } catch { steps = null; }
+  }
+  if (!Array.isArray(steps) || !steps.length) {
+    return (
+      "Ошибка browserAct: укажи steps — массив шагов. Пример:\n" +
+      'browserAct { steps: [{ "click": "Войти" }, { "field": "Почта", "text": "a@b.c" }, ' +
+      '{ "fill": "•••", "ref": "e5", "submit": true }, { "read": true }] }\n' +
+      "Шаги: goto (открыть адрес), click, fill (+submit), press, wait (мс), waitFor (текст), back, scroll, eval, read, snapshot."
+    );
+  }
+  const list = steps.slice(0, 20);
+  const stopOnError = args.stopOnError !== false;
+  const page = t.tab.page;
+  const rows = [];
+  let failed = 0;
+  for (let i = 0; i < list.length; i++) {
+    const st = normalizeStep(list[i]);
+    const num = i + 1;
+    if (!st) {
+      failed++;
+      rows.push(num + ". ❌ шаг не понял: " + JSON.stringify(list[i]).slice(0, 140));
+      if (stopOnError) break;
+      continue;
+    }
+    const a = Object.assign({}, st.args, { tabId: t.tab.id, waitLoad: args.waitLoad });
+    let res = "";
+    if (st.kind === "click") res = await click(a);
+    else if (st.kind === "fill") res = await fill(a);
+    else if (st.kind === "press") res = await press(a);
+    else if (st.kind === "wait") res = await wait(a);
+    else if (st.kind === "pause") res = await wait({ tabId: t.tab.id, ms: a.ms, load: a.load });
+    else if (st.kind === "eval") res = await evalJs(a);
+    else if (st.kind === "text") res = await text(a);
+    else if (st.kind === "snapshot") res = await snapshot(a);
+    else if (st.kind === "scroll") res = await scrollPage(page, a);
+    else if (st.kind === "open") res = await open(a);
+    else if (st.kind === "back") res = await goBackStep(page);
+    const bad = stepFailed(res);
+    if (bad) failed++;
+    const one = String(res || "").replace(/\s+/g, " ").trim().slice(0, 220);
+    rows.push(num + ". " + (bad ? "❌ " : "✅ ") + st.label + " — " + (one || "(без ответа)"));
+    if (bad && stopOnError) break;
+    if (args.stepDelayMs) await sleep(Math.min(Math.max(parseInt(args.stepDelayMs, 10) || 0, 0), 5000));
+  }
+  const info = await pageInfo(page);
+  const done = rows.filter((r) => r.indexOf("✅") > 0).length;
+  const out = [
+    "browserAct: шагов " + rows.length + " из " + list.length + ", ок: " + done + (failed ? ", сбоев: " + failed : ""),
+    ...rows,
+    "URL: " + (info.url || "—") + (info.title ? " («" + info.title + "»)" : ""),
+  ];
+  if (failed) {
+    out.push("Дальше: поправь шаг и вызови browserAct снова одним вызовом (похожие элементы и ref — browserSnapshot).");
+  }
+  return out.join("\n");
 }
 
 // ── Инструменты ────────────────────────────────────────────────────────────
@@ -1003,12 +1318,26 @@ async function fill(args) {
   const t = needTab(args.tabId || args.tab);
   if (t.error) return t.error;
   const text = String(args.text == null ? "" : args.text);
-  const q = dom.parseQuery(args, { forField: true });
+  // field — понятный человеку синоним подписи/имени поля (модели часто пишут именно так).
+  const fargs =
+    args.field != null && args.label == null && args.name == null
+      ? Object.assign({}, args, { name: args.field })
+      : args;
+  const q = dom.parseQuery(fargs, { forField: true });
   if (!dom.hasQuery(q)) {
     return "Ошибка browserFill: укажи поле — ref из browserSnapshot (ref: \"e4\"), label/placeholder/name (видимая подпись) или selector (CSS / text= / xpath=).";
   }
-  const target = await resolveTarget(t.tab.page, q, "field");
-  if (!target) return missText(t.tab.page, "browserFill", q, "поле не найдено");
+  const findStart = Date.now();
+  const found = await resolveTarget(t.tab.page, q, "field", { timeout: args.timeout });
+  if (!found) {
+    return missText(
+      t.tab.page,
+      "browserFill",
+      q,
+      "поле не найдено (ждал " + Math.round((Date.now() - findStart) / 1000) + " с)"
+    );
+  }
+  const target = found;
   let via = "fill";
   try {
     await target.loc.fill(text, { timeout: ACTION_TIMEOUT });
@@ -1023,7 +1352,25 @@ async function fill(args) {
       return missText(t.tab.page, "browserFill", q, ((e2 && e2.message) || firstErr || "").slice(0, 160));
     }
   }
-  return "OK — поле «" + target.desc + "» заполнено (" + text.length + " символов, способ: " + via + ").";
+  // submit: true — сразу отправить (Enter). Обычный случай: поиск, вход, сообщение.
+  // Так агент делает «ввёл и отправил» одним вызовом, без отдельного browserPress.
+  let sent = "";
+  if (args.submit) {
+    const key = typeof args.submit === "string" ? args.submit : "Enter";
+    try {
+      await t.tab.page.keyboard.press(key, { timeout: ACTION_TIMEOUT });
+      sent = "; отправлено (" + key + ")";
+      if (args.waitLoad !== false) await afterNavigation(t.tab.page);
+    } catch (e3) {
+      sent = "; но отправить не удалось (" + String((e3 && e3.message) || e3).slice(0, 120) + ")";
+    }
+  }
+  // Страницу показываем только после отправки: там возможен переход.
+  const pinfo = args.submit ? await pageInfo(t.tab.page) : null;
+  return (
+    "OK — поле «" + target.desc + "» заполнено (" + text.length + " символов, способ: " + via + sent + ")." +
+    (pinfo ? "\nСтраница: " + (pinfo.title ? "«" + pinfo.title + "» — " : "") + (pinfo.url || "—") : "")
+  );
 }
 
 // Кликнуть по элементу. Способы (любой один): ref из browserSnapshot,
@@ -1037,8 +1384,17 @@ async function click(args) {
   if (!dom.hasQuery(q)) {
     return "Ошибка browserClick: укажи, по чему кликать — ref из browserSnapshot (ref: \"e2\"), name (видимый текст кнопки), role+name или selector. Карту элементов даёт browserSnapshot.";
   }
-  const target = await resolveTarget(t.tab.page, q, "click");
-  if (!target) return missText(t.tab.page, "browserClick", q, "элемент не найден");
+  const findStart = Date.now();
+  const target = await resolveTarget(t.tab.page, q, "click", { timeout: args.timeout });
+  if (!target) {
+    return missText(
+      t.tab.page,
+      "browserClick",
+      q,
+      "элемент не найден (ждал " + Math.round((Date.now() - findStart) / 1000) + " с)"
+    );
+  }
+  const pagesBefore = await pageCount();
   try { await target.loc.scrollIntoViewIfNeeded({ timeout: 3000 }); } catch {}
   // Клик не сдаётся с первого раза: если элемент перекрыт слоем (диалог, баннер,
   // окно перевода) — повторяем силой, затем из DOM, затем мышью по координатам.
@@ -1088,8 +1444,12 @@ async function click(args) {
     );
   }
   if (args.waitLoad !== false) await afterNavigation(t.tab.page);
+  // Ссылка с target=_blank открывает НОВУЮ вкладку — подхватываем её и делаем
+  // активной, иначе агент продолжит работать в старой и решит, что клик не сработал.
+  const opened = await adoptNewPages(pagesBefore);
   const info = await pageInfo(t.tab.page);
   let out = "OK — клик по «" + target.desc + "» (" + via + "). Текущий URL: " + (info.url || "—");
+  if (opened.length) out += "\nОткрылась новая вкладка: " + opened.join(", ") + " — она стала активной.";
   if (blocker) {
     out +=
       "\nВнимание: элемент был перекрыт слоем (" + blocker + "). Если действие не сработало — " +
@@ -1518,7 +1878,19 @@ async function wait(args) {
   const t = needTab(args.tabId || args.tab);
   if (t.error) return t.error;
   const q = dom.parseQuery(args);
-  if (!dom.hasQuery(q)) return "Ошибка browserWait: укажи selector, ref или name/text ожидаемого элемента.";
+  // Пауза без элемента: browserWait { ms: 1500 } — иногда нужно просто дать
+  // странице дорисоваться, а искать конкретный элемент нечего.
+  const pauseMs = parseInt(args.ms != null ? args.ms : args.pause, 10);
+  if (!dom.hasQuery(q) && pauseMs > 0) {
+    const capped = Math.min(Math.max(pauseMs, 0), 60000);
+    await sleep(capped);
+    if (args.load) await afterNavigation(t.tab.page);
+    const pi = await pageInfo(t.tab.page);
+    return "OK — пауза " + capped + " мс. URL: " + (pi.url || "—");
+  }
+  if (!dom.hasQuery(q)) {
+    return "Ошибка browserWait: укажи selector, ref или name/text ожидаемого элемента (или паузу: browserWait { ms: 1500 }).";
+  }
   const timeout = Math.min(parseInt(args.timeout, 10) || 10000, 60000);
   const cands = q.ref
     ? [{ loc: t.tab.page.locator(dom.refSelector(q.ref)), desc: "ref " + q.ref }]
@@ -1666,6 +2038,483 @@ async function clearProfile() {
   return "OK — профиль браузера очищен. При следующем входе на сайт потребуется авторизация заново.";
 }
 
+// ── Скорость на сложных сайтах: прокрутка, наведение, сеть, ожидание покоя ──
+// Всё это агент раньше делал «на ощупь»: элементы были за экраном, меню не
+// раскрывались, а после клика он гадал по DOM, что ответил сервер.
+
+const NET_MAX = 200; // кольцевой буфер запросов на вкладку
+const NET_STATIC = { image: 1, font: 1, stylesheet: 1, media: 1, script: 1, other: 1 };
+
+// Состояние прокрутки страницы и её внутренних контейнеров: SPA часто скроллят
+// не body, а собственный блок — без этого «прокрутил, а ничего не сдвинулось».
+function scrollStateInPage() {
+  const de = document.scrollingElement || document.documentElement;
+  const inner = [];
+  const nodes = document.querySelectorAll("div,ul,ol,section,main,article,table,tbody,aside,nav");
+  for (let i = 0; i < nodes.length && inner.length < 3; i++) {
+    const el = nodes[i];
+    const st = getComputedStyle(el);
+    if ((st.overflowY === "auto" || st.overflowY === "scroll") && el.scrollHeight > el.clientHeight + 40) {
+      inner.push({
+        cls: String(el.className || "").replace(/\s+/g, ".").slice(0, 40),
+        top: Math.round(el.scrollTop),
+        max: Math.round(el.scrollHeight - el.clientHeight),
+      });
+    }
+  }
+  const vh = window.innerHeight || 800;
+  return {
+    y: Math.round(window.scrollY || de.scrollTop || 0),
+    max: Math.round(Math.max(0, de.scrollHeight - vh)),
+    vh: vh,
+    docH: Math.round(de.scrollHeight),
+    inner: inner,
+  };
+}
+
+// Прокрутить страницу (или самый большой внутренний контейнер, если body не скроллится).
+function scrollPageInPage(a) {
+  a = a || {};
+  const dy = Math.round(Number(a.dy) || 0);
+  const dx = Math.round(Number(a.dx) || 0);
+  const how = String(a.how || "down");
+  const de = document.scrollingElement || document.documentElement;
+  const vh = window.innerHeight || 800;
+  const pickBiggest = () => {
+    let best = null;
+    let bestRoom = 0;
+    const nodes = document.querySelectorAll("div,ul,ol,section,main,article,table,tbody,aside");
+    for (const el of nodes) {
+      const st = getComputedStyle(el);
+      if ((st.overflowY === "auto" || st.overflowY === "scroll") && el.scrollHeight > el.clientHeight + 40) {
+        const room = el.scrollHeight - el.clientHeight;
+        if (room > bestRoom) { bestRoom = room; best = el; }
+      }
+    }
+    return best;
+  };
+  const useWindow = !!de && de.scrollHeight > vh + 4;
+  const box = useWindow ? de : pickBiggest();
+  if (!box) return { moved: 0, mode: "прокрутки нет", y: 0, max: 0 };
+  const isWin = box === de;
+  const before = isWin ? window.scrollY || de.scrollTop : box.scrollTop;
+  if (how === "top") {
+    if (isWin) window.scrollTo(window.scrollX || 0, 0);
+    else box.scrollTop = 0;
+  } else if (how === "bottom") {
+    if (isWin) window.scrollTo(window.scrollX || 0, de.scrollHeight);
+    else box.scrollTop = box.scrollHeight;
+  } else if (isWin) {
+    window.scrollBy(dx, dy);
+  } else {
+    box.scrollTop = Math.max(0, box.scrollTop + dy);
+    if (dx) box.scrollLeft = Math.max(0, box.scrollLeft + dx);
+  }
+  const after = isWin ? window.scrollY || de.scrollTop : box.scrollTop;
+  return {
+    moved: Math.round(after - before),
+    mode: isWin ? "страница" : "внутренний контейнер",
+    y: Math.round(after),
+    max: Math.round(isWin ? Math.max(0, de.scrollHeight - vh) : box.scrollHeight - box.clientHeight),
+  };
+}
+
+// Прокрутить сам элемент (или ближайший прокручиваемый родитель) — списки,
+// выпадающие меню и таблицы со своим скроллом.
+function scrollInnerInPage(a) {
+  a = a || {};
+  const el = a.self;
+  if (!el) return { moved: 0, mode: "элемент не найден", y: 0, max: 0 };
+  const dy = Math.round(Number(a.dy) || 0);
+  const how = String(a.how || "down");
+  const scrollable = (n) => {
+    const st = getComputedStyle(n);
+    return (st.overflowY === "auto" || st.overflowY === "scroll") && n.scrollHeight > n.clientHeight + 4;
+  };
+  let box = el;
+  while (box && box !== document.body && box !== document.documentElement && !scrollable(box)) box = box.parentElement;
+  if (!box || box === document.body || box === document.documentElement) box = el;
+  const before = box.scrollTop;
+  if (how === "top") box.scrollTop = 0;
+  else if (how === "bottom") box.scrollTop = box.scrollHeight;
+  else box.scrollTop = Math.max(0, box.scrollTop + dy);
+  return {
+    moved: Math.round(box.scrollTop - before),
+    mode: "контейнер",
+    y: Math.round(box.scrollTop),
+    max: Math.round(Math.max(0, box.scrollHeight - box.clientHeight)),
+  };
+}
+
+// Наведение «по-настоящему»: hover ломается на перекрытых элементах, тогда
+// события мыши шлём прямо в DOM (меню и тултипы раскрываются и так).
+function hoverInPage(el) {
+  if (!el) return false;
+  for (const type of ["pointerover", "mouseover", "mouseenter", "mousemove"]) {
+    try {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+    } catch (e) {}
+  }
+  return true;
+}
+
+// Счётчики покоя: мутации DOM + запросы в полёте (ждут waitForIdle).
+function idleStartInPage() {
+  window.__aiIdle = window.__aiIdle || { mut: 0 };
+  window.__aiIdle.mut = 0;
+  try { if (window.__aiIdleObs) window.__aiIdleObs.disconnect(); } catch (e) {}
+  const root = document.documentElement || document.body;
+  window.__aiIdleObs = new MutationObserver(() => { window.__aiIdle.mut++; });
+  if (root) {
+    window.__aiIdleObs.observe(root, { childList: true, subtree: true, attributes: true, characterData: true });
+  }
+  return true;
+}
+
+function idleTakeInPage() {
+  const s = window.__aiIdle || { mut: 0 };
+  const m = s.mut;
+  s.mut = 0;
+  return m;
+}
+
+function idleStopInPage() {
+  try { if (window.__aiIdleObs) window.__aiIdleObs.disconnect(); } catch (e) {}
+  window.__aiIdleObs = null;
+  return true;
+}
+
+function posLine(st) {
+  const st1 = st || {};
+  const max = Number(st1.max) || 0;
+  const y = Number(st1.y) || 0;
+  const percent = max > 0 ? Math.round((y / max) * 100) : 100;
+  let out = "Прокрутка: " + y + " из " + max + " (" + percent + "%)";
+  if (Array.isArray(st1.inner) && st1.inner.length) {
+    out += ". Со своим скроллом: " + st1.inner.map((i) => "«" + (i.cls || "блок") + "» " + i.top + "/" + i.max).join(", ");
+  }
+  if (max > 0 && y >= max - 2) out += ". Это низ — ниже ничего нет.";
+  return out;
+}
+
+// Что видно в кадре СЕЙЧАС: с ref, чтобы сразу кликать без повторной карты.
+async function revealText(page, limit) {
+  const map = await collectMap(page);
+  const shown = map.items.filter((it) => it.inViewport && !it.inDialog);
+  const off = map.items.filter((it) => !it.inViewport).length;
+  const text = dom.formatSnapshot({
+    items: shown,
+    url: map.url,
+    title: map.title,
+    filter: "",
+    limit: Math.min(Math.max(parseInt(limit, 10) || 10, 3), 30),
+  });
+  return text + (off ? "\n(вне экрана ещё " + off + " — прокрути browserScroll или ищи по имени)" : "");
+}
+
+// Имена интерактивных элементов страницы — для сравнения «что появилось после наведения».
+async function namesOnPage(page) {
+  try {
+    const map = await collectMap(page);
+    return map.items.map((it) => it.role + " «" + it.name + "»");
+  } catch (e) {
+    return [];
+  }
+}
+
+// {"click":"Войти"} или {ref:"e2"} или CSS — приводим к виду, понятному поиску.
+function queryFromSpec(spec) {
+  const s = String(spec == null ? "" : spec).trim();
+  if (!s) return null;
+  if (/^e\d+$/i.test(s)) return { ref: s };
+  if (/^[#.\[]/.test(s)) return { selector: s };
+  if (/^text=|^xpath=/i.test(s)) return { selector: s };
+  return { name: s, text: s };
+}
+
+async function wheelAt(page, dx, dy, times, box) {
+  let vp = null;
+  try { vp = page.viewportSize ? page.viewportSize() : null; } catch (e) { vp = null; }
+  const w = (vp && vp.width) || 1024;
+  const h = (vp && vp.height) || 768;
+  const cx = box ? Math.round(box.x + box.width / 2) : Math.round(w / 2);
+  const cy = box ? Math.round(box.y + box.height / 2) : Math.round(h / 2);
+  try { if (page.mouse && page.mouse.move) await page.mouse.move(cx, cy); } catch (e) {}
+  if (!page.mouse || !page.mouse.wheel) return { ok: false };
+  for (let i = 0; i < times; i++) {
+    try {
+      await page.mouse.wheel(dx, dy);
+    } catch (e) {
+      return { ok: false, error: String((e && e.message) || e).slice(0, 140) };
+    }
+    await sleep(200);
+  }
+  return { ok: true };
+}
+
+// browserScroll: страница, внутренние контейнеры, «до элемента» (+ что появилось в кадре).
+async function scroll(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return t.error;
+  const page = t.tab.page;
+
+  // «Прокрути до элемента»: ищем так же, как для клика (ref/имя/селектор, фреймы).
+  const toSpec = args.to != null ? args.to : args.toText != null ? args.toText : null;
+  if (toSpec != null && String(toSpec).trim()) {
+    const q = queryFromSpec(toSpec);
+    const target = await resolveTarget(page, q, "click");
+    if (!target) return missText(page, "browserScroll", q, "не нашёл элемент для прокрутки");
+    if (target.error) return target.error;
+    try {
+      await target.loc.scrollIntoViewIfNeeded({ timeout: ACTION_TIMEOUT });
+    } catch (e) {
+      try { await target.loc.evaluate((el) => el.scrollIntoView({ block: "center", inline: "nearest" })); } catch (e2) {}
+    }
+    await sleep(150);
+    const st = await page.evaluate(scrollStateInPage).catch(() => ({}));
+    return (
+      "OK — прокрутил до «" + target.desc + "»" + ".\n" +
+      posLine(st) + "\n" + (await revealText(page, args.limit))
+    );
+  }
+
+  const how = String(args.how || args.direction || (Number(args.by || args.dy) < 0 ? "up" : "down")).toLowerCase();
+  const times = Math.max(1, Math.min(parseInt(args.times, 10) || 1, 20));
+  const stBefore = await page.evaluate(scrollStateInPage).catch(() => ({}));
+  const vh = Number(stBefore && stBefore.vh) || 800;
+  const step = Math.round(Number(args.by != null ? args.by : args.dy) || Math.round(vh * 0.8));
+
+  // Контейнер (список API, таблица, выпадающее меню): крутим его, а не страницу.
+  if (args.container) {
+    const cq = queryFromSpec(args.container);
+    const box = cq ? await resolveTarget(page, cq, "click") : { error: "укажи container — имя, ref или селектор" };
+    if (box.error) return box.error;
+    const rect = await boxOf(box.loc);
+    const wheel = await wheelAt(page, 0, how === "up" ? -step : step, times, rect || null);
+    let res = null;
+    if (!wheel.ok || wheel.error) {
+      res = await box.loc.evaluate(scrollInnerInPage, { dy: how === "up" ? -step : step, how: how === "top" || how === "bottom" ? how : "down" }).catch(() => null);
+    }
+    const st = await page.evaluate(scrollStateInPage).catch(() => ({}));
+    return (
+      "OK — прокрутил контейнер «" + box.desc + "» " + how +
+      (wheel.error ? " (колесо не сработало: " + wheel.error + ")" : "") +
+      (res ? " → " + res.mode + " " + res.y + "/" + res.max : "") +
+      ".\n" + posLine(st) + "\n" + (await revealText(page, args.limit))
+    );
+  }
+
+  // Страница: сначала честное колесо мыши (ленивые ленты и SPA реагируют именно на него).
+  const dy = how === "top" ? 0 : how === "bottom" ? 0 : how === "up" ? -step : step;
+  const wheel = await wheelAt(page, Number(args.dx) || 0, dy * times, 1, null);
+  let inPage = null;
+  if (how === "top" || how === "bottom") {
+    inPage = await page.evaluate(scrollPageInPage, { how: how, dx: Number(args.dx) || 0, dy: 0 }).catch(() => null);
+  }
+  const st = await page.evaluate(scrollStateInPage).catch(() => ({}));
+  const moved = Number(st.y || 0) - Number(stBefore.y || 0);
+  if (!how.match(/^(top|bottom)$/) && Math.abs(moved) < 2) {
+    // Колесо не сдвинуло страницу (SPA со своим скроллом) — прокручиваем программно.
+    inPage = await page.evaluate(scrollPageInPage, { how: "down", dy: dy * times, dx: Number(args.dx) || 0 }).catch(() => null);
+  }
+  const stAfter = await page.evaluate(scrollStateInPage).catch(() => st);
+  let out =
+    "OK — прокрутил " + how + (times > 1 ? " ×" + times : "") + " (" + step + "px за раз" +
+    (wheel.error ? ", колесо не сработало: " + wheel.error : "") + ").\n" + posLine(stAfter);
+  if (inPage && inPage.mode) out += "\nРежим: " + inPage.mode + " (сдвинуто " + inPage.moved + "px)";
+  if (how !== "top" && how !== "bottom" && Math.abs(Number(stAfter.y || 0) - Number(stBefore.y || 0)) < 2) {
+    out += "\n⚠️ Страница не сдвинулась: похоже, прокручивается внутренний контейнер — укажи его: browserScroll { container: \"список\" }";
+  }
+  out += "\n" + (await revealText(page, args.limit));
+  return out;
+}
+
+// browserHover: навести мышь (меню и подсказки, которые раскрываются по hover).
+async function hover(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return t.error;
+  const page = t.tab.page;
+  const before = await namesOnPage(page);
+  const target = await resolveTarget(page, dom.parseQuery(args), "click");
+  if (target.error) return target.error;
+  let how = "";
+  try {
+    await target.loc.hover({ timeout: ACTION_TIMEOUT });
+    how = "мышью";
+  } catch (e) {
+    try {
+      await target.loc.hover({ force: true, timeout: ACTION_TIMEOUT });
+      how = "мышью в обход перекрытия";
+    } catch (e2) {
+      try {
+        await target.loc.evaluate(hoverInPage);
+        how = "событиями из DOM";
+      } catch (e3) {
+        return "Ошибка browserHover: " + String((e3 && e3.message) || e3).slice(0, 150);
+      }
+    }
+  }
+  await sleep(400);
+  const after = await namesOnPage(page);
+  const fresh = [];
+  for (const n of after) {
+    if (before.indexOf(n) < 0 && fresh.indexOf(n) < 0) fresh.push(n);
+  }
+  let out = "OK — навёл " + how + " на «" + target.desc + "».";
+  if (fresh.length) {
+    out += "\nПоявилось " + fresh.length + ": " + fresh.slice(0, 8).join(" · ") + "\nДальше: browserSnapshot (ref появившихся пунктов) или browserClick { name: \"…\" }.";
+  } else {
+    out += "\nНовых элементов не появилось — на этом сайте меню не по наведению. Работай кликом (browserClick) или JS (browserEval).";
+  }
+  return out;
+}
+
+// Записываем сеть вкладки с первого же вызова инструмента: спрашивать «что
+// ответил сервер» агент будет ПОСЛЕ действия, задним числом.
+const netRecorders = new WeakMap();
+function netRecorder(page) {
+  const cached = netRecorders.get(page);
+  if (cached) return cached;
+  const rec = { entries: [], bodies: true };
+  netRecorders.set(page, rec);
+  const push = (e) => {
+    rec.entries.push(e);
+    if (rec.entries.length > NET_MAX) rec.entries.shift();
+  };
+  try {
+    page.on("request", (req) => {
+      try {
+        push({
+          method: req.method ? req.method() : "GET",
+          url: String(req.url ? req.url() : ""),
+          type: req.resourceType ? String(req.resourceType()) : "",
+          ts: Date.now(),
+        });
+      } catch (e) {}
+    });
+    page.on("response", (res) => {
+      try {
+        const req = res.request();
+        const url = String(req.url());
+        const method = req.method ? req.method() : "GET";
+        const status = res.status ? res.status() : 0;
+        let mime = "";
+        try { mime = String(((res.headers && res.headers()) || {})["content-type"] || ""); } catch (e) {}
+        let e = null;
+        for (let i = rec.entries.length - 1; i >= 0; i--) {
+          const x = rec.entries[i];
+          if (x.url === url && x.method === method && x.status == null) { e = x; break; }
+        }
+        if (e) { e.status = status; e.mime = mime; }
+        else { e = { method: method, url: url, status: status, mime: mime, ts: Date.now() }; push(e); }
+        if (rec.bodies && /json|text|xml|graphql/.test(mime) && !/event-stream/.test(mime)) {
+          Promise.resolve(res.text()).then((txt) => {
+            if (e && txt) e.body = String(txt).slice(0, 4000);
+          }).catch(() => {});
+        }
+      } catch (e) {}
+    });
+  } catch (e) {}
+  return rec;
+}
+
+// browserNetwork: что страница реально отправила и что вернул сервер.
+async function network(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return t.error;
+  const rec = netRecorder(t.tab.page);
+  if (args.bodies === false) rec.bodies = false;
+  const all = rec.entries.slice();
+  if (args.clear === true && args.since !== true) {
+    rec.entries.length = 0;
+    return "OK — сетевой журнал очищен (было " + all.length + " запросов).";
+  }
+  // По умолчанию отдаём НОВОЕ и очищаем буфер: агент спрашивает сразу после действия.
+  const list = args.since === false ? all : all;
+  if (args.since !== false) rec.entries.length = 0;
+  const filter = String(args.filter || args.q || "").trim().toLowerCase();
+  const rows = [];
+  for (const e of list) {
+    if (!args.all && NET_STATIC[e.type]) continue;
+    if (filter && e.url.toLowerCase().indexOf(filter) < 0) continue;
+    rows.push(e);
+  }
+  if (!rows.length) {
+    return (
+      "browserNetwork: новых запросов нет" + (list.length ? " (в журнале " + list.length + ", отсеял статику и фильтр)" : "") +
+      ". Если действие должно было обратиться к серверу — возможно, оно не сработало: проверь browserSnapshot/browserText."
+    );
+  }
+  const limit = Math.min(Math.max(parseInt(args.limit, 10) || 25, 1), 60);
+  const shown = rows.slice(-limit);
+  const bad = shown.filter((e) => e.status >= 400 || e.status === 0).length;
+  const out = [
+    "browserNetwork: запросов " + rows.length + (bad ? ", с ошибкой: " + bad : "") + (rows.length > shown.length ? " (показаны последние " + shown.length + ")" : ""),
+  ];
+  shown.forEach((e, i) => {
+    const st = e.status == null ? "…" : e.status;
+    const mime = String(e.mime || "").split(";")[0].slice(0, 24);
+    out.push(i + 1 + ". " + e.method + " " + e.url.slice(0, 160) + " → " + st + (mime ? " (" + mime + ")" : "") + (e.status >= 400 || e.status == null ? " ❌" : ""));
+    if (e.body) {
+      const body = String(e.body).replace(/\s+/g, " ").trim().slice(0, 300);
+      out.push("   → " + body);
+    }
+  });
+  if (bad) out.push("Дальше: 4xx/5xx — прочитай тело ответа выше (там обычно причина) или browserEval, чтобы увидеть ошибку в JS-консоли страницы.");
+  return out.join("\n");
+}
+
+// waitForIdle: дождаться, когда страница «успокоится» (DOM не меняется, сеть пуста) —
+// чтобы клик не улетел в элемент, который Angular уже перерисовал.
+async function waitForIdle(args) {
+  args = args || {};
+  const t = needTab(args.tabId || args.tab);
+  if (t.error) return t.error;
+  const page = t.tab.page;
+  const quietMs = Math.min(Math.max(parseInt(args.quietMs, 10) || 500, 100), 5000);
+  const timeout = Math.min(Math.max(parseInt(args.timeout, 10) || 8000, 500), 60000);
+  await page.evaluate(idleStartInPage).catch(() => null);
+  let inflight = 0;
+  const onReq = () => { inflight++; };
+  const onDone = () => { if (inflight > 0) inflight--; };
+  const canListen = typeof page.on === "function";
+  if (canListen) {
+    try {
+      page.on("request", onReq);
+      page.on("requestfinished", onDone);
+      page.on("requestfailed", onDone);
+    } catch (e) {}
+  }
+  const started = Date.now();
+  let mutSeen = 0;
+  let quietSince = Date.now();
+  while (Date.now() - started < timeout) {
+    const mut = await page.evaluate(idleTakeInPage).catch(() => 0);
+    mutSeen += Number(mut) || 0;
+    if ((Number(mut) || 0) > 0 || inflight > 0) quietSince = Date.now();
+    if (Date.now() - quietSince >= quietMs) break;
+    await sleep(150);
+  }
+  if (canListen && typeof page.off === "function") {
+    try {
+      page.off("request", onReq);
+      page.off("requestfinished", onDone);
+      page.off("requestfailed", onDone);
+    } catch (e) {}
+  }
+  await page.evaluate(idleStopInPage).catch(() => null);
+  const waited = Date.now() - started;
+  const stillBusy = inflight > 0;
+  return (
+    "OK — страница " + (stillBusy ? "всё ещё грузит (" + inflight + " запросов)" : "успокоилась") +
+    ": ждал " + waited + " мс, изменений DOM " + mutSeen + ", запросов в полёте " + inflight + "." +
+    (stillBusy ? "\nДействуй по тому, что уже видно (browserSnapshot) — или повтори waitForIdle с большим timeout." : "\nТеперь карта (browserSnapshot) не поедет — можно кликать по ref.")
+  );
+}
+
 module.exports = {
   open,
   snapshot,
@@ -1674,6 +2523,11 @@ module.exports = {
   evalJs,
   domHtml,
   overlays,
+  act,
+  scroll,
+  hover,
+  network,
+  waitForIdle,
   overlayKind,
   overlayItems,
   screenshotFile,
@@ -1695,5 +2549,14 @@ module.exports = {
   collectMap, // тесты: карта строится на мини-DOM через page.evaluate-заглушку
   cleanupInPage, // тесты: очистка помех не трогает юридические кнопки
   acceptTermsInPage, // тесты: подтверждение согласия отмечает галочку и кнопку
+  // тесты: прокрутка и счётчики покоя на мини-DOM
+  scrollStateInPage,
+  scrollPageInPage,
+  scrollInnerInPage,
+  hoverInPage,
+  idleStartInPage,
+  idleTakeInPage,
+  idleStopInPage,
+  queryFromSpec,
   setPlaywright, // только для тестов: подменить/сбросить кэш playwright
 };

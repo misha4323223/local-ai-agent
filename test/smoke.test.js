@@ -17,6 +17,8 @@
    - yandex: логи внутренним API (REST+gRPC), автоматические YC_TOKEN/YC_CLOUD_ID/YC_FOLDER_ID, встроенный yc CLI;
      адреса сервисов (postbox/logging), повторы и пачечный опрос дашборда, свежие настройки у инструментов.
    - app-ui: стабильные ref вместо номеров [N] (клик не уезжает после перерисовки окна).
+   - стрим/печать: DOM и автопрокрутка обновляются не чаще кадра, фон под стеклянными
+     панелями статичен (иначе блюры пересчитываются в каждом кадре и интерфейс «жуёт»).
 */
 
 const assert = require("assert");
@@ -3578,7 +3580,7 @@ async function testPlanPanel() {
   const mod = new Function(
     ...Object.keys(deps),
     planSrc +
-      "\nreturn { planProgress, planArchive, planFromModel, planToolOutcome, planRotate, planPending, renderPlanPanel, PLAN_ARCHIVE_LIMIT };"
+      "\nreturn { planProgress, planArchive, planFromModel, planFromText, planTextAdvance, planTextFinish, planRoundStarted, planLinesFromText, planToolOutcome, planRotate, planPending, renderPlanPanel, PLAN_ARCHIVE_LIMIT };"
   )(...Object.values(deps));
 
   await test("план: инструмент todoWrite есть в ядре, с алиасами и правилом промпта", () => {
@@ -3774,6 +3776,123 @@ async function testPlanPanel() {
     assert.ok(/c\.planHistory = c\.planHistory\.slice\(0, PLAN_ARCHIVE_LIMIT\)/.test(appSrc), "история планов не ограничивается при загрузке");
   });
 
+  await test("план: написанный текстом («План: 1. …») становится панелью-чеклистом", () => {
+    const text = [
+      "Пользователь просит создать API-ключ для модели, которая видит картинки.",
+      "",
+      "План:",
+      "1. Проверить, что диалог закрылся",
+      "2. Создать проект (No project selected)",
+      "3. Включить API Gemini",
+      "4. Создать API-ключ в APIs & Services",
+      "",
+      "Важный момент: ключ — секрет.",
+    ].join("\n");
+    const chat = { messages: [] };
+    assert.strictEqual(mod.planFromText(chat, text), true, "текстовый план не разобран");
+    assert.strictEqual(chat.plan.source, "text");
+    assert.strictEqual(chat.plan.title, "План");
+    assert.strictEqual(chat.plan.items.length, 4, "пункты плана потерялись: " + JSON.stringify(chat.plan.items));
+    assert.strictEqual(chat.plan.items[0].text, "Проверить, что диалог закрылся", "маркер «1.» остался в тексте: " + chat.plan.items[0].text);
+    assert.strictEqual(chat.plan.items[1].status, "pending", "новый план сразу помечен выполненным");
+    // Повторный разбор того же текста ничего не сбрасывает.
+    assert.strictEqual(mod.planFromText(chat, text), false, "тот же план пересоздан");
+    // Панель показывает его тем же чеклистом, что и план модели.
+    activeChat = chat;
+    mod.renderPlanPanel();
+    const txt = nodeText(hosts["plan-panel"]);
+    assert.ok(!hosts["plan-panel"].classList.contains("hidden"), "панель с текстовым планом скрыта");
+    assert.ok(txt.indexOf("Создать проект") !== -1, "пункт плана не попал в панель: " + txt);
+    assert.ok(txt.indexOf("0/4") !== -1, "нет счётчика готовых пунктов: " + txt);
+  });
+
+  await test("план: галочки текстового плана двигает работа (раунд → пункт)", () => {
+    const chat = { messages: [], plan: { source: "text", title: "План", items: [
+      { text: "A", status: "pending" }, { text: "B", status: "pending" },
+    ] } };
+    assert.strictEqual(mod.planTextAdvance(chat, true), true, "первый пункт не встал в работу");
+    assert.strictEqual(chat.plan.items[0].status, "in_progress");
+    assert.strictEqual(mod.planTextAdvance(chat, true), true);
+    assert.strictEqual(chat.plan.items[0].status, "done", "раунд не закрыл пункт");
+    assert.strictEqual(chat.plan.items[1].status, "in_progress", "следующий пункт не встал в работу");
+    assert.strictEqual(mod.planTextAdvance(chat, true), true);
+    assert.strictEqual(chat.plan.items[1].status, "done");
+    assert.strictEqual(mod.planTextAdvance(chat, true), false, "пункты кончились, а функция двигает галочки");
+    // Провал шага отмечает planToolOutcome — текстовый план здесь не исключение.
+    const failing = { messages: [], plan: { source: "text", items: [{ text: "A", status: "in_progress" }] } };
+    assert.strictEqual(mod.planToolOutcome(failing, { name: "runCommand" }, false), true, "провал текстового плана не отмечен");
+    assert.strictEqual(failing.plan.items[0].status, "failed");
+    assert.strictEqual(mod.planTextAdvance(failing, false), false, "провал сдвинул галочки вперёд");
+    // Финиш запуска закрывает незакрытый пункт.
+    const finish = { messages: [], plan: { source: "text", items: [{ text: "A", status: "done" }, { text: "B", status: "in_progress" }] } };
+    assert.strictEqual(mod.planTextFinish(finish), true, "финиш не закрыл текущий пункт");
+    assert.strictEqual(finish.plan.items[1].status, "done");
+    assert.strictEqual(mod.planTextFinish(finish), false);
+    // План модели текстовый прогресс не трогает — там статусы ведёт сама модель.
+    const model = { messages: [], plan: { source: "model", items: [{ text: "A", status: "pending" }] } };
+    assert.strictEqual(mod.planTextAdvance(model, true), false, "текстовый прогресс двигает план модели");
+    assert.strictEqual(mod.planTextFinish(model), false);
+  });
+
+  await test("план: раунд работы закрывает ровно один пункт (и только у текстового плана)", () => {
+    const chat = { messages: [], plan: { source: "text", items: [
+      { text: "A", status: "pending" }, { text: "B", status: "pending" }, { text: "C", status: "pending" },
+    ] } };
+    assert.strictEqual(mod.planRoundStarted(chat, "s1"), true, "раунд s1 не двинул план");
+    assert.strictEqual(chat.plan.items[0].status, "in_progress");
+    // Тот же сегмент дважды (размышления + текст одного раунда) — второй раз не двигаем.
+    assert.strictEqual(mod.planRoundStarted(chat, "s1"), false, "один сегмент посчитан за два раунда");
+    assert.strictEqual(chat.plan.items.length, 3);
+    assert.strictEqual(mod.planRoundStarted(chat, "s2"), true);
+    assert.strictEqual(chat.plan.items[0].status, "done");
+    assert.strictEqual(chat.plan.items[1].status, "in_progress");
+    // Без сегмента (защита от пустого id) и без плана — тихо ничего не делаем.
+    assert.strictEqual(mod.planRoundStarted(chat, ""), false);
+    assert.strictEqual(mod.planRoundStarted({ messages: [] }, "s3"), false);
+    const model = { messages: [], plan: { source: "model", items: [{ text: "A", status: "pending" }] } };
+    assert.strictEqual(mod.planRoundStarted(model, "s4"), false, "раунд двигает план модели");
+    assert.strictEqual(model.plan.items[0].status, "pending");
+  });
+
+  await test("план: обычный ответ панелью не становится", () => {
+    for (const t of [
+      "Готово! Сделал три вещи:\n1. Прочитал файл\n2. Поправил баг\n3. Прогнал тесты",
+      "План такой: нужно сначала починить сборку, потом проверить.",
+      "✅ Готово. Всё работает, ошибок нет.",
+      "Разбор:\n- первое\n- второе",
+    ]) {
+      assert.deepStrictEqual(mod.planLinesFromText(t), [], "обычный текст принят за план: " + t.slice(0, 40));
+    }
+    const chat = { messages: [] };
+    assert.strictEqual(mod.planFromText(chat, "Готово!\n1. Первое\n2. Второе"), false, "перечисление в ответе стало планом");
+    assert.strictEqual(chat.plan, undefined, "из обычного ответа появился план");
+    assert.strictEqual(mod.planFromText(chat, "План:\n1. Один шаг"), false, "план из одного пункта показан панелью");
+    // А блок чекбоксов без заголовка — это план (его и ждёт пользователь).
+    const ticks = { messages: [] };
+    assert.strictEqual(mod.planFromText(ticks, "✅ Разобрал логи\n⬜ Починил хост\n⬜ Прогнал тесты"), true, "блок чекбоксов не признан планом");
+    assert.strictEqual(ticks.plan.items.length, 3);
+    assert.strictEqual(ticks.plan.items[0].status, "done", "✅ не стал готовым пунктом");
+    assert.strictEqual(ticks.plan.items[1].status, "pending");
+  });
+
+  await test("план: настоящий план модели (todoWrite) важнее текстового", () => {
+    const chat = { messages: [] };
+    mod.planFromText(chat, "План:\n1. Первый шаг\n2. Второй шаг");
+    assert.strictEqual(chat.plan.source, "text");
+    assert.strictEqual(mod.planFromModel(chat, { tasks: [{ text: "Сделать раз", status: "in_progress" }], title: "Задача" }), true);
+    assert.strictEqual(chat.plan.source, "model");
+    assert.strictEqual(chat.planHistory.length, 1, "текстовый план не сохранён в историю");
+    assert.strictEqual(mod.planFromText(chat, "План:\n1. Другой\n2. Совсем другой"), false, "текст подменил план модели");
+  });
+
+  await test("план: текст ответа связан с панелью (chunk → раунд, tool_start, done)", () => {
+    assert.ok(/if \(planFromText\(chat, runTextOf\(chat, aMsg\)\)\)/.test(appSrc), "интерфейс не разбирает план, написанный текстом");
+    assert.ok(/planRoundStarted\(chat, seg\.id\);/.test(appSrc), "новый раунд ответа не двигает галочки текстового плана");
+    assert.ok(/if \(planTextFinish\(chat\)\)/.test(appSrc), "финиш запуска не закрывает шаг текстового плана");
+    // Веб-версия: в План-режиме список инструментов больше не пуст — todoWrite доходит до модели.
+    assert.ok(/tools: planMode \? AgentCore\.PLAN_MODE_TOOL_DEFINITIONS : AgentCore\.TOOL_DEFINITIONS,/.test(appSrc), "в веб-версии План-режим без todoWrite");
+  });
+
   await test("План-режим: модель получает ровно todoWrite, остальные вызовы не выполняются", () => {
     // Раньше в этом режиме список инструментов был пуст — прислать план структурой
     // модель физически не могла, и панель оставалась пустой до кнопки «▶ Выполнить».
@@ -3811,6 +3930,7 @@ async function testPlanPanel() {
         { id: "c2", messages: [], plan: { items: "не массив" } },
         { id: "c3", messages: [] },
         { id: "c4", messages: [], plan: { source: "auto", title: "Ход работы", items: [{ text: "A", status: "done" }] } },
+        { id: "c5", messages: [], plan: { source: "text", title: "План", items: [{ text: "A", status: "in_progress" }, { text: "B", status: "pending" }] } },
       ],
     });
     assert.strictEqual(out.chats[0].plan.items.length, 1, "нормализация плана не сработала: " + JSON.stringify(out.chats[0].plan));
@@ -3819,6 +3939,8 @@ async function testPlanPanel() {
     assert.strictEqual(out.chats[1].plan, null, "битый план не сброшен");
     assert.strictEqual(out.chats[2].plan, undefined, "чату без плана добавили поле plan");
     assert.strictEqual(out.chats[3].plan, null, "legacy-план «auto» не убран при загрузке");
+    assert.strictEqual(out.chats[4].plan.source, "text", "текстовый план выдан за модельный при загрузке");
+    assert.strictEqual(out.chats[4].plan.items.length, 2);
   });
 }
 
@@ -4243,6 +4365,658 @@ async function testBrowserOverlays() {
   });
 }
 
+// ── Стрим и печать: работа не чаще одного кадра ────────────────────────────
+async function testStreamThrottle() {
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const cssSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "styles.css"), "utf8");
+
+  await test("стрим: обработчик chunk рисует через очередь кадра, а не на каждый чанк", () => {
+    assert.ok(
+      /case "chunk":[\s\S]{0,420}?queueBubbleRender\(chat, seg\)/.test(appSrc),
+      "обработчик chunk не использует очередь кадра"
+    );
+    assert.ok(
+      !/case "chunk":[\s\S]{0,420}?b\.innerHTML = msgHtml\(seg\.content\)/.test(appSrc),
+      "chunk всё ещё перерисовывает innerHTML на каждый чанк"
+    );
+    assert.ok(
+      /case "thinking":[\s\S]{0,420}?scrollBottomSoon\(\)/.test(appSrc),
+      "размышления всё ещё дёргают прокрутку на каждый токен"
+    );
+  });
+
+  await test("стрим: очередь копит текст и рисует последнее состояние за один кадр", () => {
+    const s0 = appSrc.indexOf("  let pinnedToBottom = true;");
+    const s1 = appSrc.indexOf("  // ─────────────── Отправка ───────────────");
+    assert.ok(s0 > 0 && s1 > s0, "не нашёл блок прокрутки/стрима в app.js");
+
+    const dom = {
+      messages: { scrollTop: 0, scrollHeight: 500 },
+      "btn-scroll-bottom": { classList: { add() {}, remove() {}, toggle() {} } },
+    };
+    const $ = (id) => dom[id];
+    const msgEls = new Map();
+    const msgHtml = (c) => "<p>" + c + "</p>";
+    const bubble = { innerHTML: "", classList: { add() {}, remove() {} } };
+    msgEls.set("a1", { querySelector: (sel) => (sel === ".bubble" ? bubble : null) });
+
+    const rafQ = [];
+    const origRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = (fn) => { rafQ.push(fn); return rafQ.length; };
+    try {
+      const api = new Function(
+        "$",
+        "msgEls",
+        "msgHtml",
+        appSrc.slice(s0, s1) +
+          "\nreturn { queueBubbleRender: queueBubbleRender, scrollBottom: scrollBottom, scrollBottomSoon: scrollBottomSoon };"
+      )($, msgEls, msgHtml);
+
+      const seg = { id: "a1", content: "прив" };
+      const chat = { messages: [seg] };
+
+      api.queueBubbleRender(chat, seg);
+      seg.content = "привет";
+      api.queueBubbleRender(chat, seg);
+      assert.strictEqual(rafQ.length, 1, "кадр запланирован не один раз: " + rafQ.length);
+      assert.strictEqual(bubble.innerHTML, "", "пузырь перерисован до кадра");
+      assert.strictEqual(dom.messages.scrollTop, 0, "прокрутка дёрнулась до кадра");
+
+      rafQ.splice(0).forEach((fn) => fn());
+      assert.strictEqual(bubble.innerHTML, "<p>привет</p>", "не отрисовано последнее состояние");
+      assert.strictEqual(dom.messages.scrollTop, 500, "нет автопрокрутки в кадре");
+      assert.strictEqual(rafQ.length, 0, "очередь кадров не очищена");
+
+      // Следующий поток чанков после отрисовки снова планирует ровно один кадр.
+      seg.content = "привет!";
+      api.queueBubbleRender(chat, seg);
+      assert.strictEqual(rafQ.length, 1, "новый кадр не запланирован");
+      rafQ.splice(0).forEach((fn) => fn());
+      assert.strictEqual(bubble.innerHTML, "<p>привет!</p>");
+
+      // Отложенная прокрутка (размышления) тоже схлопывается в один кадр.
+      dom.messages.scrollTop = 0;
+      api.scrollBottomSoon();
+      api.scrollBottomSoon();
+      assert.strictEqual(rafQ.length, 1, "прокрутка планирует больше одного кадра");
+      rafQ.splice(0).forEach((fn) => fn());
+      assert.strictEqual(dom.messages.scrollTop, 500, "отложенная прокрутка не сработала");
+    } finally {
+      globalThis.requestAnimationFrame = origRaf;
+    }
+  });
+
+  await test("печать: высота поля ввода пересчитывается не чаще кадра", () => {
+    assert.ok(
+      /function autoResize\(\) \{\s*if \(inputResizeRaf\) return;/.test(appSrc),
+      "autoResize не откладывается до кадра"
+    );
+    assert.ok(
+      /requestAnimationFrame\(\(\) => \{\s*inputResizeRaf = 0;/.test(appSrc),
+      "нет сброса inputResizeRaf внутри кадра"
+    );
+  });
+
+  await test("фон под стеклянными панелями статичен (иначе блюры пересчитываются каждый кадр)", () => {
+    const before = cssSrc.match(/body::before \{[\s\S]*?\n\}/);
+    assert.ok(before, "не нашёл body::before в styles.css");
+    assert.ok(!/animation:/.test(before[0]), "body::before всё ещё анимируется");
+    assert.ok(!/will-change/.test(before[0]), "лишний композитный слой: will-change: transform");
+
+    const bubbleRule = cssSrc.match(/\.msg\.assistant \.bubble \{[^}]*165deg[^}]*\}/);
+    assert.ok(bubbleRule, "не нашёл оформление пузыря ответа");
+    assert.ok(!/backdrop-filter:\s*blur/.test(bubbleRule[0]), "у пузыря ответа остался backdrop-filter");
+  });
+}
+
+// ── Скорость работы в браузере: ожидание, фреймы, submit, browserAct ───────
+// Слабая/быстрая модель должна делать шаги «сразу», а не искать селекторы:
+// инструменты сами ждут появления элемента, ищут его и во вложенных фреймах,
+// умеют отправлять Enter вместе с вводом и выполняют цепочку шагов одной командой.
+async function testBrowserSpeed() {
+  const bt = require(path.join(ROOT, "src", "browser-tools.js"));
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+
+  const mkEl = (o) => Object.assign({ visible: true, text: "", name: "" }, o);
+
+  function fakePage(elements, url) {
+    const page = {
+      els: elements,
+      clicked: [],
+      filled: [],
+      typed: [],
+      keys: [],
+      _u: url || "https://site.test/",
+      keyboard: {
+        async press(k) { page.keys.push(k); },
+        async insertText(x) { page.typed.push(x); },
+      },
+      async goto(u) { page._u = u; },
+      async waitForLoadState() {},
+      url() { return page._u; },
+      async title() { return "Страница"; },
+      on() {},
+      async close() {},
+    };
+    const by = (pred) => elements.filter(pred);
+    const loc = (list) => ({
+      first() { return loc(list.slice(0, 1)); },
+      async count() { return list.length; },
+      async isVisible() { return !!(list[0] && list[0].visible); },
+      async scrollIntoViewIfNeeded() {},
+      async click() {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        if (!e.visible) throw new Error("element is not visible");
+        page.clicked.push(e.key);
+      },
+      async fill(t) {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        if (e.tag === "div") throw new Error("Element is not an <input>");
+        page.filled.push({ key: e.key, text: t });
+      },
+      async selectOption() { throw new Error("did not find option"); },
+      async evaluate(fn) { return fn({ options: [] }); },
+    });
+    page.locator = () => loc([]);
+    page.getByRole = (role, o) => loc(by((e) => e.role === role && (!o || !o.name || e.name === o.name)));
+    page.getByLabel = (t) => loc(by((e) => e.label === t));
+    page.getByPlaceholder = (t) => loc(by((e) => e.placeholder === t));
+    page.getByText = (t) => loc(by((e) => e.text === t || e.name === t));
+    page.evaluate = async () => ({
+      url: page._u,
+      title: "Страница",
+      items: elements.map((e, i) => ({
+        ref: "e" + (i + 1),
+        tag: e.tag,
+        roleAttr: e.role,
+        text: e.text || e.name,
+        inViewport: e.visible,
+        disabled: false,
+      })),
+    });
+    return page;
+  }
+
+  const mainEls = [
+    mkEl({ key: "login", tag: "button", role: "button", name: "Войти" }),
+    mkEl({ key: "email", tag: "input", role: "textbox", label: "Почта" }),
+  ];
+  const page = fakePage(mainEls);
+  const frame = fakePage([mkEl({ key: "frame-agree", tag: "button", role: "button", name: "Согласен" })], "https://widget.test/frame");
+  page.frames = () => [page, frame];
+  const mockBrowser = {
+    isConnected: () => true,
+    on() {},
+    async pages() { return [page]; },
+    async newPage() { return page; },
+    async close() {},
+  };
+
+  await bt.close({ tabId: "all" });
+  bt.setPlaywright({
+    chromium: {
+      executablePath: () => "",
+      async launch() { return mockBrowser; },
+      async launchPersistentContext() { return mockBrowser; },
+    },
+  });
+  try {
+    await bt.open({ url: "https://site.test/", newTab: true });
+
+    await test("browserClick: сам ждёт появления элемента (без browserWait и повторов)", async () => {
+      page.clicked.length = 0;
+      setTimeout(() => mainEls.push(mkEl({ key: "late", tag: "button", role: "button", name: "Поздняя" })), 250);
+      const r = await bt.click({ name: "Поздняя", timeout: 2500 });
+      assert.ok(/^OK — клик/.test(r), "клик не прошёл по появившейся позже кнопке:\n" + r);
+      assert.deepStrictEqual(page.clicked, ["late"]);
+    });
+
+    await test("browserClick: находит элемент во вложенном фрейме (iframe)", async () => {
+      frame.clicked.length = 0;
+      const r = await bt.click({ name: "Согласен" });
+      assert.ok(/^OK — клик/.test(r), "элемент во фрейме не найден:\n" + r);
+      assert.ok(/фрейм/.test(r), "ответ не сообщает, что элемент был во фрейме:\n" + r);
+      assert.deepStrictEqual(frame.clicked, ["frame-agree"]);
+    });
+
+    await test("browserFill: submit сразу отправляет Enter (ввёл и отправил одним вызовом)", async () => {
+      page.filled.length = 0;
+      page.keys.length = 0;
+      const r = await bt.fill({ label: "Почта", text: "a@b.c", submit: true });
+      assert.ok(/^OK — поле/.test(r), r);
+      assert.ok(/отправлено \(Enter\)/.test(r), "нет отметки об отправке:\n" + r);
+      assert.deepStrictEqual(page.filled, [{ key: "email", text: "a@b.c" }]);
+      assert.deepStrictEqual(page.keys, ["Enter"]);
+    });
+
+    await test("browserAct: цепочка шагов одной командой (клик → ввод+Enter → клавиша → пауза → текст)", async () => {
+      page.clicked.length = 0;
+      page.filled.length = 0;
+      page.keys.length = 0;
+      const r = await bt.act({
+        steps: [
+          { click: "Войти" },
+          { field: "Почта", text: "b@c.d", submit: true },
+          { press: "Escape" },
+          { wait: 10 },
+          { read: true },
+        ],
+      });
+      assert.ok(/шагов 5 из 5, ок: 5/.test(r), "не все шаги выполнены:\n" + r);
+      assert.ok(!/❌/.test(r), "есть сбой на ровном месте:\n" + r);
+      assert.deepStrictEqual(page.clicked, ["login"]);
+      assert.deepStrictEqual(page.filled, [{ key: "email", text: "b@c.d" }]);
+      assert.deepStrictEqual(page.keys, ["Enter", "Escape"]);
+    });
+
+    await test("browserAct: первый сбой останавливает цепочку и объясняет причину", async () => {
+      page.clicked.length = 0;
+      page.keys.length = 0;
+      const r = await bt.act({ steps: [{ click: "Кнопки нет" }, { press: "Enter" }] });
+      assert.ok(/сбоев: 1/.test(r), "сбой не отражён:\n" + r);
+      assert.ok(!/✅ .*Enter/.test(r), "шаги после сбоя всё равно выполнялись:\n" + r);
+      assert.deepStrictEqual(page.keys, [], "Enter нажался после сбоя");
+      assert.ok(/Похожие элементы|Что вообще есть/.test(r), "нет подсказки с похожими элементами:\n" + r);
+    });
+
+    await test("browserAct: без шагов и с мусором — понятная ошибка, а не молчание", async () => {
+      const empty = await bt.act({});
+      assert.ok(/Ошибка browserAct/.test(empty), empty);
+      const junk = await bt.act({ steps: [123, { fill: {} }, { nonsense: 1 }] });
+      assert.ok(/шаг не понял|Ошибка/.test(junk), junk);
+    });
+
+    await test("browserWait: пауза без элемента (странице нужно время дорисоваться)", async () => {
+      const r = await bt.wait({ ms: 10 });
+      assert.ok(/пауза 10 мс/.test(r), r);
+    });
+
+    await test("browserAct: цепочку можно начать с открытия адреса ({goto})", async () => {
+      const r = await bt.act({ steps: [{ goto: "https://other.test/page" }, { snapshot: true }] });
+      assert.ok(/шагов 2 из 2, ок: 2/.test(r), "цепочка с goto не прошла:\n" + r);
+      assert.ok(/other\.test/.test(r), "в отчёте нет нового адреса:\n" + r);
+      assert.strictEqual(page.url(), "https://other.test/page");
+    });
+
+    await test("browserAct: подключён к интерфейсу, промпту и подписям инструментов", () => {
+      assert.ok(/case "browserAct"/.test(mainSrc), "main.js не обрабатывает browserAct");
+      assert.ok(/name: "browserAct"/.test(coreSrc), "нет определения инструмента browserAct");
+      assert.ok(/browserAct: "⚡"/.test(appSrc), "нет иконки browserAct в интерфейсе");
+      assert.ok(/browserAct: "Цепочка действий в браузере"/.test(appSrc), "нет подписи browserAct");
+      assert.ok(/БЫСТРЫЙ ПУТЬ/.test(coreSrc), "в промпте нет блока про быстрый путь");
+      assert.ok(/submit: true/.test(coreSrc), "промпт не знает про submit у browserFill");
+      assert.ok(/фрейм/.test(coreSrc), "в описаниях нет поиска по фреймам");
+    });
+  } finally {
+    bt.setPlaywright(null);
+  }
+}
+
+// ── 1e. «Чувства» агента: прокрутка, наведение, сеть, ожидание покоя ────────
+// Повод: половина элементов была ЗА ЭКРАНОМ (не видно в карте), меню не
+// раскрывались без hover, а после клика агент гадал по DOM, что ответил сервер.
+// Проверяем поведенчески на подставном Playwright и мини-DOM страницы.
+async function testBrowserSenses() {
+  const bt = require(path.join(ROOT, "src", "browser-tools.js"));
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "app.js"), "utf8");
+  const coreSrc = fs.readFileSync(path.join(ROOT, "src", "renderer", "agent-core.js"), "utf8");
+  const AgentCore = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+
+  const mkEl = (o) => Object.assign({ visible: true, text: "", name: "", role: "button", tag: "button", inViewport: true }, o);
+
+  function fakePage(elements, url) {
+    const page = {
+      els: elements,
+      wheels: [],
+      moves: [],
+      handlers: {},
+      _u: url || "https://site.test/",
+      _scroll: { y: 0, max: 2000, vh: 800 },
+      _inner: [],
+      _takes: [],
+      mouse: {
+        async move(x, y) { page.moves.push([x, y]); },
+        async wheel(dx, dy) {
+          page.wheels.push([dx, dy]);
+          page._scroll.y = Math.max(0, Math.min(page._scroll.max, page._scroll.y + dy));
+        },
+      },
+      viewportSize: () => ({ width: 1000, height: 800 }),
+      on(type, fn) { (page.handlers[type] = page.handlers[type] || []).push(fn); },
+      off(type, fn) {
+        const l = page.handlers[type] || [];
+        const i = l.indexOf(fn);
+        if (i >= 0) l.splice(i, 1);
+      },
+      emit(type) {
+        const args = Array.prototype.slice.call(arguments, 1);
+        for (const fn of (page.handlers[type] || []).slice()) fn.apply(null, args);
+      },
+      async goto(u) { page._u = u; },
+      async waitForLoadState() {},
+      url() { return page._u; },
+      async title() { return "Страница"; },
+      async close() {},
+    };
+    const by = (pred) => elements.filter(pred);
+    const loc = (list) => ({
+      first() { return loc(list.slice(0, 1)); },
+      async count() { return list.length; },
+      async isVisible() { return !!(list[0] && list[0].visible); },
+      async scrollIntoViewIfNeeded() { if (list[0]) list[0].scrolledIn = true; },
+      async boundingBox() {
+        const e = list[0];
+        return e ? { x: 10, y: 20, width: 100, height: 50 } : null;
+      },
+      async hover() {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        if (!e.visible) throw new Error("element is not visible");
+        e.hovered = true;
+        if (e.onHover) e.onHover();
+      },
+      async click() {
+        const e = list[0];
+        if (!e) throw new Error("no element");
+        if (!e.visible) throw new Error("element is not visible");
+      },
+      async fill() { if (!list[0]) throw new Error("no element"); },
+      async evaluate(fn, arg) { return fn(list[0], arg); },
+    });
+    page.locator = (sel) => {
+      const ref = String(sel).match(/^\[data-agent-ref="([^"]+)"\]$/);
+      return loc(ref ? by((e) => e.ref === ref[1]) : []);
+    };
+    page.getByRole = (role, o) => loc(by((e) => e.role === role && (!o || !o.name || String(e.name).toLowerCase().indexOf(String(o.name).toLowerCase()) >= 0)));
+    page.getByLabel = (t) => loc(by((e) => String(e.label || "").toLowerCase().indexOf(String(t).toLowerCase()) >= 0));
+    page.getByPlaceholder = (t) => loc(by((e) => String(e.placeholder || "").toLowerCase().indexOf(String(t).toLowerCase()) >= 0));
+    page.getByText = (t) => loc(by((e) => String(e.text || e.name).toLowerCase().indexOf(String(t).toLowerCase()) >= 0));
+    page.evaluate = async (fn, arg) => {
+      if (fn === bt.scrollStateInPage) {
+        return { y: page._scroll.y, max: page._scroll.max, vh: page._scroll.vh, docH: page._scroll.max + page._scroll.vh, inner: page._inner };
+      }
+      if (fn === bt.scrollPageInPage) {
+        const before = page._scroll.y;
+        page._scroll.y = Math.max(0, Math.min(page._scroll.max, before + (arg.dy || 0)));
+        return { moved: page._scroll.y - before, mode: page._scroll.y === before && !page._scroll.max ? "внутренний контейнер" : "страница", y: page._scroll.y, max: page._scroll.max };
+      }
+      if (fn === bt.scrollInnerInPage) {
+        const el = arg.self;
+        const before = el.scrollTop || 0;
+        const box = el.__scroller || el;
+        box.scrollTop = Math.max(0, before + (arg.dy || 0));
+        return { moved: (box.scrollTop || 0) - before, mode: "контейнер", y: box.scrollTop || 0, max: (box.scrollHeight || 0) - (box.clientHeight || 0) };
+      }
+      if (fn === bt.idleStartInPage) return true;
+      if (fn === bt.idleTakeInPage) return page._takes.length ? page._takes.shift() : 0;
+      if (fn === bt.idleStopInPage) return true;
+      // карта страницы (collectInPage)
+      return {
+        url: page._u,
+        title: "Страница",
+        items: page.els.map((e, i) => ({
+          ref: e.ref || "e" + (i + 1),
+          tag: e.tag,
+          roleAttr: e.role,
+          text: e.text || e.name,
+          inViewport: e.inViewport !== false,
+          disabled: !!e.disabled,
+        })),
+      };
+    };
+    return page;
+  }
+
+  const els = [
+    mkEl({ key: "login", role: "button", name: "Войти" }),
+    mkEl({ key: "settings", role: "button", name: "Настройки", inViewport: false }),
+    mkEl({ key: "list", role: "button", name: "Список API" }),
+    mkEl({ key: "menu", role: "button", name: "Профиль", onHover: () => { els.push(mkEl({ key: "logout", role: "menuitem", name: "Выйти" })); } }),
+  ];
+  els.forEach((e, i) => { e.ref = "e" + (i + 1); });
+  const page = fakePage(els);
+  const mockBrowser = {
+    isConnected: () => true,
+    on() {},
+    async pages() { return [page]; },
+    async newPage() { return page; },
+    async close() {},
+  };
+
+  await bt.close({ tabId: "all" });
+  bt.setPlaywright({
+    chromium: {
+      executablePath: () => "",
+      async launch() { return mockBrowser; },
+      async launchPersistentContext() { return mockBrowser; },
+    },
+  });
+  try {
+    await bt.open({ url: "https://site.test/" });
+
+    await test("browserScroll: крутит колесом и отдаёт то, что попало в кадр", async () => {
+      page.wheels.length = 0;
+      const r = await bt.scroll({ how: "down" });
+      assert.ok(/^OK/.test(r), r);
+      assert.deepStrictEqual(page.wheels[0], [0, 640], "колесо не сработало (ожидали 0.8 экрана = 640): " + JSON.stringify(page.wheels));
+      assert.ok(/Прокрутка: 640 из 2000 \(32%\)/.test(r), "нет позиции прокрутки:\n" + r);
+      // В ответе — что СЕЙЧАС в кадре, с ref: кликать можно сразу, без карты.
+      assert.ok(/«Войти»/.test(r), "в кадре нет видимого элемента:\n" + r);
+      assert.ok(/browserClick \{ ref: "e1" \}/.test(r), "нет подсказки с ref:\n" + r);
+      assert.ok(!/«Настройки»/.test(r), "в кадр попал элемент вне экрана:\n" + r);
+    });
+
+    await test("browserScroll: прокрутить ДО элемента (его не было в кадре)", async () => {
+      const r = await bt.scroll({ to: "Настройки" });
+      assert.ok(/прокрутил до «/.test(r) && /Настройки/.test(r), "не прокрутил до элемента:\n" + r);
+      assert.ok(els[1].scrolledIn === true, "scrollIntoView не вызван");
+      assert.ok(/Прокрутка:/.test(r), "нет позиции после прокрутки:\n" + r);
+      // Промах — честное сообщение с похожими элементами, а не молчание.
+      const bad = await bt.scroll({ to: "Корзина" });
+      assert.ok(/Не нашёл|Ошибка/.test(bad), "не нашёл элемент, но не сказал:\n" + bad);
+    });
+
+    await test("browserScroll: внутренний контейнер крутится там, где стоит курсор", async () => {
+      page.wheels.length = 0;
+      page.moves.length = 0;
+      const r = await bt.scroll({ container: "Список API", how: "down", by: 300 });
+      assert.ok(/прокрутил контейнер/.test(r) && /Список API/.test(r), r);
+      assert.deepStrictEqual(page.moves[0], [60, 45], "курсор не наведён на контейнер (центр 10+100/2, 20+50/2): " + JSON.stringify(page.moves));
+      assert.deepStrictEqual(page.wheels[0], [0, 300], "контейнер не прокручен колесом: " + JSON.stringify(page.wheels));
+    });
+
+    await test("browserScroll: страница не сдвинулась — говорит, что крутить контейнер", async () => {
+      const still = fakePage([mkEl({ key: "a", role: "button", name: "Кнопка" })], "https://spa.test/");
+      still._scroll = { y: 0, max: 0, vh: 800 };
+      const browser = {
+        isConnected: () => true,
+        on() {},
+        async pages() { return [still]; },
+        async newPage() { return still; },
+        async close() {},
+      };
+      bt.setPlaywright({ chromium: { executablePath: () => "", async launch() { return browser; }, async launchPersistentContext() { return browser; } } });
+      await bt.close({ tabId: "all" });
+      await bt.open({ url: "https://spa.test/" });
+      const r = await bt.scroll({ how: "down" });
+      assert.ok(/не сдвинулась/.test(r), "SPA-страница со своим скроллом не распознана:\n" + r);
+      assert.ok(/container/.test(r), "нет подсказки про container:\n" + r);
+      // Возвращаем рабочий браузер для остальных проверок.
+      bt.setPlaywright({ chromium: { executablePath: () => "", async launch() { return mockBrowser; }, async launchPersistentContext() { return mockBrowser; } } });
+      await bt.close({ tabId: "all" });
+      await bt.open({ url: "https://site.test/" });
+    });
+
+    await test("browserHover: наводит мышь и показывает, что раскрылось", async () => {
+      const r = await bt.hover({ name: "Профиль" });
+      assert.ok(/^OK/.test(r), r);
+      assert.ok(els[3].hovered === true, "hover не вызван");
+      assert.ok(/Появилось/.test(r), "не сказал, что появилось:\n" + r);
+      assert.ok(/«Выйти»/.test(r), "новый пункт меню не назван:\n" + r);
+      // Элемент без hover-меню — честный ответ с подсказкой.
+      const quiet = await bt.hover({ name: "Войти" });
+      assert.ok(/Новых элементов не появилось/.test(quiet), quiet);
+      assert.ok(/browserClick/.test(quiet), "нет совета, что делать дальше:\n" + quiet);
+    });
+
+    await test("browserNetwork: что ушло на сервер и что он ответил", async () => {
+      const req = { method: () => "POST", url: () => "https://site.test/api/login", resourceType: () => "xhr" };
+      const res = {
+        request: () => req,
+        status: () => 401,
+        headers: () => ({ "content-type": "application/json; charset=utf-8" }),
+        text: async () => '{"error":"invalid password"}',
+      };
+      page.emit("request", req);
+      page.emit("response", res);
+      await new Promise((r) => setTimeout(r, 5));
+      const out = await bt.network({});
+      assert.ok(/POST https:\/\/site.test\/api\/login → 401/.test(out), "нет строки запроса:\n" + out);
+      assert.ok(/❌/.test(out), "ошибка ответа не помечена:\n" + out);
+      assert.ok(/invalid password/.test(out), "тело ответа не показано:\n" + out);
+      assert.ok(/4xx\/5xx/.test(out), "нет совета, что делать с ошибкой:\n" + out);
+      // По умолчанию журнал очищается: второй вызов не повторяет старое.
+      const again = await bt.network({});
+      assert.ok(/новых запросов нет/.test(again), again);
+      // Статика не мешает, если её не просили.
+      const img = { method: () => "GET", url: () => "https://site.test/logo.png", resourceType: () => "image" };
+      page.emit("request", img);
+      page.emit("response", { request: () => img, status: () => 200, headers: () => ({ "content-type": "image/png" }), text: async () => "" });
+      await new Promise((r) => setTimeout(r, 5));
+      assert.ok(/новых запросов нет/.test(await bt.network({})), "картинка попала в отчёт без all: true");
+      page.emit("request", img);
+      page.emit("response", { request: () => img, status: () => 200, headers: () => ({ "content-type": "image/png" }), text: async () => "" });
+      await new Promise((r) => setTimeout(r, 5));
+      assert.ok(/logo\.png/.test(await bt.network({ all: true })), "с all: true статика не показана");
+      // Фильтр по адресу.
+      const api = { method: () => "GET", url: () => "https://site.test/api/items", resourceType: () => "xhr" };
+      page.emit("request", api);
+      page.emit("response", { request: () => api, status: () => 200, headers: () => ({ "content-type": "application/json" }), text: async () => "[]" });
+      await new Promise((r) => setTimeout(r, 5));
+      assert.ok(/api\/items/.test(await bt.network({ filter: "api/items" })), "фильтр не применён");
+    });
+
+    await test("waitForIdle: ждёт тишину DOM и сеть без запросов", async () => {
+      page._takes = [3, 1, 0];
+      const started = Date.now();
+      const r = await bt.waitForIdle({ quietMs: 100, timeout: 3000 });
+      assert.ok(/успокоилась/.test(r), r);
+      assert.ok(/изменений DOM 4/.test(r), "мутации не посчитаны:\n" + r);
+      assert.ok(Date.now() - started >= 90, "вернулся раньше тишины");
+      assert.ok(/browserSnapshot/.test(r), "нет совета, что делать после покоя:\n" + r);
+    });
+
+    await test("страница-помощники: контейнер со скроллом находится и крутится", () => {
+      // Мини-DOM: тело не скроллится, а внутренний блок — да (типичная SPA).
+      const mkNode = (o) => Object.assign({
+        scrollTop: 0, scrollLeft: 0, scrollHeight: 0, clientHeight: 0,
+        className: "", parentElement: null, innerHeight: 0,
+        getBoundingClientRect: () => ({ top: 0, left: 0, width: 100, height: 100 }),
+      }, o);
+      const inner = mkNode({ scrollHeight: 1000, clientHeight: 300, className: "list" });
+      const child = mkNode({ parentElement: inner });
+      const body = mkNode({ scrollHeight: 300, clientHeight: 300 });
+      const docEl = mkNode({ scrollHeight: 300, clientHeight: 300, parentElement: body });
+      const prevDoc = global.document;
+      const prevWin = global.window;
+      const prevStyle = global.getComputedStyle;
+      global.document = { body, documentElement: docEl, querySelectorAll: () => [inner] };
+      global.window = { innerHeight: 300, scrollY: 0, scrollX: 0, scrollBy() {}, scrollTo() {} };
+      global.getComputedStyle = (el) => ({ overflowY: el === inner ? "auto" : "visible", visibility: "visible", display: "block", opacity: "1" });
+      try {
+        const state = bt.scrollStateInPage();
+        assert.strictEqual(state.vh, 300);
+        assert.strictEqual(state.inner.length, 1, "внутренний контейнер со скроллом не найден: " + JSON.stringify(state));
+        // Крутим от ребёнка — поднимаемся до прокручиваемого родителя.
+        const res = bt.scrollInnerInPage({ self: child, dy: 200 });
+        assert.strictEqual(inner.scrollTop, 200, "прокрутка не дошла до контейнера: " + inner.scrollTop);
+        assert.strictEqual(res.moved, 200);
+        assert.strictEqual(res.max, 700);
+      } finally {
+        global.document = prevDoc;
+        global.window = prevWin;
+        global.getComputedStyle = prevStyle;
+      }
+    });
+
+    await test("browserScroll/browserHover/browserNetwork/waitForIdle связаны с приложением", () => {
+      for (const t of ["browserScroll", "browserHover", "browserNetwork", "waitForIdle", "agentGuide"]) {
+        assert.ok(new RegExp('case "' + t + '"').test(mainSrc), "main.js не обрабатывает " + t);
+        const def = AgentCore.TOOL_DEFINITIONS.find((x) => x.function && x.function.name === t);
+        assert.ok(def, "нет определения инструмента " + t);
+        assert.ok(AgentCore.SYSTEM_PROMPT.indexOf(t) !== -1, t + " нет в списке инструментов промпта");
+      }
+      // Прокрутка умеет внутренние контейнеры и «до элемента» — это и просил пользователь.
+      const scrollDef = AgentCore.TOOL_DEFINITIONS.find((x) => x.function.name === "browserScroll").function;
+      for (const p of ["how", "by", "times", "to", "container"]) {
+        assert.ok(scrollDef.parameters.properties[p], "у browserScroll нет параметра " + p);
+      }
+      assert.ok(/container/.test(scrollDef.description) && /внутренний/i.test(scrollDef.description), "описание не объясняет внутренние контейнеры");
+      // Сеть спрашивают ПОСЛЕ действия — это должно быть в описании.
+      assert.ok(/browserNetwork/.test(coreSrc) && /что ответил сервер/i.test(coreSrc), "промпт не учит спрашивать сеть после действия");
+      // Алиасы, чтобы слабая модель не промахивалась мимо имени.
+      for (const a of ["browser_scroll", "hover", "browser_network", "wait_for_idle", "guide"]) {
+        assert.ok(/browserScroll|browserHover|browserNetwork|waitForIdle|agentGuide/.test(AgentCore.normalizeToolName(a)), "алиас " + a + " не ведёт к инструменту");
+      }
+      // При тесном контексте браузерный минимум должен остаться.
+      const core = AgentCore.selectTools(8000).map((t) => t.function.name);
+      for (const t of ["browserOpen", "browserSnapshot", "browserScroll", "browserHover", "browserNetwork", "waitForIdle", "agentGuide"]) {
+        assert.ok(core.indexOf(t) >= 0, t + " выпал из ядра инструментов");
+      }
+      // Интерфейс: иконки и понятные подписи.
+      assert.ok(/browserScroll: "↕️"/.test(appSrc) && /browserNetwork: "📡"/.test(appSrc) && /agentGuide: "📘"/.test(appSrc), "нет иконок новых инструментов");
+      assert.ok(/browserScroll: "Прокрутка страницы"/.test(appSrc) && /waitForIdle: "Ожидание покоя страницы"/.test(appSrc), "нет подписей новых инструментов");
+      // Веб-версия: справочники и браузер честно недоступны, ожидание покоя = пауза.
+      assert.ok(/agentGuide\) доступны в desktop-приложении/.test(appSrc), "веб-версия не отвечает про agentGuide");
+    });
+
+    await test("зрение на скриншоте: включается по модели с ключом и спрашивает про кликабельное", () => {
+      const shot = mainSrc.slice(mainSrc.indexOf('case "browserScreenshot"'), mainSrc.indexOf('case "browserEval"'));
+      assert.ok(/vcfg.visionModel && vcfg.key/.test(shot), "зрение не подключается без галочки «Зрение»");
+      assert.ok(/КЛИКАБЕЛЬНЫ/.test(shot), "вопрос зрению не про кликабельные элементы");
+      assert.ok(/ЗА пределами экрана/.test(shot), "зрение не спрашивают про то, что за экраном");
+      assert.ok(/analyze === false/.test(shot), "нет способа отключить разбор скриншота");
+      assert.ok(/Настройки → вкладка «Зрение»/.test(shot), "нет подсказки, как включить зрение");
+    });
+
+    await test("справочники по сайтам: гайды есть, домены в шапке, маршрут сохраняется", () => {
+      const dir = path.join(ROOT, "src", "agent-guides");
+      const files = fs.readdirSync(dir);
+      for (const name of ["vk.md", "chat-analysis.md", "google-cloud.md", "github.md"]) {
+        assert.ok(files.indexOf(name) >= 0, "нет справочника " + name);
+      }
+      const gc = fs.readFileSync(path.join(dir, "google-cloud.md"), "utf8");
+      assert.ok(/<!--\s*sites:\s*console\.cloud\.google\.com/.test(gc), "в гайде нет домена для авто-подхвата");
+      assert.ok(/ENABLE/.test(gc) && /apis\/credentials/.test(gc), "гайд google-cloud не описывает включение API и ключи");
+      assert.ok(/Terms of Service|Agree and continue/.test(gc), "гайд не описывает «стену» согласия");
+      const gh = fs.readFileSync(path.join(dir, "github.md"), "utf8");
+      assert.ok(/sites:\s*github\.com/.test(gh) && /tokens\/new/.test(gh), "гайд github не про токены/домены");
+      // Инструмент: список/чтение/подхват по домену/сохранение маршрута.
+      assert.ok(/function guideIndex\(\)/.test(mainSrc) && /function guideForUrl\(/.test(mainSrc) && /function agentGuideCall\(/.test(mainSrc), "нет логики справочников в main.js");
+      assert.ok(/guideForUrl\(args && args.url\)/.test(mainSrc), "browserOpen не подсказывает справочник");
+      assert.ok(/agent-guides/.test(mainSrc) && /userData/.test(mainSrc), "выученные справочники не сохраняются в память приложения");
+      assert.ok(/^34\. Справочники и память маршрутов:/m.test(AgentCore.SYSTEM_PROMPT), "в промпте нет правила про справочники и маршруты");
+      assert.ok(/^33\. Интерфейсы сайтов собраны из одних и тех же узоров/m.test(AgentCore.SYSTEM_PROMPT), "в промпте нет книги UI-паттернов");
+    });
+
+    await test("книга UI-паттернов: Material-select, автокомплит, длинные списки", () => {
+      const p = AgentCore.SYSTEM_PROMPT;
+      assert.ok(/НЕ <select>/.test(p), "не сказано, что Material-select — не <select>");
+      assert.ok(/Автокомплит|подсказк/i.test(p), "нет правила про автокомплит (ввёл → выбрал подсказку)");
+      assert.ok(/НЕ скролль вручную/.test(p), "нет правила про длинные списки (искать, а не скроллить)");
+      assert.ok(/opacity: 0|скрытый ввод/.test(p), "нет правила про прозрачные чекбоксы");
+      assert.ok(/Date-?\s?пикер|Дата-пикеры/i.test(p), "нет правила про дата-пикеры и деревья");
+    });
+  } finally {
+    bt.setPlaywright(null);
+  }
+}
+
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
   await testAgentCore();
@@ -4271,6 +5045,9 @@ async function testBrowserOverlays() {
   await testServer();
   await testSelfDev();
   await testPlanPanel();
+  await testStreamThrottle();
+  await testBrowserSpeed();
+  await testBrowserSenses();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");
   process.exit(failed ? 1 : 0);
 })();

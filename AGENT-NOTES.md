@@ -1051,3 +1051,169 @@ missing)`, то есть gRPC там живёт. В каталоге эндпо�
   force-клика падают три теста (карта, force-клик, связка) — значит проверки реальные.
 - `node --check` — чисто; OTA-бандл **1.5.37** собран, sha256 совпал с манифестом,
   файлы сверены с диском побайтово.
+
+## 1.5.38 — почему приложение «жевало» при печати (производительность интерфейса)
+
+Жалоба: «приложение начало тормозить, особенно при вводе сообщений». Причина нашлась
+не в модели и не в сети, а в оформлении + рендере стрима. Три источника нагрузки:
+
+1. **Анимированный фон под «стеклом».** Слой `body::before` (туманность) бесконечно
+   дрейфовал (`nebulaDrift 48s infinite` + `will-change: transform`), а НАД ним лежат
+   панели с `backdrop-filter` (шапка blur(16px), сайдбар и панели blur(20px), композер,
+   пузыри blur(8px), чипы, оверлеи — 32 правила). Пока фон под ними движется, браузер
+   обязан заново размывать каждый такой элемент **в каждом кадре**, даже когда
+   пользователь ничего не делает. Дрейф убран → фон статичный, блюры кэшируются
+   (выглядит так же: градиенты, сетка и стекло остались).
+2. **Пузырь ответа перерисовывался на КАЖДЫЙ чанк модели.** `case "chunk"` делал
+   `b.innerHTML = msgHtml(seg.content)` — на длинном ответе это десятки раз в секунду
+   пересобирает сотни узлов и пересчитывает раскладку. Теперь текст копится в данных,
+   а DOM обновляется не чаще одного кадра (`queueBubbleRender`, requestAnimationFrame);
+   финальный рендер делает `finishStream`. Так же и `text_override`.
+3. **Прокрутка и `scrollHeight` на каждое событие.** `scrollBottom()` на каждый чанк и
+   `autoResize()` (чтение `scrollHeight`) на каждое нажатие клавиши заставляют браузер
+   синхронно пересчитывать раскладку большой ленты. Оба переведены на кадр:
+   `scrollBottomSoon()` (стрим, размышления) и rAF внутри `autoResize`.
+
+### Что менять не надо
+- Оформление и разметка не тронуты: градиенты, стекло, свечение, анимации кнопок
+  (sheenSlide) и логотипа остались. Убран только бесконечный дрейф фона под blur-панелями
+  и невидимое размытие под пузырём (фон пузыря непрозрачен на ~93%).
+- Ключевые кадры `nebulaDrift` оставлены в CSS — если понадобится вернуть дрейф,
+  достаточно снять комментарий, но тогда лучше заодно упростить backdrop-filter у панелей.
+
+### Проверки
+- smoke-тесты: **201/201** (+4): обработчик chunk использует очередь кадра (и не пишет
+  innerHTML сам), размышления не дёргают прокрутку каждый токен, очередь копит текст и
+  рисует последнее состояние ровно за один кадр (+ отложенная прокрутка схлопывается в
+  кадр), `autoResize` откладывается до кадра, фон не анимируется и у пузыря нет
+  `backdrop-filter`. Проверка поведения идёт на реальном срезе `app.js` с мини-DOM
+  и подставным requestAnimationFrame.
+- `node --check` по `app.js` и `test/smoke.test.js` — чисто; баланс скобок в
+  `styles.css` сверен (1007/1007).
+- OTA-бандл **1.5.38** собран.
+
+### Если всё ещё тормозит (следующие шаги, по убыванию эффекта)
+- Ограничить длину ленты в DOM: рендерить последние N сообщений + «показать раньше»
+  (сейчас при переключении чата строятся все сообщения целиком).
+- `saveChats`: рендерер отдаёт в главный процесс весь объект истории (структурное
+  клонирование на каждый сейв, раз в 1.5 c во время стрима) — можно передавать готовую
+  строку JSON и не печатать файл с отступами.
+- Для очень больших чатов — виртуальный список (`content-visibility: auto` на `.msg`
+  даст эффект бесплатно, проверить на реальной машине).
+
+## 1.5.39 — браузер: агент делает «сразу», а не ищет селекторы
+
+Жалоба: модель (в песочнице тестируется GLM 5.3) не может сразу сделать нужное в
+браузере — перебирает селекторы и варианты. Причины и что сделано:
+
+1. **Мгновенный провал вместо ожидания.** `resolveTarget` смотрел на страницу ОДИН раз:
+   если SPA ещё не дорисовала кнопку, модель получала ошибку и тратила ходы на
+   browserWait и повторный snapshot. Теперь ожидание встроено: 3 с по умолчанию
+   (`timeout` задаёт своё), опрос каждые 200 мс; по ref — 800 мс (ref после перехода
+   просто устаревает). Ответ при провале по-прежнему несёт похожие элементы с ref.
+2. **Не искали во фреймах.** Локаторы работали только в главном фрейме, поэтому вход
+   через iframe, платёжные и капча-виджеты были для агента невидимы. Теперь поиск идёт
+   по всем фреймам (главный + вложенные), в ответе видно «(фрейм https://…)», и действие
+   выполняется внутри нужного фрейма. `frameList/frameLabel`, поиск в `resolveTarget`.
+3. **Много ходов на простое действие.** `browserFill` получил `submit: true` (ввёл и
+   сразу Enter), а новый инструмент **browserAct** делает цепочку шагов ОДНОЙ командой:
+   `goto` (открыть адрес), `click`, `fill` (+submit), `press`, `wait` (мс), `waitFor`
+   (текст), `back`, `scroll`, `eval`, `read`, `snapshot`. Первый сбой останавливает
+   цепочку и объясняет причину (`stopOnError: false` — продолжать). Шаг понимает и
+   «человеческие» формы: `{"click":"Войти"}`, `{"field":"Почта","text":"a@b.c"}`, `{"ref":"e2"}`.
+4. **Мелочи, которые экономили по ходу:** `browserFill` принимает `field` как синоним
+   подписи/имени поля; `browserWait` умеет паузу без элемента (`{ ms: 1500 }`); клик,
+   открывший новую вкладку (target=_blank), подхватывает её и делает активной
+   (`adoptNewPages`); в интерфейсе появились иконки/подписи browserAct ⚡, browserEval 🧪,
+   browserDOM 🧩, browserOverlays 🪟; в промпте — блок «БЫСТРЫЙ ПУТЬ» (сначала карта,
+   действуй по ref/имени, известную последовательность — одним вызовом browserAct).
+   Алиасы: `browser_act`, `act`, `steps`.
+
+### Заодно (нашлось тестом)
+- `listPages()`: у `Browser` playwright метод `pages()` асинхронный, у `BrowserContext` —
+  синхронный. Из-за этого подхват вкладок падал с «pages is not iterable». Теперь список
+  различает оба случая, добавлен `allPages()` для асинхронного пути.
+
+### Проверки
+- smoke-тесты **210/210** (+9, все поведенческие на подставном Playwright): клик по кнопке,
+  которой ещё нет (появляется через 250 мс), клик по элементу во вложенном фрейме (в ответе
+  «фрейм»), submit у browserFill, цепочка browserAct из 5 шагов (порядок клик → ввод+Enter →
+  клавиша), остановка на первом сбое с подсказками, мусор в steps, пауза `browserWait { ms }`,
+  цепочка, начатая с `goto`, связка инструмента с main.js/интерфейсом/промптом.
+- **Проверено на сломанном коде**: с выключенным поиском по фреймам тест фрейма падает —
+  значит проверка реальная (после проверки код возвращён).
+- `node --check` по изменённым файлам — чисто; OTA-бандл **1.5.39** собран.
+
+## 1.5.40 — панель плана появляется и тогда, когда модель пишет план текстом
+
+Жалоба: «он план составляет… но панели нету с маленькими чекбоксами где помечается галочкой
+что выполнено а что нет». Панель есть и работает, но питалась ТОЛЬКО инструментом `todoWrite`.
+Слабые модели (в песочнице — GLM 5.3) план структурой не присылают: пишут его текстом ответа
+(«План: 1. … 2. …»), поэтому чеклист оставался пустым.
+
+### Найдено (два бага)
+1. **Веб-версия в План-режиме отправляла ПУСТОЙ список инструментов** — `tools: planMode ? [] :
+   TOOL_DEFINITIONS` в web-цикле app.js. В десктопе это уже починили (main.js шлёт
+   `PLAN_MODE_TOOL_DEFINITIONS`), а браузерный путь остался со старым обнулением: модель
+   физически не могла вызвать `todoWrite` → план приходил текстом → панель пустая.
+2. **Текст ответа панель не питал вообще.** Даже когда план был написан словами, интерфейс
+   его игнорировал.
+
+### Что сделано
+- **Разбор плана из текста** (app.js, блок «План работ»): `planLinesFromText` / `planTitleFromText` /
+  `planFromText`. Заголовок («План», «План работ», «План действий», «Шаги», «Порядок действий»,
+  «Todo», с `**\*\*`, `#` и двоеточием) + список пунктов («1.», «- », «•», «- [x]»), либо блок
+  строк-чекбоксов ✅/⬜/🔄/⚠️ без заголовка. Пункты идут в тот же `normalizePlanTasks`, что и
+  данные `todoWrite`, поэтому лимит (7), статусы и чистка маркеров общие.
+- **Приоритет — план модели.** `planFromText` не трогает план из `todoWrite` (`source: "model"`);
+  когда модель присылает структуру, текстовый план уходит в `planHistory`. Повторный разбор того
+  же текста статусы не сбрасывает (сравниваются пункты).
+- **Галочки двигает работа.** У текстового плана модель статусов не присылает, поэтому
+  `planRoundStarted(chat, segId)` вызывается из `ensureSegmentForText`: новый сегмент ответа
+  (текст/размышления после действий) = новый раунд → предыдущий пункт «done», следующий
+  «in_progress». Один пункт на раунд (защита `advancedFor`), провал инструмента по-прежнему
+  отмечает `planToolOutcome` («failed»), а `planTextFinish` на событии `done` закрывает
+  незакрытый пункт. План модели текстовый прогресс не трогает — там статусы ведёт сама модель.
+- **План из текста хранится как `source: "text"`** и переживает перезапуск: `sanitizeChats`
+  больше не выдаёт его за «model» (и по-прежнему выбрасывает legacy «auto»).
+- **Связки:** `tool_start` и `done` разбирают текст ответа (`runTextOf` → `planFromText` →
+  `renderPlanPanel`); в веб-версии результат `todoWrite` в План-режиме честно говорит «жди команды
+  Выполнить», а не «продолжай со следующего пункта».
+
+### Проверки
+- smoke-тесты **216/216** (+5): текст «План: 1. …» становится панелью (счётчик 0/4, заголовок,
+  чистые пункты), повторный разбор не сбрасывает статусы, галочки идут по раундам (сбой не
+  двигает вперёд, `planTextFinish` закрывает шаг), обычный ответ планом НЕ становится
+  (нумерованный список без заголовка, «План такой: …» в прозе, один пункт, одиночный ✅),
+  блок чекбоксов признаётся планом, план модели важнее текстового, связки событий
+  (tool_start/done/ensureSegmentForText) и веб-путь с `PLAN_MODE_TOOL_DEFINITIONS`.
+- **Проверено на сломанном коде** (три мутации): отключённый разбор текста → падают 3 теста,
+  `planTextAdvance(chat, false)` вместо `true` → падает тест раундов, «любая строка = пункт»
+  → падает тест ложных срабатываний. Код возвращён, 216/216.
+- `node --check` по app.js и smoke.test.js — чисто; OTA-бандл **1.5.40** собран.
+
+## 1.5.41 - prokrutka, navedeniye, set, ozhidaniye pokoya i spravochniki po saytam
+
+ZHaloba: polovina elementov byla za ekranom, menu ne raskryvalos, posle klika gadal chto otvetil server, 30 minut bluzhdaniy po Google Cloud. Vosem konkretnykh instrumentov iz wishlist - realizovany vse.
+
+Chto sdelano (kritichno + uskoryaet):
+
+1. browserScroll - prokrutka stranitsy i vnutrennikh konteynerov (spiski API, tablitsy, vypadayushchiye menyu), plyus prokrutit do elementa. Krutit nastoyashchim kolesom myshi (lenivyye lenty podgruzhayutsya), po neobkhodimosti programmo; yesli stranitsa ne sdvinulas (SPA s vnutrennim skrollom) - govorit chto nuzhno ukazat container. V otvete - chto vidno v kadre SEYCHAS s ref: spisok elementov + podskazka vnukh ekrana eshche N, poetomu agent mozhet klikat srazu bez povtornoy karty.
+
+2. browserHover - navedeniye myshi (nastoyashchee cherez Playwright, fallback v DOM-sobytiya). Posle navedeniya - kakie NOVYYE elementy poyavilis (tekst + ref): agent vidit raskroye menu/podskazku i klikaet po nim srazu.
+
+3. browserNetwork - chto stranitsa REALNO otpravila i chto otvetil server (metod, URL, status, content-type, telo otveta do 4KB dlya JSON/text). Statika otsleyivayetsya po umolchaniyu; all: true - vklyuchaya. Zhurnal odayet NOVOYE s proshlogo vyzova i ochishchayetsya - agent sprashivayet srazu posle deystviya i vidit oshibku 401/403/500 s tekstom tela otveta.
+
+4. waitForIdle - zhdyot kogda DOM perestanet menyatsya i set opusteyet (Angular/React pererisovki). V otvete - skolko mutatsiy i zaprosov bylo, skolko zhдал. Posle etogo browserSnapshot dayet aktualnuyu kartu, ref ne ustareyut.
+
+5. Spravochniki po saytam (agentGuide) - vstroyennye (src/agent-guides/*.md) + izuchennye agentom (userData/agent-guides/). V shapke faila <!-- sites: console.cloud.google.com --> pri browserOpen sayt avtomaticheski poluchayet podskazku. Posle USPESHOGO prokhoda agent mozhet sokhranit marshrut. Sozdanы gaidы: google-cloud.md (proekt -> API -> klyuch, steny soglasiya, pryamye URL) i github.md (repositorii, tokeny, PR, poisk po t). Staryy readFile teper ishchet i izuchennye spravochniki.
+
+6. Avto-vision na skrinshote - browserScreenshot VSEGDA razbiraetsya vision-modelyu kogda ukazana model i klyuch (bolshe ne trebuyetsya galochka Zrenie). Vopros: chto vidno, chto klikabelno, chto meshayet, chto za predelami ekrana. Pri otsutstvii klyucha - chetkaya podskazka kak vklyuchit.
+
+7. Kniga UI-patertnov v prompte (pravilo 33) - Material-select != select (klik -> sloyi -> punkt po tekstu), avtokomplit (vvvel 2 bukvy -> zhdyom -> podskazka klikom/strelki), dlinnye spiski (iskat cherez filtr a ne skrollit), prozrachnye chekboxy (opacity: 0), data-pikery/derevya (scroll do elementa -> klik), dialogi poverkh stranitsy (rabotat s nimi pervym). Pravilo 34 - spravochniki i pamyat marshrutov.
+
+8. Yadro instrumentov (tesnyy kontekst) - v CORE dobavleny: browserOpen, browserSnapshot, browserClick, browserFill, browserAct, browserScroll, browserHover, browserScreenshot, browserNetwork, waitForIdle, browserEval, browserOverlays, agentGuide. Raneye pri <26K tokenov brauzernye instrumenty voobche ne shlis.
+
+Svyazki i provodka: main.js - cases + auto-hint po spravochniku + readFile chitayet izuchennye gaidy; agent-core.js - opredeleniya + aliasy + pravila 33-34; app.js - ikonki i podpisi; browser-tools.js - osnova + in-page funktsii.
+
+Proverki: smoke-testy 228/228 (+12); mutatsionnaya proverka bodies:false -> test teryayet telo otveta; node --check chisto; OTA-bandl 1.5.41, sha256 sovpal, 32 fayla svereny.

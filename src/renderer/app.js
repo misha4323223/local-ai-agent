@@ -419,7 +419,7 @@
         if (c.plan !== undefined) {
           const pi = c.plan && typeof c.plan === "object" && Array.isArray(c.plan.items) ? normalizePlanTasks(c.plan.items) : [];
           // legacy-планы со source "auto" отбрасываем — панель показывает только план модели.
-          if (pi.length && c.plan.source !== "auto") c.plan = { title: String(c.plan.title || ""), source: "model", items: pi, updatedAt: Number(c.plan.updatedAt) || Date.now() };
+          if (pi.length && c.plan.source !== "auto") c.plan = { title: String(c.plan.title || ""), source: c.plan.source === "text" ? "text" : "model", items: pi, updatedAt: Number(c.plan.updatedAt) || Date.now() };
           else c.plan = null;
         }
         if (Array.isArray(c.planHistory)) c.planHistory = c.planHistory.slice(0, PLAN_ARCHIVE_LIMIT);
@@ -608,7 +608,7 @@
     const items = normalizePlanTasks(ev && ev.tasks);
     if (!items.length) return false;
     // Заменяя план модели, предыдущий убираем в историю (не теряем контекст).
-    if (chat.plan && chat.plan.source === "model") planArchive(chat, chat.plan);
+    if (chat.plan && chat.plan.source !== "auto") planArchive(chat, chat.plan);
     chat.plan = {
       title: String((ev && ev.title) || "").trim().slice(0, 80),
       source: "model",
@@ -616,6 +616,120 @@
       updatedAt: Date.now(),
     };
     return true;
+  }
+
+  // ── План, написанный моделью ТЕКСТОМ (не через todoWrite) ──
+  // Слабые модели часто перечисляют шаги прямо в ответе («План: 1. … 2. …»). Раньше такой
+  // план пропадал: панель питалась только todoWrite, и получалось «план составляет, а панели
+  // с галочками нет». Теперь текст тоже становится чеклистом: заголовок («План», «План работ»,
+  // «Шаги», «Todo») со списком пунктов или блок строк-чекбоксов (✅/⬜/🔄/⚠️).
+  const PLAN_TEXT_MAX = 7;
+  const PLAN_HEAD_RE = /^\s*(?:[>#*_]{0,4}\s*)?(?:\*\*|__)?\s*(план(?:\s+(?:работ|действий|выполнения|задач))?|шаги|порядок\s+действий|todo|to-do)\s*:?\s*(?:\*\*|__)?\s*$/i;
+  const PLAN_ITEM_RE = /^\s*(?:[-*•–—]\s+\S|\[[ xX]\]\s*\S|\d{1,2}[.)]\s+\S|[✅☑✔⬜☐🔄⚠️⬛]\s*\S)/;
+  const PLAN_TICK_RE = /^\s*[✅☑✔⬜☐🔄⚠️⬛]\s*\S/;
+
+  // Строки плана из текста ответа. Пусто — если плана в тексте нет (обычный ответ или
+  // перечисление в прозе): заголовок обязателен, либо нужен блок чекбоксов из 2+ строк.
+  function planLinesFromText(text) {
+    const lines = String(text || "").split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (!PLAN_HEAD_RE.test(lines[i])) continue;
+      const out = [];
+      for (let j = i + 1; j < lines.length && out.length < PLAN_TEXT_MAX; j++) {
+        const line = lines[j].replace(/\s+$/, "");
+        if (!line.trim()) { if (out.length) break; continue; }
+        if (!PLAN_ITEM_RE.test(line)) break; // пошёл обычный текст — план закончился
+        out.push(line);
+      }
+      if (out.length >= 2) return out;
+    }
+    // Заголовка нет, но есть блок строк-чекбоксов — это тоже план (его и ждёт пользователь).
+    let block = [];
+    for (const raw of lines) {
+      const line = raw.replace(/\s+$/, "");
+      if (PLAN_TICK_RE.test(line)) { block.push(line); continue; }
+      if (!line.trim() && block.length) continue;
+      if (block.length >= 2) break;
+      block = [];
+    }
+    return block.length >= 2 ? block.slice(0, PLAN_TEXT_MAX) : [];
+  }
+
+  // Заголовок плана из текста («План работ» и т.п.). Пусто → панель покажет «План работ».
+  function planTitleFromText(text) {
+    for (const line of String(text || "").split(/\r?\n/)) {
+      const m = line.match(PLAN_HEAD_RE);
+      if (!m || !m[1]) continue;
+      const t = String(m[1]).trim();
+      if (t) return t.charAt(0).toUpperCase() + t.slice(1);
+    }
+    return "";
+  }
+
+  // План из текста. Настоящий план модели (todoWrite) всегда важнее текстового.
+  function planFromText(chat, text) {
+    if (!chat) return false;
+    if (chat.plan && chat.plan.source === "model") return false;
+    const lines = planLinesFromText(text);
+    if (lines.length < 2) return false;
+    const items = normalizePlanTasks(lines);
+    if (items.length < 2) return false; // один пункт — это фраза, а не план
+    if (chat.plan && chat.plan.source === "text") {
+      const same = chat.plan.items.map((i) => i.text).join("|") === items.map((i) => i.text).join("|");
+      if (same) return false; // тот же план — статусы не сбрасываем
+      planArchive(chat, chat.plan);
+    }
+    chat.plan = { title: planTitleFromText(text), source: "text", items, updatedAt: Date.now() };
+    return true;
+  }
+
+  // Прогресс текстового плана: модель статусы не присылает, поэтому галочки двигает сам факт
+  // работы — перед раундом действий первый пункт встаёт «в работе», после раунда — готов.
+  function planTextAdvance(chat, ok) {
+    if (!chat || !chat.plan || chat.plan.source !== "text" || !Array.isArray(chat.plan.items)) return false;
+    const items = chat.plan.items;
+    const cur = items.find((i) => i.status === "in_progress");
+    if (!cur) {
+      const first = items.find((i) => i.status === "pending");
+      if (!first) return false;
+      first.status = "in_progress";
+      chat.plan.updatedAt = Date.now();
+      return true;
+    }
+    if (!ok) return false; // провал шага отмечает planToolOutcome
+    cur.status = "done";
+    const next = items.find((i) => i.status === "pending");
+    if (next) next.status = "in_progress";
+    chat.plan.updatedAt = Date.now();
+    return true;
+  }
+
+  // Запуск закончился: незакрытый пункт текстового плана отмечаем готовым.
+  function planTextFinish(chat) {
+    if (!chat || !chat.plan || chat.plan.source !== "text" || !Array.isArray(chat.plan.items)) return false;
+    const cur = chat.plan.items.find((i) => i.status === "in_progress");
+    if (!cur) return false;
+    cur.status = "done";
+    chat.plan.updatedAt = Date.now();
+    return true;
+  }
+
+  // Начался новый раунд ответа (текст или размышления после действий) — предыдущий пункт
+  // текстового плана фактически выполнен. Один пункт на раунд: segId защищает от повторов
+  // (размышления и текст в одном раунде открывают сегмент лишь один раз).
+  function planRoundStarted(chat, segId) {
+    if (!chat || !chat.plan || chat.plan.source !== "text") return false;
+    if (!segId || chat.plan.advancedFor === segId) return false;
+    if (!planTextAdvance(chat, true)) return false;
+    chat.plan.advancedFor = segId;
+    renderPlanPanel();
+    persistChatsSoon();
+    return true;
+  }
+
+  // Весь текст текущего запуска (все сегменты ответа) — источник для разбора плана.
+  function runTextOf(chat, aMsg) {
+    return runSegments(chat, aMsg).map((s) => String((s && s.content) || "")).join("\n");
   }
 
   // Результат инструмента. Статусы пунктов ведёт модель, но если её текущий шаг
@@ -1025,11 +1139,20 @@
     browserOpen: "🌐",
     browserFill: "⌨️",
     browserClick: "🖱️",
+    browserAct: "⚡",
+    browserEval: "🧪",
+    browserDOM: "🧩",
+    browserOverlays: "🪟",
     browserSelect: "🔽",
     browserPress: "⌨️",
     browserText: "📄",
     browserScreenshot: "📷",
     browserWait: "⏳",
+    browserScroll: "↕️",
+    browserHover: "👆",
+    browserNetwork: "📡",
+    waitForIdle: "⏸",
+    agentGuide: "📘",
     browserClose: "🚪",
     browserStatus: "🗔",
     appRead: "👁️",
@@ -1118,11 +1241,20 @@
     browserOpen: "Открыть сайт в браузере",
     browserFill: "Заполнить поле",
     browserClick: "Клик",
+    browserAct: "Цепочка действий в браузере",
+    browserEval: "JS на странице",
+    browserDOM: "Разбор HTML",
+    browserOverlays: "Слои и помехи",
     browserSelect: "Выбор из списка",
     browserPress: "Нажатие клавиши",
     browserText: "Текст страницы",
     browserScreenshot: "Скриншот страницы",
     browserWait: "Ожидание элемента",
+    browserScroll: "Прокрутка страницы",
+    browserHover: "Наведение мыши",
+    browserNetwork: "Запросы страницы",
+    waitForIdle: "Ожидание покоя страницы",
+    agentGuide: "Справочник агента",
     browserClose: "Закрыть вкладку",
     browserStatus: "Вкладки браузера",
     appRead: "Чтение окна приложения",
@@ -1404,6 +1536,45 @@
     w.scrollTop = w.scrollHeight;
   }
 
+  // ─── Экономия кадров при стриме ───
+  // Раньше КАЖДЫЙ чанк модели заменял innerHTML всего пузыря: на длинном ответе
+  // браузер десятки раз в секунду пересобирал сотни узлов и заново растеризовал
+  // «стеклянную» подложку — интерфейс начинал «жевать» при печати. Теперь текст
+  // копится в данных, а DOM обновляется не чаще одного раза за кадр (финальный
+  // рендер всё равно делает finishStream).
+  let streamRenderRaf = 0;
+  let streamDirty = [];
+  function queueBubbleRender(chat, seg) {
+    if (!seg) return;
+    if (streamDirty.indexOf(seg.id) < 0) streamDirty.push(seg.id);
+    if (streamRenderRaf) return;
+    streamRenderRaf = requestAnimationFrame(() => {
+      streamRenderRaf = 0;
+      const ids = streamDirty;
+      streamDirty = [];
+      for (const id of ids) {
+        const m = chat && chat.messages.find((x) => x.id === id);
+        const el = msgEls.get(id);
+        const b = el && el.querySelector ? el.querySelector(".bubble") : null;
+        if (!m || !b) continue;
+        b.classList.add("md");
+        b.innerHTML = msgHtml(m.content);
+      }
+      scrollBottom();
+    });
+  }
+
+  // Автопрокрутка — тоже не чаще кадра: scrollTop = scrollHeight заставляет браузер
+  // синхронно пересчитать раскладку, и на каждый чанк это лишняя работа.
+  let streamScrollRaf = 0;
+  function scrollBottomSoon() {
+    if (streamScrollRaf) return;
+    streamScrollRaf = requestAnimationFrame(() => {
+      streamScrollRaf = 0;
+      scrollBottom();
+    });
+  }
+
   // ─────────────── Отправка ───────────────
   // Продолжить ответ, прерванный закрытием приложения. Идём тем же путём, что и
   // обычная отправка (в историю попадает прозрачная просьба дописать), поэтому
@@ -1508,6 +1679,7 @@
       const seg = { id: uid(), role: "assistant", content: "", pending: true, createdAt: Date.now() };
       msgs.push(seg);
       if (segIds) segIds.push(seg.id);
+      planRoundStarted(chat, seg.id); // новый раунд работы закрывает шаг текстового плана
       $("messages").appendChild(buildMessageEl(seg));
       scrollBottom();
       return seg;
@@ -1548,15 +1720,7 @@
         if (seg) {
           seg.content += ev.text;
           persistChatsSoon();
-          const el = msgEls.get(seg.id);
-          if (el) {
-            const b = el.querySelector(".bubble");
-            if (b) {
-              b.classList.add("md");
-              b.innerHTML = msgHtml(seg.content);
-            }
-          }
-          scrollBottom();
+          queueBubbleRender(chat, seg);
         }
         break;
       }
@@ -1568,7 +1732,7 @@
           const el = msgEls.get(seg.id);
           if (el) {
             ensureThinkBox(el, seg.thinking);
-            scrollBottom();
+            scrollBottomSoon();
           }
         }
         break;
@@ -1590,6 +1754,12 @@
         if (toolEl && toolEl.classList) toolEl.classList.add("in-work");
         work.body.appendChild(toolEl);
         planAdd(ev);
+        // Модель могла написать план текстом вместо todoWrite — разбираем его, чтобы
+        // панель-чеклист всё равно появилась.
+        if (planFromText(chat, runTextOf(chat, aMsg))) {
+          planCollapsed = false;
+          renderPlanPanel();
+        }
         scrollBottom();
         persistChatsSoon();
         break;
@@ -1620,15 +1790,7 @@
         if (seg) {
           seg.content = ev.text;
           persistChatsSoon();
-          const el = msgEls.get(seg.id);
-          if (el) {
-            const b = el.querySelector(".bubble");
-            if (b) {
-              b.classList.add("md");
-              b.innerHTML = msgHtml(seg.content);
-            }
-          }
-          scrollBottom();
+          queueBubbleRender(chat, seg);
         }
         break;
       }
@@ -1727,6 +1889,16 @@
         break;
       }
       case "done":
+        // План, написанный моделью текстом, разбираем и на финише, а его текущий пункт
+        // закрываем: запуск завершён.
+        if (planFromText(chat, runTextOf(chat, aMsg))) {
+          planCollapsed = false;
+          renderPlanPanel();
+        }
+        if (planTextFinish(chat)) {
+          renderPlanPanel();
+          persistChatsSoon();
+        }
         // После завершения запуска обновляем панель git: авто-коммит мог очистить «Изменения»
         setTimeout(() => {
           if (!$("project-panel").classList.contains("hidden")) refreshProject();
@@ -2882,7 +3054,7 @@
       const req = AgentCore.buildChatRequest(settings, {
         model: settings.model,
         messages: apiMessages,
-        tools: planMode ? [] : AgentCore.TOOL_DEFINITIONS,
+        tools: planMode ? AgentCore.PLAN_MODE_TOOL_DEFINITIONS : AgentCore.TOOL_DEFINITIONS,
         fromBrowser: true,
       });
       let res;
@@ -3039,10 +3211,11 @@
           } else {
             onEvent({ type: "plan", tasks: webTasks, title: String((c.args && c.args.title) || "").slice(0, 80) });
             const wp = AgentCore.planSummary(webTasks);
-            result =
-              "OK — план показан пользователю: " + wp.done + " из " + wp.total + " готово" +
-              (wp.failed ? ", сбоев: " + wp.failed : "") +
-              ". Продолжай со следующего пункта и после каждого шага вызывай todoWrite заново с полным списком.";
+            result = planMode
+              ? "OK — план показан пользователю (" + wp.total + " пункт(ов)). Режим плана: инструменты не выполняются — жди команды «Выполнить»."
+              : "OK — план показан пользователю: " + wp.done + " из " + wp.total + " готово" +
+                (wp.failed ? ", сбоев: " + wp.failed : "") +
+                ". Продолжай со следующего пункта и после каждого шага вызывай todoWrite заново с полным списком.";
           }
         } else if (c.name === "semanticSearch") {
           result =
@@ -3053,6 +3226,15 @@
         } else if (c.name === "applyPatch" || c.name === "gitStash" || c.name === "gitCherryPick" || c.name === "gitBlame") {
           result =
             "⚠️ Инструменты applyPatch и gitStash/gitCherryPick/gitBlame доступны только в desktop-приложении. Запустите приложение на Windows (bun run dist:win).";
+        } else if (c.name === "agentGuide") {
+          // Справочники лежат рядом с кодом приложения — в браузере их не читать.
+          result =
+            "⚠️ Справочники по сайтам (agentGuide) доступны в desktop-приложении (bun run dist:win). В веб-версии ищи по DOM: browserSnapshot/browserScroll недоступны — работай через webFetch.";
+        } else if (c.name === "waitForIdle") {
+          // Обычная пауза — в браузере тоже работает (нечего ждать по DOM-мутациям).
+          const secs = Math.max(1, Math.min(parseInt((c.args && (c.args.quietMs || c.args.timeout)) || "1500", 10) / 1000, 30));
+          await new Promise((r) => setTimeout(r, Math.round(secs * 1000)));
+          result = "OK — подождал " + secs.toFixed(1) + " с (в веб-версии ожидание покоя = пауза).";
         } else if (c.name && (c.name.startsWith("browser") || c.name.startsWith("app"))) {
           // Браузерные (Playwright) и app-инструменты (управление собственным окном)
           // работают только в desktop-приложении (main-процесс Electron).
@@ -3741,10 +3923,19 @@
   }
 
   // ─────────────── События ───────────────
+  // Чтение scrollHeight заставляет браузер синхронно пересчитать раскладку.
+  // При быстрой печати (в ленте к этому моменту уже тысячи узлов) это заметно
+  // «съедало» плавность — поэтому пересчёт откладываем до кадра.
+  let inputResizeRaf = 0;
   function autoResize() {
-    const t = $("input");
-    t.style.height = "auto";
-    t.style.height = Math.min(t.scrollHeight, 160) + "px";
+    if (inputResizeRaf) return;
+    inputResizeRaf = requestAnimationFrame(() => {
+      inputResizeRaf = 0;
+      const t = $("input");
+      if (!t) return;
+      t.style.height = "auto";
+      t.style.height = Math.min(t.scrollHeight, 160) + "px";
+    });
   }
 
   $("btn-send").onclick = sendMessage;

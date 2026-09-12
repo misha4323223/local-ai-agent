@@ -1930,6 +1930,127 @@ async function stageAllSafe(dir, settings) {
   return r;
 }
 
+// ── Справочники по сайтам (agent-guides) ────────────────────────────────────
+// Встроенные лежат рядом с кодом (src/agent-guides/*.md), выученные агентом —
+// в userData/agent-guides. В шапке файла может быть строка
+// <!-- sites: console.cloud.google.com, cloud.google.com --> — по ней гайд
+// подхватывается автоматически, когда агент открывает такой адрес.
+function guideDirs() {
+  return [path.join(app.getPath("userData"), "agent-guides"), path.join(__dirname, "agent-guides")];
+}
+function guideSafeName(raw) {
+  return String(raw || "").trim().replace(/^agent-guide:/i, "").replace(/[^a-z0-9-_]/gi, "").toLowerCase();
+}
+function guideFilePath(name, forWrite) {
+  const safe = guideSafeName(name);
+  if (!safe) return "";
+  if (forWrite) return path.join(guideDirs()[0], safe + ".md");
+  for (const dir of guideDirs()) {
+    const p = path.join(dir, safe + ".md");
+    if (fs.existsSync(p)) return p;
+  }
+  return "";
+}
+function guideSitesOf(text) {
+  const m = String(text || "").match(/<!--\s*sites:\s*([^>]+?)-->/i);
+  if (!m) return [];
+  return m[1].split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+function guideTitleOf(text) {
+  const m = String(text || "").match(/^#\s+(.+)$/m);
+  return m ? m[1].trim().slice(0, 80) : "";
+}
+function guideIndex() {
+  const out = [];
+  for (const dir of guideDirs()) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { names = []; }
+    for (const f of names) {
+      if (!f.endsWith(".md")) continue;
+      const name = f.slice(0, -3);
+      if (out.some((g) => g.name === name)) continue; // выученный важнее встроенного
+      let text = "";
+      try { text = fs.readFileSync(path.join(dir, f), "utf8"); } catch (e) { continue; }
+      out.push({ name: name, title: guideTitleOf(text), sites: guideSitesOf(text), learned: dir === guideDirs()[0] });
+    }
+  }
+  return out;
+}
+function guideReadText(name) {
+  const p = guideFilePath(name, false);
+  if (!p) return "";
+  try { return fs.readFileSync(p, "utf8"); } catch (e) { return ""; }
+}
+// Гайд по адресу: точный домен, затем по вхождению (console.cloud.google.com ← cloud.google.com).
+function guideForUrl(url) {
+  let host = "";
+  try { host = String(new URL(url).hostname || "").toLowerCase().replace(/^www\./, ""); } catch (e) { host = ""; }
+  if (!host) return null;
+  const list = guideIndex();
+  for (const g of list) {
+    for (const s of g.sites) {
+      if (host === s) return g;
+    }
+  }
+  for (const g of list) {
+    for (const s of g.sites) {
+      if (host.endsWith("." + s) || s.endsWith("." + host)) return g;
+    }
+  }
+  return null;
+}
+function agentGuideCall(args) {
+  args = args || {};
+  const action = String(args.action || (args.save ? "save" : args.name ? "read" : args.url ? "match" : "list")).toLowerCase();
+  if (action === "list") {
+    const list = guideIndex();
+    if (!list.length) return "Справочников пока нет.";
+    return (
+      "Справочники агента (сайты и темы):\n" +
+      list
+        .map((g) => "• " + g.name + (g.title ? " — " + g.title : "") + (g.sites.length ? " [" + g.sites.join(", ") + "]" : "") + (g.learned ? " (мой, сохранён)" : ""))
+        .join("\n") +
+      "\nЧитать: agentGuide { name: \"google-cloud\" } — или readFile(path: \"agent-guide:google-cloud\").\n" +
+      "Свой маршрут: after удачного прохода — agentGuide { save: \"сайт\", title: \"…\", steps: \"1) … 2) …\" }."
+    );
+  }
+  if (action === "match") {
+    const g = guideForUrl(args.url || args.site || "");
+    if (!g) return "Для этого адреса справочника нет — ищи по DOM (browserSnapshot) и, пройдя путь, сохрани его: agentGuide { save: … }.";
+    return "К этому сайту есть справочник «" + g.name + "»" + (g.title ? " (" + g.title + ")" : "") + ". Читай: agentGuide { name: \"" + g.name + "\" }.";
+  }
+  if (action === "read") {
+    const name = guideSafeName(args.name || args.site || args.id);
+    const text = guideReadText(name);
+    if (!text) {
+      const list = guideIndex().map((g) => g.name).join(", ") || "пусто";
+      return "Ошибка: справочник «" + (name || "?") + "» не найден. Есть: " + list + ".";
+    }
+    return "СПРАВОЧНИК АГЕНТА: «" + name + "» (читай и следуй ему):\n\n" + text;
+  }
+  if (action === "save") {
+    const name = guideSafeName(args.save === true || args.save === "true" ? args.name : args.name || args.save || args.site);
+    const steps = String(args.steps || args.text || args.notes || "").trim();
+    if (!name || !steps) {
+      return "Ошибка agentGuide: для сохранения нужны name (сайт, латиницей) и steps — что и в каком порядке сработало (селекторы, подписи кнопок, подводные камни).";
+    }
+    const old = guideReadText(name);
+    const body =
+      "# " + (String(args.title || "").trim() || "Маршрут: " + name) + "\n" +
+      (args.sites ? "<!-- sites: " + String(args.sites) + " -->\n" : "") +
+      (old ? old.replace(/^[\s\S]*?\n---\n/, "") + "\n" : "") +
+      "---\n## " + new Date().toISOString().slice(0, 10) + " — пройдено успешно\n" + steps + "\n";
+    try {
+      fs.mkdirSync(guideDirs()[0], { recursive: true });
+      fs.writeFileSync(guideFilePath(name, true), body, "utf8");
+    } catch (e) {
+      return "Ошибка: не удалось сохранить справочник: " + String((e && e.message) || e).slice(0, 140);
+    }
+    return "OK — маршрут сохранён: agent-guides/" + name + ".md. В следующий раз я прочитаю его сразу (agentGuide { name: \"" + name + "\" }).";
+  }
+  return "agentGuide: неизвестное действие «" + action + "». Доступно: list, read (name), match (url), save (name + steps).";
+}
+
 async function executeTool(name, args, settings) {
   args = args || {};
   try {
@@ -1948,12 +2069,13 @@ async function executeTool(name, args, settings) {
         // readFile(path: "agent-guide:vk") → полный гайд по работе с ВКонтакте.
         const guidePath = String(args.path || "").trim();
         if (guidePath.startsWith("agent-guide:")) {
-          const guideName = guidePath.slice("agent-guide:".length).replace(/[^a-z0-9-_]/gi, "");
-          const guideFile = path.join(__dirname, "agent-guides", guideName + ".md");
-          if (fs.existsSync(guideFile)) {
+          const guideName = guideSafeName(guidePath);
+          const guideFile = guideFilePath(guideName, false);
+          if (guideFile) {
             return "СПРАВОЧНИК АГЕНТА: «" + guideName + "» (прочитай перед работой и следуй ему):\n\n" + fs.readFileSync(guideFile, "utf8");
           }
-          return "Ошибка: справочник «" + guideName + "» не найден. Доступен: vk.";
+          const list = guideIndex().map((g) => g.name).join(", ") || "пусто";
+          return "Ошибка: справочник «" + guideName + "» не найден. Есть: " + list + ". Список в любой момент: agentGuide {}.";
         }
         const p = resolvePath(args.path, settings);
         if (!fs.existsSync(p)) return "Ошибка: файл не найден: " + p;
@@ -2428,7 +2550,19 @@ async function executeTool(name, args, settings) {
         return await browserTools.connect(args);
       }
       case "browserOpen": {
-        return await browserTools.open(args);
+        const opened = await browserTools.open(args);
+        // Есть справочник по этому сайту — говорим сразу, а не после блужданий.
+        if (typeof opened === "string" && !/^Ошибка/.test(opened)) {
+          const g = guideForUrl(args && args.url);
+          if (g) {
+            return (
+              opened +
+              "\n📘 По этому сайту есть справочник агента «" + g.name + "»" + (g.title ? " (" + g.title + ")" : "") +
+              " — прочитай ПЕРЕД действиями: agentGuide { name: \"" + g.name + "\" } (маршруты, подводные камни, селекторы)."
+            );
+          }
+        }
+        return opened;
       }
       case "browserSnapshot": {
         return await browserTools.snapshot(args);
@@ -2438,6 +2572,11 @@ async function executeTool(name, args, settings) {
       }
       case "browserClick": {
         return await browserTools.click(args);
+      }
+      // Несколько действий ОДНОЙ командой (клик → ввод → Enter → проверка):
+      // слабая модель не тратит ходы на каждый шаг и не «застревает».
+      case "browserAct": {
+        return await browserTools.act(args);
       }
       case "browserSelect": {
         return await browserTools.select(args);
@@ -2464,12 +2603,15 @@ async function executeTool(name, args, settings) {
         const vcfg = auxConfig(settings);
         if (args && args.analyze === false) {
           shotOut += "\nДальше: analyzeImage { path: \"" + shot.path + "\" } при необходимости.";
-        } else if (vcfg.enabled && vcfg.visionModel) {
+        } else if (vcfg.visionModel && vcfg.key) {
+          // Зрение включается, как только указана модель и есть ключ (галочка «Зрение»
+          // лишь разрешает авто-пре-пасс присланных картинок). Спрашиваем про кликабельное:
+          // карта DOM врёт на кастомных компонентах, а разбор скриншота — нет.
           try {
             const q =
               args && args.question
                 ? String(args.question)
-                : "Опиши, что видно на странице: заголовки, кнопки, поля, диалоговые окна и их текст. Это описание пойдёт программисту, который работает со страницей без картинки.";
+                : "Разбери скриншот страницы как инструкцию к действию, коротко и по делу: 1) что это за экран (сайт, диалог, шаг); 2) какие элементы КЛИКАБЕЛЬНЫ (кнопки, ссылки, вкладки, чекбоксы) — их точные подписи; 3) какие поля ввода и что в них; 4) что мешает (баннеры, согласия, перекрытия) и что нажать, чтобы их убрать; 5) что находится ЗА пределами экрана (видно начало списка/край элемента). Без воды — это уйдёт программисту, который видит только текст.";
             const desc = await describeImageRemote(vcfg, shotData, q, vcfg.visionModel);
             shotOut += "\n\nЧто видно (vision-модель):\n" + (desc || "(пусто)");
           } catch (e) {
@@ -2479,7 +2621,8 @@ async function executeTool(name, args, settings) {
           }
         } else {
           shotOut +=
-            "\n\nЗрение не настроено — работай по DOM: browserSnapshot, browserDOM, browserEval, browserOverlays.";
+            "\n\nЗрение не настроено — работай по DOM: browserSnapshot, browserDOM, browserEval, browserOverlays." +
+            "\nЧтобы я видел страницу: Настройки → вкладка «Зрение» → включи и укажи модель (например gemini-2.5-flash), затем повтори скриншот.";
         }
         return shotOut;
       }
@@ -2494,6 +2637,26 @@ async function executeTool(name, args, settings) {
       }
       case "browserWait": {
         return await browserTools.wait(args);
+      }
+      // Прокрутка (страница, внутренние контейнеры, «до элемента») и наведение мыши:
+      // без них половина элементов остаётся за экраном, а меню по hover не раскрыть.
+      case "browserScroll": {
+        return await browserTools.scroll(args);
+      }
+      case "browserHover": {
+        return await browserTools.hover(args);
+      }
+      // Что страница реально отправила и что вернул сервер (XHR/fetch).
+      case "browserNetwork": {
+        return await browserTools.network(args);
+      }
+      // Дождаться, когда DOM перестанет меняться и сеть опустеет (Angular-перерисовки).
+      case "waitForIdle": {
+        return await browserTools.waitForIdle(args);
+      }
+      // Справочники по сайтам: встроенные (src/agent-guides) + выученные агентом.
+      case "agentGuide": {
+        return agentGuideCall(args);
       }
       case "browserClose": {
         return await browserTools.close(args);

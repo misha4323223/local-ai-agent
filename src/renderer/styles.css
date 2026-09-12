@@ -1522,8 +1522,12 @@ body::before {
     radial-gradient(38% 32% at 72% 82%, rgba(0, 217, 255, 0.1), transparent 65%),
     radial-gradient(24% 22% at 10% 78%, rgba(255, 77, 184, 0.09), transparent 62%);
   filter: blur(6px);
-  animation: nebulaDrift 48s ease-in-out infinite alternate;
-  will-change: transform;
+  /* ВАЖНО (производительность): дрейф этого слоя выключен намеренно.
+     Он лежит ПОД всеми «стеклянными» панелями (backdrop-filter), и пока фон под
+     ними движется, браузер обязан заново размывать каждый такой элемент в КАЖДОМ
+     кадре — даже когда пользователь ничего не делает. На слабой машине это
+     съедало весь кадровый бюджет, и печать в чате начинала «жевать». Статичная
+     туманность выглядит так же, но растеризуется один раз. */
 }
 body::after {
   content: "";
@@ -1752,8 +1756,9 @@ body::after {
   border: 1px solid rgba(130, 170, 255, 0.2);
   border-bottom-left-radius: 6px;
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.035) inset, 0 0 40px rgba(124, 58, 237, 0.06);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
+  /* Без backdrop-filter: фон пузыря непрозрачен на ~93%, размытие за ним всё равно
+     не видно, а стоило дорого — при стриме пузырь перерисовывается на каждом чанке,
+     и блюр растеризовался заново вместе с ним. */
 }
 .bubble.pending::after { box-shadow: 0 0 10px rgba(0, 229, 255, 0.8); }
 
