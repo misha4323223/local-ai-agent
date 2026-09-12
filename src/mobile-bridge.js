@@ -20,6 +20,21 @@ const AUTH_FAIL_WINDOW_MS = 60000;
 const AUTH_LOCK_MS = 5 * 60 * 1000;
 const RENDERER_DIR = path.join(__dirname, "renderer");
 
+// Что мост отдаёт из src/renderer. Раньше список был захардкожен в handleHttp и в нём
+// не было monochrome.css и highlight.js: телефон получал «неоновую» тему вместо
+// монохромной, а подсветка кода молча отключалась.
+const STATIC_FILES = new Set([
+  "index.html",
+  "styles.css",
+  "monochrome.css",
+  "app.js",
+  "agent-core.js",
+  "markdown.js",
+  "highlight.js",
+  "mobile-api.js",
+  "bootstrap.js",
+]);
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -336,7 +351,7 @@ class MobileBridge {
         return;
       }
       const safe = path.basename(p); // только файлы из renderer, без подкаталогов
-      if (p === "/index.html" || p === "/styles.css" || p === "/app.js" || p === "/agent-core.js" || p === "/markdown.js" || p === "/mobile-api.js" || p === "/bootstrap.js") {
+      if (STATIC_FILES.has(safe)) {
         const file = path.join(RENDERER_DIR, safe);
         if (!fs.existsSync(file)) {
           res.writeHead(404);

@@ -2151,6 +2151,10 @@
   // Бюджет контекста (токенов) для истории, без учёта system и результата текущего запроса.
   // Локальные модели (qwen3:4b и др.) имеют 8–32k — даём запас на вывод и tool-результаты.
   function contextBudget(provider, model) {
+    // Ollama: реальное окно узнаётся у сервера (/api/show → modelWindow), а в запрос
+    // уходит нужный num_ctx. Здесь — только потолок на случай, когда сервер молчит:
+    // прежние 14 000 не были ошибкой как потолок, но без реального окна и без num_ctx
+    // агент получал дефолтные 2048 токенов контекста и обрезание на середине задачи.
     if (provider === "ollama") return 14000;
     const m = String(model || "");
     if (/deepseek|qwen/i.test(m)) return 26000;
@@ -3437,11 +3441,19 @@
     const headers = apiHeaders(provider, apiKey, fromBrowser, projectHeader(s));
 
     if (provider === "ollama") {
-      return {
-        url: baseFor(provider, s) + "/api/chat",
-        headers,
-        body: JSON.stringify({ model, messages: messagesForProvider(provider, messages), tools, stream: true }),
+      // num_ctx: без него Ollama берёт дефолт модели (часто 2048) и молча режет запрос,
+      // где только промпт ~6k и схемы инструментов ~6k. keep_alive: дефолтные 5 минут
+      // выгружали модель между раундами (загрузка = секунды на каждом).
+      const body = {
+        model,
+        messages: mergeLeadingSystem(messagesForProvider(provider, messages)),
+        tools,
+        stream: true,
+        keep_alive: OLLAMA_KEEP_ALIVE,
       };
+      const numCtx = ollamaNumCtx(opts && opts.numCtxBudget, opts && opts.modelWindow);
+      if (numCtx > 0) body.options = { num_ctx: numCtx };
+      return { url: baseFor(provider, s) + "/api/chat", headers, body: JSON.stringify(body) };
     }
     const cacheKind = cacheableProvider(provider, baseFor(provider, s), model);
     if (provider === "anthropic") {
@@ -4189,11 +4201,83 @@
     return b >= 26000 ? TOOL_DEFINITIONS : CORE_TOOL_DEFINITIONS;
   }
 
+  // ── Ollama: реальное окно модели и параметры запроса ───────────────────────
+  // Дефолт Ollama — контекст 2048 токенов, а приложение считало бюджет 14 000:
+  // сервер МОЛЧА резал запрос (терялись системный промпт, схемы инструментов и
+  // история), и агент работал «вслепую». Поэтому окно спрашиваем у сервера,
+  // выделяем ровно нужный контекст и держим модель в памяти между раундами.
+  const OLLAMA_KEEP_ALIVE = "30m"; // дефолт Ollama — 5 минут: модель выгружалась между раундами
+  const _ollamaInfoCache = new Map(); // base|model → { ts, window, tools, vision, known }
+  const _OLLAMA_INFO_TTL = 10 * 60 * 1000;
+  async function ollamaModelInfo(s, model) {
+    const name = String(model || "");
+    const base = baseFor("ollama", s);
+    const key = base + "|" + name;
+    const now = Date.now();
+    const hit = _ollamaInfoCache.get(key);
+    if (hit && now - hit.ts <= _OLLAMA_INFO_TTL) return hit;
+    const info = { ts: now, window: 0, tools: false, vision: false, known: false };
+    if (name) {
+      try {
+        const timeout = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined;
+        const res = await fetch(base + "/api/show", {
+          method: "POST",
+          headers: apiHeaders("ollama", apiKeyFor("ollama", s), false, projectHeader(s)),
+          signal: timeout,
+          body: JSON.stringify({ name: name, model: name }),
+        });
+        if (res.ok) {
+          const d = await res.json();
+          // capabilities есть только у новых сборок Ollama: если поля нет, про
+          // инструменты модели мы НИЧЕГО не знаем и молчим (иначе ложное предупреждение).
+          const caps = Array.isArray(d.capabilities) ? d.capabilities.map((c) => String(c).toLowerCase()) : null;
+          if (caps) {
+            info.known = true;
+            info.tools = caps.indexOf("tools") !== -1;
+            info.vision = caps.indexOf("vision") !== -1;
+          }
+          // model_info: "qwen3.context_length" (у старых сборок — "llama.context_length").
+          // Ключ архитектуры важнее: у мультимодальных моделей рядом лежат ключи
+          // подсистем (gemma4.audio.context_length), и максимум по всем подменил бы
+          // окно модели окном энкодера.
+          const mi = d.model_info || {};
+          const arch = String(mi["general.architecture"] || "");
+          let max = arch && Number(mi[arch + ".context_length"]) > 0 ? Number(mi[arch + ".context_length"]) : 0;
+          if (!max) {
+            for (const k of Object.keys(mi)) {
+              if (!/context_length$/i.test(k)) continue;
+              const n = Number(mi[k]);
+              if (n > 0 && n > max) max = n;
+            }
+          }
+          // Modelfile мог задать num_ctx вручную — осознанный потолок автора модели.
+          const mnum = /num_ctx\s+(\d+)/i.exec(String(d.parameters || ""));
+          const defCtx = mnum ? Number(mnum[1]) : 0;
+          info.window = max > 0 ? max : defCtx;
+          info.defaultCtx = defCtx;
+        }
+      } catch {}
+    }
+    _ollamaInfoCache.set(key, info);
+    return info;
+  }
+
+  // Сколько токенов контекста просить у Ollama: ровно столько, сколько нужно запросу
+  // (бюджет + запас на ответ и tool-результаты), но НИКОГДА больше реального окна.
+  // Без бюджета (0) дефолт модели не трогаем: уменьшать окно без причины нельзя.
+  function ollamaNumCtx(budget, window) {
+    const b = Math.round(Number(budget) || 0);
+    if (b <= 0) return 0;
+    const need = b + 4096;
+    const win = Math.round(Number(window) || 0);
+    return win > 0 ? Math.min(need, win) : need;
+  }
   // ── Реальное окно модели (context_length / context_window из GET /models) ──
   const _ctxModelsCache = new Map(); // base → { ts, byModel: Map<model, window> }
   const _CTX_TTL = 10 * 60 * 1000;
   async function modelWindow(s, model) {
     const provider = s && s.provider ? s.provider : "openai";
+    if (provider === "ollama") return (await ollamaModelInfo(s, model)).window || 0;
     if (provider !== "openai" || !model) return 0;
     const base = baseFor(provider, s);
     const now = Date.now();
@@ -4448,6 +4532,8 @@
     ROUTER_MAX_TOKENS,
     PLAN_MODE_TOOL_DEFINITIONS,
     modelWindow,
+    ollamaModelInfo,
+    ollamaNumCtx,
     compactRemote,
     createContextManager,
     // веб (общий для Electron main и preview-сервера)

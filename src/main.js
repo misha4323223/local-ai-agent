@@ -38,6 +38,7 @@ const {
   groupOfTool,
   PLAN_MODE_TOOL_DEFINITIONS,
   modelWindow,
+  ollamaModelInfo,
   // инструменты ОС (парсеры, whitelist)
   parseProcessesCsv,
   registryPathAllowed,
@@ -4436,11 +4437,30 @@ async function runAi(settings, messages, win, opts) {
 
   // Контекст-окно: бюджет = реальное окно модели (если известно) минус резерв на вывод.
   let budget = contextBudget(provider, settings.model);
+  let modelWin = 0; // реальное окно модели (0 — сервер не ответил)
   try {
-    const win = await modelWindow(settings, settings.model);
-    if (win > 0) budget = Math.min(budget, win - 4096);
-    if (budget < 3000) budget = 3000;
+    modelWin = await modelWindow(settings, settings.model);
+    if (modelWin > 0) budget = Math.min(budget, modelWin - 4096);
+    // Нижний предел — 3000 токенов, но НИКОГДА больше реального окна: у модели с
+    // окном 2048 «пол» в 3000 гарантировал переполнение на каждом запросе.
+    budget = Math.max(budget, modelWin > 0 ? Math.min(3000, modelWin) : 3000);
   } catch {}
+  // Локальная модель без поддержки инструментов не сможет позвать ни один инструмент:
+  // агент молча «разговаривал бы» и ничего не делал. Говорим об этом заранее и честно.
+  if (provider === "ollama") {
+    try {
+      const oi = await ollamaModelInfo(settings, settings.model);
+      if (oi.known && !oi.tools) {
+        termEmit({
+          type: "metrics",
+          text:
+            "⚠ Модель «" + settings.model + "» не умеет вызывать инструменты (нет capability «tools»): " +
+            "она сможет только отвечать текстом, а не работать с файлами и git. " +
+            "Возьми модель с поддержкой инструментов (например qwen3, llama3.1, mistral-nemo).",
+        });
+      }
+    } catch {}
+  }
   let contextRetried = false; // при переполнении контекста пробуем ещё раз с меньшим бюджетом
   let reportRetried = false; // пустой финальный текст — один раз просим итоговый отчёт
   // ── Роутер инструментов ──────────────────────────────────────────────────
@@ -4698,6 +4718,10 @@ async function runAi(settings, messages, win, opts) {
       // динамический «паспорт проекта» не обнулял кэш на каждом витке.
       staticSystem: SYSTEM_PROMPT,
       includeUsage: includeUsage,
+      // Ollama: сколько контекста выделить (num_ctx) — считает agent-core из бюджета
+      // и реального окна модели, чтобы сервер не резал запрос молча.
+      numCtxBudget: budget,
+      modelWindow: modelWin,
     });
     let res;
     try {

@@ -1999,6 +1999,57 @@ async function testMobileBridge() {
     assert.ok(conn.authed, "не авторизовался правильным PIN");
     assert.strictEqual(b.authFailCount, 0, "счётчик не сброшен после успеха");
   });
+
+  await test("mobile-bridge: отдаёт monochrome.css и highlight.js", async () => {
+    const b = new MobileBridge({ handlerMap: new Map() });
+    b.port = await freePort();
+    b.pin = "123456";
+    b.start();
+    try {
+      const css = await get(b.port, "/monochrome.css");
+      assert.strictEqual(css.status, 200, "monochrome.css не отдаётся (" + css.status + ")");
+      assert.ok(/backdrop-filter/.test(css.body), "отдан не монохромный слой");
+      const hl = await get(b.port, "/highlight.js");
+      assert.strictEqual(hl.status, 200, "highlight.js не отдаётся (" + hl.status + ")");
+      assert.ok(hl.body.length > 100, "highlight.js пустой");
+      const gate = await get(b.port, "/mobile-api.js");
+      assert.strictEqual(gate.status, 200, "mobile-api.js перестал отдаваться");
+      const escaped = await get(b.port, "/../package.json");
+      assert.strictEqual(escaped.status, 404, "мост отдал файл вне renderer");
+    } finally {
+      b.stop();
+    }
+  });
+}
+
+// ── 4c. mobile-api: страница входа с телефона ───────────────────────────────
+async function testMobileGate() {
+  const src = fs.readFileSync(path.join(ROOT, "src", "renderer", "mobile-api.js"), "utf8");
+
+  await test("мобильный вход: карточка не уезжает под клавиатуру", () => {
+    assert.ok(/visualViewport/.test(src), "высота не привязана к видимой области");
+    assert.ok(/gateEl\.style\.height\s*=/.test(src), "высота оверлея не выставляется");
+    assert.ok(/mg-wrap\{display:flex;min-height:100%/.test(src), "нет скроллируемого контейнера");
+    assert.ok(/mg-card\{margin:auto;/.test(src), "карточка не центрируется безопасно");
+    assert.ok(/overflow:auto/.test(src) && /-webkit-overflow-scrolling:touch/.test(src), "нет прокрутки оверлея");
+    assert.ok(/env\(safe-area-inset-bottom\)/.test(src), "нет отступа под системные панели");
+  });
+
+  await test("мобильный вход: PIN уходит сам после шестой цифры", () => {
+    assert.ok(/digits\.length === 6/.test(src), "нет автоподключения после шести цифр");
+    assert.ok(/replace\(\/\\D\+\/g, ""\)/.test(src), "PIN не чистится от нецифр");
+    assert.ok(/enterkeyhint="go"/.test(src), "на клавиатуре нет кнопки «Готово»");
+    assert.ok(/inputmode="numeric"/.test(src), "нет цифровой клавиатуры");
+  });
+
+  await test("мобильный вход: понятные состояния и повтор", () => {
+    assert.ok(/function resetPinField/.test(src), "после ошибки поле не сбрасывается");
+    assert.ok(/Вход заблокирован на 5 минут/.test(src), "нет сообщения о блокировке");
+    assert.ok(/mobile-gate-retry/.test(src), "нет кнопки переподключения");
+    assert.ok(/btn\.disabled = gateBusy/.test(src), "кнопка не блокируется во время проверки");
+    assert.ok(/touch-action:manipulation/.test(src), "кнопка не помечена как тач-цель");
+    assert.ok(/if \(gateBusy\) return/.test(src), "повторная отправка PIN не защищена");
+  });
 }
 
 // ── 5. server.js (API-защита) ───────────────────────────────────────────────
@@ -3654,6 +3705,9 @@ async function testPlanPanel() {
     document: { createElement: mkEl },
     getActiveChat: () => activeChat,
     streaming: false,
+    session: null,
+    // runSegments живёт выше блока плана — в игрушечной среде отдаём его сами.
+    runSegments: (chat, aMsg) => [aMsg].filter(Boolean),
     sendMessage: () => {},
     autoResize: () => {},
     persistChatsSoon: () => {},
@@ -3664,7 +3718,7 @@ async function testPlanPanel() {
   const mod = new Function(
     ...Object.keys(deps),
     planSrc +
-      "\nreturn { planProgress, planArchive, planFromModel, planFromText, planTextAdvance, planTextFinish, planRoundStarted, planLinesFromText, planToolOutcome, planRotate, planPending, renderPlanPanel, PLAN_ARCHIVE_LIMIT };"
+      "\nreturn { planProgress, planArchive, planFromModel, planFromText, planTextAdvance, planTextFinish, planRoundStarted, planLinesFromText, planToolOutcome, planRotate, planPending, renderPlanPanel, runTextOf, tryPlanFromRunText, PLAN_ARCHIVE_LIMIT };"
   )(...Object.values(deps));
 
   await test("план: инструмент todoWrite есть в ядре, с алиасами и правилом промпта", () => {
@@ -3970,11 +4024,96 @@ async function testPlanPanel() {
   });
 
   await test("план: текст ответа связан с панелью (chunk → раунд, tool_start, done)", () => {
-    assert.ok(/if \(planFromText\(chat, runTextOf\(chat, aMsg\)\)\)/.test(appSrc), "интерфейс не разбирает план, написанный текстом");
-    assert.ok(/planRoundStarted\(chat, seg\.id\);/.test(appSrc), "новый раунд ответа не двигает галочки текстового плана");
+    assert.ok(/if \(planFromText\(chat, runTextOf\(chat, aMsg\)\)\)/.test(appSrc), "интерфейс не разбирает план, написанный текстом");    assert.ok(/planRoundStarted\(chat, seg\.id\);/.test(appSrc), "новый раунд ответа не двигает галочки текстового плана");
     assert.ok(/if \(planTextFinish\(chat\)\)/.test(appSrc), "финиш запуска не закрывает шаг текстового плана");
     // Веб-версия: в План-режиме список инструментов больше не пуст — todoWrite доходит до модели.
     assert.ok(/tools: planMode \? AgentCore\.PLAN_MODE_TOOL_DEFINITIONS : AgentCore\.TOOL_DEFINITIONS,/.test(appSrc), "в веб-версии План-режим без todoWrite");
+  });
+
+  await test("план: план из размышлений — «План уже составлен. Сейчас нужно:»", () => {
+    // Ровно тот случай, из-за которого панель оставалась пустой: модель рассуждает и
+    // перечисляет шаги в РАЗМЫШЛЕНИЯХ, а в ответе плана нет вовсе.
+    const chat = { messages: [] };
+    const thinks = [
+      "Продолжаю. Нужно запустить проект. По анализу: это Express + React + Vite + Drizzle ORM,",
+      "PostgreSQL, но в облаке — Cloud Function + YDB. Локально сервер требует DATABASE_URL.",
+      "",
+      "План уже составлен. Сейчас нужно:",
+      "1. Проверить .env, package.json, как сервер стартует",
+      "2. Решить вопрос с БД — сервер рассчитан на PostgreSQL + Drizzle",
+      "",
+      "Но подождите — может, локальный сервер тоже может работать с YDB?",
+    ].join("\n");
+    assert.strictEqual(mod.planFromText(chat, thinks), true, "план из размышлений не разобран");
+    assert.strictEqual(chat.plan.source, "text");
+    assert.strictEqual(chat.plan.items.length, 2, "пункты потерялись: " + JSON.stringify(chat.plan.items));
+    assert.ok(chat.plan.items[0].text.indexOf("Проверить .env") !== -1, "первый пункт неверный: " + chat.plan.items[0].text);
+    assert.ok(chat.plan.items[1].text.indexOf("вопрос с БД") !== -1, "второй пункт неверный: " + chat.plan.items[1].text);
+    assert.ok(JSON.stringify(chat.plan.items).indexOf("подождите") === -1, "проза после плана попала в пункты");
+    // Размышления — часть текста запуска, а не отдельный канал: иначе разбор их не увидит.
+    const seg = { id: "s1", role: "assistant", content: "Смотрю файлы.", thinking: "Сначала план." };
+    const one = { messages: [seg] };
+    assert.ok(mod.runTextOf(one, seg).indexOf("Сначала план.") !== -1, "размышления не попали в текст запуска");
+    assert.ok(mod.runTextOf(one, seg).indexOf("Смотрю файлы.") !== -1, "ответ не попал в текст запуска");
+    // Гейт по строкам: на однострочном куске стрима разбор не запускается вовсе.
+    const short = { messages: [{ id: "s2", role: "assistant", content: "думаю" }] };
+    assert.strictEqual(mod.tryPlanFromRunText(short, short.messages[0]), false, "разбор пошёл по однострочному куску");
+  });
+
+  await test("план: дописывание пунктов на ходу не засоряет историю и не сбрасывает галочки", () => {
+    const chat = { messages: [] };
+    assert.strictEqual(mod.planFromText(chat, "План:\n1. Собрать данные\n2. Починить"), true);
+    assert.strictEqual(mod.planTextAdvance(chat, true), true);
+    assert.strictEqual(mod.planTextAdvance(chat, true), true);
+    assert.strictEqual(chat.plan.items[0].status, "done");
+    assert.strictEqual(chat.plan.items[1].status, "in_progress");
+    assert.ok(!chat.planHistory || !chat.planHistory.length, "план ушёл в историю на первом же куске стрима");
+    // Стрим напечатал третий пункт — это тот же план.
+    assert.strictEqual(mod.planFromText(chat, "План:\n1. Собрать данные\n2. Починить\n3. Проверить"), true, "дописанный пункт не подхвачен");
+    assert.strictEqual(chat.plan.items.length, 3, "пункт не добавился");
+    assert.strictEqual(chat.plan.items[0].status, "done", "галочка готового пункта сброшена");
+    assert.strictEqual(chat.plan.items[1].status, "in_progress", "статус текущего пункта сброшен");
+    assert.ok(!chat.planHistory || !chat.planHistory.length, "тот же план ушёл в историю");
+    // А вот ДРУГОЙ план — это новый план, предыдущий уходит в историю.
+    assert.strictEqual(mod.planFromText(chat, "План:\n1. Совсем другое\n2. И это"), true);
+    assert.strictEqual(chat.planHistory.length, 1, "новый план не сохранил предыдущий");
+  });
+
+  await test("панель: в свёрнутой шапке видно, какой шаг идёт сейчас", () => {
+    activeChat = { id: "c7", messages: [], plan: { title: "", source: "text", items: [
+      { id: "t1", text: "Разобрать логи", status: "done", note: "" },
+      { id: "t2", text: "Починить хост", status: "in_progress", note: "" },
+      { id: "t3", text: "Прогнать тесты", status: "pending", note: "" },
+    ] } };
+    mod.renderPlanPanel();
+    // Панель могла остаться свёрнутой от предыдущих проверок — доводим состояние честно.
+    if (hosts["plan-panel"].children[0].classList.contains("expanded")) {
+      hosts["plan-panel"].children[0].children[0].onclick({ stopPropagation() {} });
+    }
+    const head = hosts["plan-panel"].children[0].children[0];
+    assert.ok(nodeText(head).indexOf("Починить хост") !== -1, "в свёрнутой шапке не видно текущий шаг: " + nodeText(head));
+    assert.ok(nodeText(head).indexOf("1/3") !== -1, "счётчик пропал");
+  });
+
+  await test("план: с первым инструментом текущий шаг сразу «в работе»", () => {
+    // Иначе до конца первого раунда все пункты висели «ожидает» — и не было видно,
+    // какой этап агент выполняет прямо сейчас.
+    assert.ok(/chat\.plan\.source === "text"/.test(appSrc), "нет отметки шага на старте работы");
+    assert.ok(/!chat\.plan\.items\.some\(\(i\) => i\.status === "in_progress"\)/.test(appSrc), "отметка не проверяет, есть ли уже текущий шаг");
+    assert.ok(/if \(planTextAdvance\(chat, true\)\) renderPlanPanel\(\);/.test(appSrc), "шаг не перерисовывается на старте работы");
+    // И это не мешает основному движению по раундам.
+    const chat = { messages: [], plan: { source: "text", items: [
+      { text: "A", status: "pending" }, { text: "B", status: "pending" },
+    ] } };
+    assert.strictEqual(mod.planTextAdvance(chat, true), true);
+    assert.strictEqual(chat.plan.items[0].status, "in_progress");
+    assert.strictEqual(chat.plan.items[1].status, "pending");
+  });
+  await test("план: разбор идёт по стриму (ответ и размышления), заголовок ловится в конце фразы", () => {
+    assert.ok(/case "thinking":[\s\S]{0,700}tryPlanFromRunText\(chat, aMsg\)/.test(appSrc), "размышления не участвуют в разборе плана");
+    assert.ok(/case "chunk":[\s\S]{0,400}tryPlanFromRunText\(chat, aMsg\)/.test(appSrc), "текст ответа не участвует в разборе плана");
+    assert.ok(/PLAN_TAIL_RE/.test(appSrc), "нет распознавания заголовка в конце фразы");
+    assert.ok(/\.plan-active \{/.test(cssSrc), "нет стиля .plan-active");
   });
 
   await test("План-режим: модель получает ровно todoWrite, остальные вызовы не выполняются", () => {
@@ -5774,6 +5913,111 @@ async function testToolRouter() {
   });
 }
 
+// ── Ollama: реальное окно модели, num_ctx и удержание модели в памяти ────────
+async function testOllamaWindow() {
+  const core = require(path.join(ROOT, "src", "renderer", "agent-core.js"));
+  const mainSrc = fs.readFileSync(path.join(ROOT, "src", "main.js"), "utf8");
+  const realFetch = global.fetch;
+  const calls = [];
+  const mkRes = (payload) => ({ ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) });
+
+  try {
+    global.fetch = async (url, opts) => {
+      const u = String(url);
+      calls.push({ url: u, method: (opts && opts.method) || "GET" });
+      if (!/\/api\/show$/.test(u)) throw new Error("неожиданный запрос: " + u);
+      const sent = JSON.parse((opts && opts.body) || "{}");
+      if (sent.name === "legacy:7b") {
+        // Старая сборка Ollama: capabilities и parameters не отдаёт вовсе,
+        // ключа архитектуры тоже нет — окно ищем просто по суффиксу context_length.
+        return mkRes({ model_info: { "llama.context_length": 4096 } });
+      }
+      if (sent.name === "multimodal:8b") {
+        // Мультимодальная модель: рядом лежит окно аудио-энкодера, оно НЕ должно
+        // подменять окно самой модели.
+        return mkRes({
+          model_info: {
+            "general.architecture": "gemma4",
+            "gemma4.context_length": 131072,
+            "gemma4.audio.context_length": 512,
+          },
+          capabilities: ["completion", "vision"],
+        });
+      }
+      return mkRes({
+        model_info: { "general.architecture": "qwen3", "qwen3.context_length": 32768 },
+        parameters: 'stop "<|im_end|>"\nnum_ctx 8192',
+        capabilities: ["completion", "tools"],
+      });
+    };
+    const settings = { provider: "ollama", ollamaUrl: "http://localhost:11434", model: "qwen3:4b" };
+
+    await test("ollama: окно модели берётся из POST /api/show и кэшируется", async () => {
+      assert.strictEqual(await core.modelWindow(settings, "qwen3:4b"), 32768, "окно модели не прочитано");
+      assert.strictEqual(await core.modelWindow(settings, "qwen3:4b"), 32768, "повторный вызов сломался");
+      const shows = calls.filter((c) => /\/api\/show$/.test(c.url));
+      assert.strictEqual(shows.length, 1, "окно спрашивается заново на каждый раунд: " + shows.length);
+      assert.strictEqual(shows[0].method, "POST", "/api/show вызван не методом POST");
+      const info = await core.ollamaModelInfo(settings, "qwen3:4b");
+      assert.strictEqual(info.tools, true, "возможность tools не прочитана");
+      assert.strictEqual(info.vision, false, "приписана лишняя возможность vision");
+      assert.strictEqual(info.window, 32768, "окно перебито значением num_ctx из Modelfile");
+      // Сервер без capabilities: про инструменты мы НЕ знаем — ложное предупреждение недопустимо.
+      const legacy = await core.ollamaModelInfo(settings, "legacy:7b");
+      assert.strictEqual(legacy.window, 4096, "окно старой сборки не прочитано");
+      assert.strictEqual(legacy.known, false, "отсутствие capabilities принято за «инструментов нет»");
+      // Окно модели не подменяется окном подсистемы (аудио/энкодер).
+      const mm = await core.ollamaModelInfo(settings, "multimodal:8b");
+      assert.strictEqual(mm.window, 131072, "окно модели подменено окном подсистемы: " + mm.window);
+      assert.strictEqual(mm.vision, true, "возможность vision не прочитана");
+    });
+
+    await test("ollama: num_ctx = нужный бюджет, но не больше окна модели", () => {
+      assert.strictEqual(core.ollamaNumCtx(14000, 32768), 18096, "num_ctx не покрывает бюджет с запасом");
+      assert.strictEqual(core.ollamaNumCtx(14000, 0), 18096, "без окна num_ctx не посчитан");
+      assert.strictEqual(core.ollamaNumCtx(40000, 8192), 8192, "num_ctx превысил окно модели");
+      assert.strictEqual(core.ollamaNumCtx(0, 8192), 0, "без бюджета затёрт дефолт модели");
+      assert.strictEqual(core.ollamaNumCtx(null, 0), 0, "пустой бюджет дал num_ctx");
+    });
+
+    await test("ollama: запрос несёт num_ctx и keep_alive, ведущий system склеен", () => {
+      const prompt = core.SYSTEM_PROMPT;
+      const req = core.buildChatRequest(settings, {
+        model: "qwen3:4b",
+        messages: [
+          { role: "system", content: prompt },
+          { role: "system", content: '=== СПРАВОЧНИК АГЕНТА: "browser" ===\nБыстрый путь' },
+          { role: "user", content: "привет" },
+        ],
+        tools: [],
+        numCtxBudget: 14000,
+        modelWindow: 32768,
+      });
+      assert.ok(/\/api\/chat$/.test(req.url), "не нативный путь Ollama: " + req.url);
+      const body = JSON.parse(req.body);
+      assert.deepStrictEqual(body.options, { num_ctx: 18096 }, "num_ctx не ушёл в запрос");
+      assert.ok(body.keep_alive, "keep_alive не ушёл: модель выгружалась бы между раундами");
+      const sysMsgs = body.messages.filter((m) => m.role === "system");
+      assert.strictEqual(sysMsgs.length, 1, "в Ollama ушло несколько system: " + sysMsgs.length);
+      assert.ok(sysMsgs[0].content.indexOf("СПРАВОЧНИК АГЕНТА") !== -1, "справочник потерялся");
+      const plain = JSON.parse(
+        core.buildChatRequest(settings, { model: "qwen3:4b", messages: [{ role: "user", content: "привет" }], tools: [] }).body
+      );
+      assert.strictEqual(plain.options, undefined, "num_ctx ушёл без бюджета — дефолт модели затёрт");
+    });
+
+    await test("ollama: бюджет не может оказаться больше реального окна модели", () => {
+      assert.ok(/let modelWin = 0;/.test(mainSrc), "окно модели не сохраняется для запроса");
+      assert.ok(/Math\.min\(3000, modelWin\)/.test(mainSrc), "нижний предел бюджета не ограничен окном");
+      assert.ok(/numCtxBudget: budget,/.test(mainSrc), "бюджет не передан в buildChatRequest");
+      assert.ok(/modelWindow: modelWin,/.test(mainSrc), "окно не передано в buildChatRequest");
+      assert.ok(/oi\.known && !oi\.tools/.test(mainSrc), "нет проверки поддержки инструментов у модели");
+    });
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
 (async () => {
   console.log("Smoke-тесты: " + path.basename(__filename));
   await testAgentCore();
@@ -5790,6 +6034,7 @@ async function testToolRouter() {
   await testBrowserOverlays();
   await testHighlight();
   await testMobileBridge();
+  await testMobileGate();
   await testChatPersistence();
   await testSessionExtras();
   await testVault();
@@ -5809,6 +6054,7 @@ async function testToolRouter() {
   await testPowerShellSession();
   await testPromptCacheAndUsage();
   await testToolRouter();
+  await testOllamaWindow();
   console.log("\nИтог: " + passed + " прошло, " + failed + " упало");
   process.exit(failed ? 1 : 0);
 })();

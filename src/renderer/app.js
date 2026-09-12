@@ -626,6 +626,9 @@
   // «Шаги», «Todo») со списком пунктов или блок строк-чекбоксов (✅/⬜/🔄/⚠️).
   const PLAN_TEXT_MAX = 7;
   const PLAN_HEAD_RE = /^\s*(?:[>#*_]{0,4}\s*)?(?:\*\*|__)?\s*(план(?:\s+(?:работ|действий|выполнения|задач))?|шаги|порядок\s+действий|todo|to-do)\s*:?\s*(?:\*\*|__)?\s*$/i;
+  // Заголовок в КОНЦЕ фразы, а не отдельной строкой: «План уже составлен. Сейчас нужно:», «Дальше по шагам:».
+  // Ключевое слово обязательно: иначе любой абзац «что нужно:» со списком выглядел бы планом.
+  const PLAN_TAIL_RE = /(?:план\w*|шаг\w*|этап\w*|дальше|теперь|нужно|надо|осталось|порядок\s+действий)[^:\n]{0,60}:\s*$/i;
   const PLAN_ITEM_RE = /^\s*(?:[-*•–—]\s+\S|\[[ xX]\]\s*\S|\d{1,2}[.)]\s+\S|[✅☑✔⬜☐🔄⚠️⬛]\s*\S)/;
   const PLAN_TICK_RE = /^\s*[✅☑✔⬜☐🔄⚠️⬛]\s*\S/;
 
@@ -634,7 +637,7 @@
   function planLinesFromText(text) {
     const lines = String(text || "").split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
-      if (!PLAN_HEAD_RE.test(lines[i])) continue;
+      if (!PLAN_HEAD_RE.test(lines[i]) && !PLAN_TAIL_RE.test(lines[i])) continue;
       const out = [];
       for (let j = i + 1; j < lines.length && out.length < PLAN_TEXT_MAX; j++) {
         const line = lines[j].replace(/\s+$/, "");
@@ -676,8 +679,18 @@
     const items = normalizePlanTasks(lines);
     if (items.length < 2) return false; // один пункт — это фраза, а не план
     if (chat.plan && chat.plan.source === "text") {
-      const same = chat.plan.items.map((i) => i.text).join("|") === items.map((i) => i.text).join("|");
+      const old = chat.plan.items;
+      const same = old.map((i) => i.text).join("|") === items.map((i) => i.text).join("|");
       if (same) return false; // тот же план — статусы не сбрасываем
+      // План печатается прямо сейчас: старые пункты — начало нового списка. Значит это ТОТ ЖЕ
+      // план, просто стрим дошёл до следующих строк: в историю его не убираем, а статусы уже
+      // пройденных пунктов сохраняем (иначе галочки прыгали бы назад на каждом куске).
+      const grows = old.length <= items.length && old.every((it, i) => it.text === items[i].text);
+      if (grows) {
+        for (let i = 0; i < old.length; i++) items[i].status = old[i].status;
+        chat.plan = { title: planTitleFromText(text), source: "text", items, updatedAt: Date.now() };
+        return true;
+      }
       planArchive(chat, chat.plan);
     }
     chat.plan = { title: planTitleFromText(text), source: "text", items, updatedAt: Date.now() };
@@ -728,9 +741,32 @@
     return true;
   }
 
-  // Весь текст текущего запуска (все сегменты ответа) — источник для разбора плана.
+  // Весь текст текущего запуска — ответ И размышления: источник для разбора плана.
+  // Размышления обязательны: слабые и локальные модели пишут план именно там
+  // («План уже составлен. Сейчас нужно: 1. … 2. …»), а в самом ответе плана нет вовсе —
+  // поэтому панель и оставалась пустой, хотя модель «составила план».
   function runTextOf(chat, aMsg) {
-    return runSegments(chat, aMsg).map((s) => String((s && s.content) || "")).join("\n");
+    const parts = [];
+    for (const s of runSegments(chat, aMsg)) {
+      if (!s) continue;
+      if (s.thinking) parts.push(String(s.thinking));
+      if (s.content) parts.push(String(s.content));
+    }
+    return parts.join("\n");
+  }
+
+  // Разбор плана из текста запуска. Во время стрима вызывается на каждом куске, поэтому
+  // сначала дешёвый гейт: без нескольких строк плана быть не может — регекспы не гоняем.
+  function tryPlanFromRunText(chat, aMsg) {
+    const text = runTextOf(chat, aMsg);
+    if ((text.match(/\n/g) || []).length < 2) return false;
+    if (planFromText(chat, runTextOf(chat, aMsg))) {
+      planCollapsed = false; // план только что появился — показываем его развёрнутым
+      renderPlanPanel();
+      persistChatsSoon();
+      return true;
+    }
+    return false;
   }
 
   // Результат инструмента. Статусы пунктов ведёт модель, но если её текущий шаг
@@ -801,6 +837,14 @@
     count.title = "Готово " + pr.done + " из " + pr.total + (pr.failed ? ", не удалось: " + pr.failed : "");
     head.appendChild(dot);
     head.appendChild(title);
+    // Свёрнутая панель: видно, какой шаг выполняется прямо сейчас (разворачивать не нужно).
+    if (planCollapsed && pr.active && !pr.finished) {
+      const act = document.createElement("span");
+      act.className = "plan-active";
+      act.textContent = PLAN_ICON.in_progress + " " + pr.active;
+      act.title = "Сейчас в работе: " + pr.active;
+      head.appendChild(act);
+    }
     head.appendChild(count);
     // Кнопка «выполнить план» — только когда план составлен моделью и ждёт запуска
     // (в режиме плана инструменты не выполнялись).
@@ -1723,6 +1767,8 @@
           persistChatsSoon();
           queueBubbleRender(chat, seg);
         }
+        // План, написанный в ответе, показываем сразу, как только он сложился.
+        tryPlanFromRunText(chat, aMsg);
         break;
       }
       case "thinking": {
@@ -1736,6 +1782,8 @@
             scrollBottomSoon();
           }
         }
+        // План в размышлениях: локальные модели формулируют его именно там.
+        tryPlanFromRunText(chat, aMsg);
         break;
       }
       case "plan": {
@@ -1755,11 +1803,19 @@
         if (toolEl && toolEl.classList) toolEl.classList.add("in-work");
         work.body.appendChild(toolEl);
         planAdd(ev);
-        // Модель могла написать план текстом вместо todoWrite — разбираем его, чтобы
-        // панель-чеклист всё равно появилась.
-        if (planFromText(chat, runTextOf(chat, aMsg))) {
-          planCollapsed = false;
-          renderPlanPanel();
+        // Модель могла написать план текстом (или в размышлениях) вместо todoWrite —
+        // разбираем его, чтобы панель-чеклист всё равно появилась.
+        tryPlanFromRunText(chat, aMsg);
+        // Работа пошла: текущий пункт текстового плана сразу становится «в работе»,
+        // а не висит «ожидает» до конца раунда (иначе не видно, какой этап выполняется).
+        if (
+          chat &&
+          chat.plan &&
+          chat.plan.source === "text" &&
+          Array.isArray(chat.plan.items) &&
+          !chat.plan.items.some((i) => i.status === "in_progress")
+        ) {
+          if (planTextAdvance(chat, true)) renderPlanPanel();
         }
         scrollBottom();
         persistChatsSoon();
@@ -1890,12 +1946,9 @@
         break;
       }
       case "done":
-        // План, написанный моделью текстом, разбираем и на финише, а его текущий пункт
-        // закрываем: запуск завершён.
-        if (planFromText(chat, runTextOf(chat, aMsg))) {
-          planCollapsed = false;
-          renderPlanPanel();
-        }
+        // План, написанный моделью текстом (или в размышлениях), разбираем и на финише,
+        // а его текущий пункт закрываем: запуск завершён.
+        tryPlanFromRunText(chat, aMsg);
         if (planTextFinish(chat)) {
           renderPlanPanel();
           persistChatsSoon();
